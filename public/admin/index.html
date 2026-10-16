@@ -295,6 +295,29 @@ async function runProviderTest(providerId) {
     return toast('Test failed: ' + e.message, true);
   }
 }
+/* Persona editor. Agents are file-defaults, so the individual behaviour lives
+   entirely in the persona row bound to the agent id; this is the only place a
+   persona prompt can be changed. */
+function openPersonaModal(p, agentId) {
+  const f = (id, label, value, extra) => '<label class="f">' + label + '<input id="' + id + '" value="' + esc(value ?? '') + '"' + (extra || '') + '></label>';
+  openModal(
+    '<div class="modal-h"><h3>Persona · ' + esc((p && p.name) || agentId) + ' <span class="mono muted">' + esc(agentId) + '</span></h3><button class="x" data-act="modal-close" title="Close">×</button></div>' +
+    '<div class="modal-b">' +
+      '<div class="row" style="gap:12px;align-items:flex-end">' +
+        f('pe-name', 'Name', p && p.name, ' style="min-width:200px"') +
+        f('pe-role', 'Role', p && p.role, ' style="min-width:160px"') +
+        f('pe-exp', 'Expertise', p && p.expertise, ' style="min-width:200px"') +
+        f('pe-prio', 'Priority', p ? p.priority : 99, ' type="number" min="1" max="99" style="width:90px"') +
+      '</div>' +
+      '<label class="f">Persona prompt<textarea id="pe-text" style="height:170px;background:var(--input);border:1px solid var(--inputline);border-radius:9px;padding:10px 12px;color:var(--text);font:inherit;line-height:1.5;resize:vertical">' + esc((p && p.persona) || '') + '</textarea></label>' +
+      '<p class="muted" style="font-size:11.5px;margin:0">This text is injected as the agent system prompt on every run for <span class="mono">' + esc(agentId) + '</span>.</p>' +
+    '</div>' +
+    '<div class="modal-f"><span id="pe-status" class="muted" style="margin-right:auto;font-size:12px">' + (p ? 'loaded' : 'new persona') + '</span>' +
+      '<button class="btn" data-act="modal-close">Cancel</button>' +
+      '<button class="btn primary" data-act="persona-save" data-id="' + esc(agentId) + '">Save persona</button>' +
+    '</div>'
+  );
+}
 
 /* --------------------------------------------------------------- nav/router */
 const ICON = p => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + p + '</svg>';
@@ -521,28 +544,66 @@ VIEWS['masking-models'] = { title: 'Masking Models', sub: 'Public routing aliase
 } };
 
 /* agents */
-VIEWS.agents = { title: 'Agents', sub: 'Agent registry and runtime audit', render: async (v) => {
-  const [{ components }, audit, boundaries] = await Promise.all([
+VIEWS.agents = { title: 'Agents', sub: 'Registry, personas, run metrics and runtime audit', actions: '<button class="btn danger" data-act="metrics-reset">Reset metrics</button>', render: async (v) => {
+  const [{ components }, { personas }, { metrics }, audit] = await Promise.all([
     api('/v1/admin/registry/agents'),
-    api('/v1/admin/registry/agents/runtime-audit').catch(() => null),
-    api('/v1/admin/registry/agents/tool-boundaries').catch(() => null)
+    api('/v1/admin/personas'),
+    api('/v1/admin/agents/metrics'),
+    api('/v1/admin/registry/agents/runtime-audit').catch(() => null)
   ]);
-  const rows = components.map(a =>
-    '<tr><td><strong>' + esc(a.name || a.id) + '</strong><div class="sub mono">' + esc(a.id) + '</div></td>' +
-    '<td>' + esc((a.capabilities || []).join(', ')) + '</td>' +
-    '<td>' + statusTag(a.status) + (a.requiresConsent ? ' <span class="tag warn">consent</span>' : '') + '</td>' +
-    '<td class="mono">' + esc(a.source || '') + '</td>' +
-    '<td><button class="btn tiny danger" data-act="agent-disable" data-id="' + esc(a.id) + '">Disable</button></td></tr>').join('');
-  v.innerHTML = panel('Agents', components.length + ' registered', table(['Agent', 'Capabilities', 'Status', 'Source', ''], rows, 'No agents.')) +
-    '<div class="grid g2" style="margin-top:14px">' +
-      panel('Runtime audit', '', '<div class="panel-b">' + (audit ? kv({ ready: audit.ready, agents: audit.agents, unboundPersonas: audit.unboundPersonas, issues: Array.isArray(audit.issues) ? audit.issues.length : 0 }) : '<span class="muted">unavailable</span>') + '</div>') +
-      panel('Tool boundaries', '', '<div class="panel-b">' + (boundaries && boundaries.boundaries ? jsonBlock(boundaries.boundaries) : '<span class="muted">none</span>') + '</div>') +
+  const byId = id => (components.find(a => a.id === id) || {});
+  const metricOf = id => metrics.find(m => m.agentId === id);
+  const personaOf = id => personas.find(p => p.id === id);
+  const auditOf = id => ((audit && audit.agents) || []).find(a => a.id === id);
+
+  // Every agent should have an individual persona; flag the ones that do not so
+  // a "file-default" agent is never silently running on a fallback prompt.
+  const orphanMetrics = metrics.filter(m => !components.some(a => a.id === m.agentId));
+
+  const rows = components.map(a => {
+    const p = personaOf(a.id);
+    const m = metricOf(a.id);
+    const au = auditOf(a.id);
+    const runs = m ? m.runs : 0;
+    const fail = m ? m.failure : 0;
+    const okRate = runs ? Math.round((m.success / runs) * 100) : null;
+    return '<tr><td><strong>' + esc(a.name || a.id) + '</strong><div class="sub mono">' + esc(a.id) + '</div>' +
+        '<div class="sub">' + (a.enabled === false ? '<span class="tag off">disabled</span>' : '<span class="tag ok">enabled</span>') +
+        (au && au.personaMatch === false ? ' <span class="tag off">persona mismatch</span>' : '') + '</div></td>' +
+      '<td>' + (p ? '<strong>' + esc(p.name || p.id) + '</strong><div class="sub">' + esc(p.role || '') + '</div><div class="sub muted">' + esc((p.persona || '').slice(0, 70)) + '…</div>' : '<span class="tag off">no persona</span>') + '</td>' +
+      '<td>' + esc((a.capabilities || []).join(', ')) + '</td>' +
+      '<td>' + (au ? '<span class="mono">' + esc(au.toolBoundary || '') + '</span><div class="sub">' + (au.toolIds || []).length + ' tool(s)</div>' : '<span class="muted">—</span>') + '</td>' +
+      '<td>' + (runs ? '<span class="tag ok">' + (m.success) + '</span> <span class="tag ' + (fail ? 'off' : 'mute') + '">' + fail + '</span>' +
+          '<div class="sub">' + runs + ' run(s)' + (okRate === null ? '' : ' · ' + okRate + '% ok') + '</div>' : '<span class="muted">no runs yet</span>') + '</td>' +
+      '<td>' + (m && m.averageLatencyMs != null ? esc(m.averageLatencyMs) + ' ms' : '<span class="muted">—</span>') +
+        '<div class="sub muted">' + (m ? esc(when(m.lastAt)) : '') + '</div></td>' +
+      '<td>' + (m ? statusTag(m.lastOutcome) : '<span class="muted">—</span>') + (m && m.lastModel ? '<div class="sub mono">' + esc(m.lastModel) + '</div>' : '') + '</td>' +
+      '<td class="actions"><div class="row">' +
+        '<button class="btn tiny primary" data-act="persona-edit" data-id="' + esc(a.id) + '">Edit persona</button>' +
+        '<button class="btn tiny ' + (a.enabled === false ? 'primary' : 'danger') + '" data-act="agent-toggle" data-id="' + esc(a.id) + '" data-on="' + (a.enabled !== false) + '">' + (a.enabled === false ? 'Enable' : 'Disable') + '</button>' +
+      '</div></td></tr>';
+  }).join('');
+
+  const totalRuns = metrics.reduce((n, m) => n + m.runs, 0);
+  const totalFail = metrics.reduce((n, m) => n + m.failure, 0);
+  const orphanRows = orphanMetrics.map(m => '<tr><td class="mono">' + esc(m.agentId) + '</td><td>' + m.runs + '</td><td><span class="tag off">' + m.failure + '</span></td><td class="muted">' + esc(when(m.lastAt)) + '</td><td class="actions"><span class="tag mute">not registered</span></td></tr>').join('');
+
+  v.innerHTML =
+    '<div class="grid g4" style="margin-bottom:14px">' +
+      stat('Agents', components.length, components.filter(a => a.enabled !== false).length + ' enabled') +
+      stat('Personas', personas.length, personas.length >= components.length ? 'all covered' : (components.length - personas.length) + ' missing') +
+      stat('Observed runs', totalRuns, totalFail ? totalFail + ' failed' : 'no failures') +
+      stat('Audit', audit ? (audit.ready + '/' + audit.total) : '—', audit && audit.failed ? audit.failed + ' failed' : 'all ready') +
     '</div>' +
-    panel('Create agent', '', '<div class="panel-b"><div class="row">' +
+    panel('Agents', components.length + ' registered', table(['Agent', 'Persona', 'Capabilities', 'Tool boundary', 'Runs (ok/fail)', 'Avg latency', 'Last outcome', ''], rows, 'No agents.')) +
+    (orphanMetrics.length ? panel('Unregistered run history', orphanMetrics.length + ' id(s) with counters but no registry entry', table(['Agent id', 'Runs', 'Failed', 'Last', ''], orphanRows, '')) : '') +
+    panel('Runtime audit', audit ? audit.ready + ' ready · ' + audit.failed + ' failed' : 'unavailable', '<div class="panel-b">' + (audit ? kv({ status: audit.status, total: audit.total, ready: audit.ready, failed: audit.failed, explicitToolBoundaryAgents: audit.explicitToolBoundaryAgents }) : '<span class="muted">unavailable</span>') + '</div>') +
+    panel('Create agent', '', '<div class="panel-b"><div class="row" style="align-items:flex-end">' +
       '<label class="f">id<input id="a-id" placeholder="agent-id"></label>' +
       '<label class="f">name<input id="a-name" placeholder="Agent name"></label>' +
       '<label class="f">role<input id="a-role" placeholder="Role"></label>' +
-      '<button class="btn primary" data-act="agent-add">Create agent</button>' +
+      '<label class="f">persona<textarea id="a-persona" style="height:44px;width:320px;background:var(--input);border:1px solid var(--inputline);border-radius:9px;padding:8px 10px;color:var(--text);font:inherit"></textarea></label>' +
+      '<button class="btn primary" data-act="agent-add">Create agent + persona</button>' +
     '</div></div>');
 } };
 
@@ -803,8 +864,41 @@ document.addEventListener('click', async (ev) => {
       return;
     }
     if (act === 'models-sync-all') { const r = await api('/v1/admin/models/sync-all', { method: 'POST', body: {} }); return done('Synced ' + (r.results || []).length + ' provider(s)'); }
-    if (act === 'agent-disable') { if (!confirm('Disable agent ' + b.dataset.id + '?')) return; await api('/v1/admin/registry/agents/' + encodeURIComponent(b.dataset.id), { method: 'DELETE' }); return done('Agent disabled'); }
-    if (act === 'agent-add') { const id = el('a-id').value.trim(); if (!id) return toast('id required', true); await api('/v1/admin/registry/agents', { method: 'POST', body: { id, name: el('a-name').value.trim() || id, role: el('a-role').value.trim() } }); return done('Agent created'); }
+    if (act === 'agent-toggle') {
+      const on = b.dataset.on === 'true';
+      const { components } = await api('/v1/admin/registry/agents');
+      const current = components.find(a => a.id === b.dataset.id);
+      if (!current) return toast('Agent not found', true);
+      await api('/v1/admin/registry/agents', { method: 'POST', body: { ...current, enabled: !on } });
+      return done(b.dataset.id + (on ? ' disabled ✓' : ' enabled ✓'));
+    }
+    if (act === 'persona-edit') {
+      const { personas } = await api('/v1/admin/personas');
+      return openPersonaModal(personas.find(p => p.id === b.dataset.id), b.dataset.id);
+    }
+    if (act === 'persona-save') {
+      const persona = {
+        name: el('pe-name').value.trim(),
+        role: el('pe-role').value.trim(),
+        expertise: el('pe-exp').value.trim(),
+        priority: Number(el('pe-prio').value) || 99,
+        persona: el('pe-text').value
+      };
+      if (!persona.persona.trim()) return toast('Persona prompt cannot be empty', true);
+      await api('/v1/admin/personas/' + encodeURIComponent(b.dataset.id), { method: 'PATCH', body: persona });
+      closeModal();
+      return done('Persona ' + b.dataset.id + ' saved ✓');
+    }
+    if (act === 'metrics-reset') { if (!confirm('Reset all agent run counters?')) return; await api('/v1/admin/agents/metrics', { method: 'DELETE' }); return done('Agent metrics reset ✓'); }
+    if (act === 'agent-add') {
+      const id = el('a-id').value.trim(); if (!id) return toast('id required', true);
+      const name = el('a-name').value.trim() || id;
+      const role = el('a-role').value.trim() || 'general';
+      const persona = el('a-persona').value.trim() || ('You are ' + name + '. ' + role + '.');
+      await api('/v1/admin/registry/agents', { method: 'POST', body: { id, name, role, capabilities: role ? [role] : [] } });
+      await api('/v1/admin/personas', { method: 'POST', body: { id, name, role, expertise: role, priority: 50, persona } });
+      return done('Agent + persona ' + id + ' created ✓');
+    }
     if (act === 'map-save') { await api('/v1/admin/agent-model-mappings/' + encodeURIComponent(el('map-agent').value), { method: 'PUT', body: { model: el('map-model').value } }); return done('Mapping saved'); }
     if (act === 'map-del') { await api('/v1/admin/agent-model-mappings/' + encodeURIComponent(b.dataset.id), { method: 'DELETE' }); return done('Mapping removed'); }
     if (act === 'tool-toggle') {

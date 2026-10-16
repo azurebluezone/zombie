@@ -72,6 +72,7 @@ import { ECOMMERCE_AGENT_TOOL_BOUNDARIES, getAgentToolBoundary } from './agents/
 import { configureOutboundCircuitLogger, configureOutboundCircuitBreaker, sharedOutboundCircuitBreaker } from './network/circuit-breaker.js';
 import { RUNTIME_VERSION, RUNTIME_PHASE } from './runtime/version.js';
 import { auditAgentRuntime } from './agents/runtime-audit.js';
+import { AgentMetrics } from './agents/metrics.js';
 import { legacyModelList, legacyProviderModelList, legacyNormalizeList, legacyDomain, legacyPusherConfig } from './compatibility/legacy/frontend-contract.js';
 import { toolParityReport } from './compatibility/legacy/tool-parity.js';
 
@@ -110,6 +111,8 @@ const entityDoor = new EntityDoor();
 const normalizer = new CanonicalResponseNormalizer();
 const personas = new PersonaRegistry(store, logger);
 await personas.ensureDefaults();
+// Per-agent run counters for the admin console (see src/agents/metrics.js).
+const agentMetrics = new AgentMetrics(store);
 const admin = new AdminService(store);
 const toolsRegistry = new ToolRegistry(store);
 const skillsRegistry = new SkillRegistry(store);
@@ -267,7 +270,12 @@ const requestHandler = async (req,res) => {
   const requestId = String(req.headers['x-request-id'] || id('req'));
   const traceId = String(req.headers['x-trace-id'] || id('trace'));
   const startedAt = Date.now();
-  const requestState = {applicationId:null, operation:null, outcome:'unknown'};
+  const requestState = {applicationId:null, operation:null, outcome:'unknown', agentId:null};
+  // Agent run accounting. Failures are recorded once, from the outer catch, so
+  // every path (chat, tool loop, stream, execution) is covered even when it
+  // throws before its own completion hook runs.
+  const recordAgentRun = (agentId, outcome, extra = {}) =>
+    agentMetrics.record({ agentId, outcome, requestId, ...extra }).catch(() => {});
   res.setHeader('x-request-id', requestId);
   res.setHeader('x-trace-id', traceId);
   // Hardening headers apply to every response (JSON, HTML, stream, UDS) because
@@ -595,6 +603,21 @@ const requestHandler = async (req,res) => {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,await auditAgentRuntime({registry:agentsRegistry,personas,boundaryResolver:getAgentToolBoundary}));
     }
+    // Real observed run outcomes per agent (success/failure/incomplete), recorded
+    // at the point each chat path actually completes or fails.
+    if (req.method==='GET' && url.pathname==='/v1/admin/agents/metrics') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const metrics=await agentMetrics.list();
+      const known=new Set((await agentsRegistry.list()).map(a=>a.id));
+      return send(res,200,{metrics:metrics.map(m=>({...m,averageLatencyMs:m.runs&&m.totalLatencyMs?Math.round(m.totalLatencyMs/Math.max(1,m.success+m.failure+m.incomplete)):null,registered:known.has(m.agentId)})),total:metrics.length});
+    }
+    // Counters are observations, not history: an operator reset is the only way
+    // to clear them, and it is explicit rather than time-based.
+    if (req.method==='DELETE' && url.pathname==='/v1/admin/agents/metrics') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      await store.write('agentMetrics',[]);
+      return send(res,200,{reset:true});
+    }
     if (req.method==='POST' && url.pathname==='/v1/admin/registry/agents') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,201,{component:await agentsRegistry.register(await body(req, config.maxBodyBytes))});
@@ -916,6 +939,8 @@ const requestHandler = async (req,res) => {
       const executionContext=createExecutionContext({...input,applicationId:app.id,sessionId:session?.id ?? input.sessionId,requestId,projectRoot:executionProjectRoot,workingDirectory:input.workingDirectory ?? executionProjectRoot,agentId:executionAgentId,goal:executionGoal,expectedOutcome:input.expectedOutcome,transport:'http'},runtimeIdentity);
       const result=await execution.execute(prepared,{...input,sessionId:session?.id ?? input.sessionId,requestId,workingDirectory:executionContext.workingDirectory,applicationId:app.id},app.id,executionContext);
       requestState.outcome = result?.status === 'completed' && result?.verified === true ? 'verified' : (result?.status ?? 'completed');
+      requestState.agentId=executionAgent.agent?.id ?? executionAgentId;
+      await recordAgentRun(requestState.agentId, result?.status==='completed'?'success':'incomplete', {latencyMs:Date.now()-startedAt, model:result?.model ?? null, providerId:result?.providerId ?? null, path:'execution'});
       await requestLog.info('execution.completed', {applicationId:app.id,agentId:input.agent ?? input.persona ?? 'code-guru',personaId:input.persona ?? input.agent ?? 'code-guru',providerId:result?.providerId ?? null,model:result?.model ?? null,status:result?.status ?? null,stoppedReason:result?.stoppedReason ?? null,verified:result?.verified ?? false});
       const evidence=Array.isArray(result?.evidence)?result.evidence:[];
       const evidenceState=evidence.length ? evidenceGate.validate(evidence) : [];
@@ -1003,7 +1028,9 @@ const requestHandler = async (req,res) => {
         const toolBindings={...(input.toolBindings??{}),...Object.fromEntries(registeredNativeTools.map(t=>[t.id,{toolId:t.id}]))};
         const projectRoot=input.projectRoot?projectContext.root(input.projectRoot):null;
         const agentId=String(input.agent??input.persona??'code-guru');
+        requestState.agentId=agentId;
         const agentPrepared=await agentRunner.prepare({agentId,personaId:agentId,goal:chatGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
+        requestState.agentId=agentPrepared.agent?.id ?? agentId;
         const route=await smartRouter.route({...input,tools:toolDefinitions,allowJsonToolFallback:true});
         const systemMessage=buildSystemMessage({constitution:CORE_CONSTITUTION,agent:agentPrepared.agent,persona:agentPrepared.persona,goal:chatGoal,expectedOutcome:input.expectedOutcome,projectRoot,route,tools:input.toolIds,toolCatalog:registeredNativeTools});
         const prepared=await execution.prepare({...input,goal:chatGoal,toolIds:input.toolIds,allowedToolIds:input.allowedToolIds,consent:input.consent===true});
@@ -1018,15 +1045,18 @@ const requestHandler = async (req,res) => {
           // until its own timeout fires (the provider detail stays in the logs).
           try {
             const result=await toolLoop.stream({prepared,input:loopInput,applicationId:app.id,onChunk:chunk=>res.write(`data: ${JSON.stringify(chunk)}\n\n`),onEvent:event=>res.write(`event: runtime\ndata: ${JSON.stringify(event)}\n\n`)});
+            await recordAgentRun(agentPrepared.agent?.id ?? agentId, result.status==='completed'?'success':'incomplete', {latencyMs:Date.now()-startedAt, model:result.response?.model ?? null, providerId:route.providerId ?? null, path:'stream'});
             res.write(`event: runtime\ndata: ${JSON.stringify({type:'complete',status:result.status,stoppedReason:result.stoppedReason,roundCount:result.rounds.length,evidenceCount:result.evidence.length,agentId,model:result.response?.model ?? route.publicModel ?? null,providerId:'masked',verified:result.verified})}\n\n`);
             res.write('data: [DONE]\n\n');
           } catch (error) {
+            await recordAgentRun(agentPrepared.agent?.id ?? agentId, 'failure', {latencyMs:Date.now()-startedAt, providerId:route.providerId ?? null, path:'stream'});
             await requestLog.warn('tool_loop.stream_failed',{agentId,error:String(error?.message ?? error),...providerErrorDetail(error)});
             res.write(`event: error\ndata: ${JSON.stringify({error:'stream_failed',requestId})}\n\n`);
           } finally { res.end(); }
           return;
         }
         const result=await toolLoop.execute({prepared,input:loopInput,applicationId:app.id});
+        await recordAgentRun(agentPrepared.agent?.id ?? agentId, result.status==='completed'?'success':'incomplete', {latencyMs:Date.now()-startedAt, model:result.response?.model ?? null, providerId:route.providerId ?? null, path:'tool-loop'});
         requestState.outcome=result.status==='completed'?'observed_unverified':'incomplete';
         // The tool loop must expose the same provenance as the plain chat path, so a
         // client can tell which agent answered and what evidence was observed. The
@@ -1047,6 +1077,7 @@ const requestHandler = async (req,res) => {
         const streamAgentId = String(input.agent ?? input.persona ?? 'code-guru');
         const streamGoal = String(input.goal ?? input.messages?.filter?.(m=>m?.role==='user').at(-1)?.content ?? 'chat request');
         const streamAgent = await agentRunner.prepare({agentId:streamAgentId,personaId:streamAgentId,goal:streamGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
+        requestState.agentId=streamAgent.agent?.id ?? streamAgentId;
         const streamSession = input.sessionId ? await sessionClient.resolve({sessionId:input.sessionId,applicationId:app.id}) : (input.createSession ? await sessionClient.resolve({applicationId:app.id,createIfMissing:true,userId:input.userId}) : null);
         const streamMetadata = {sessionSource:input.sessionSource ?? req.headers['x-session-source'] ?? 'api-stream',clientId:input.clientId ?? req.headers['x-client-id'] ?? null,editor:input.editor ?? req.headers['x-editor'] ?? null,editorVersion:input.editorVersion ?? req.headers['x-editor-version'] ?? null,clientVersion:input.clientVersion ?? req.headers['x-client-version'] ?? null,osPlatform:input.osPlatform ?? req.headers['x-os-platform'] ?? null,deviceInfo:input.deviceInfo ?? req.headers['x-device-info'] ?? null};
         if (streamSession) await sessions.updateMetadata(streamSession.id,app.id,Object.fromEntries(Object.entries(streamMetadata).filter(([,v])=>v != null && String(v).trim())));
@@ -1117,8 +1148,10 @@ const requestHandler = async (req,res) => {
             await sessionState.append(currentStreamSession.id,app.id,streamUserMessage,{kind:'request'});
             await sessionState.append(currentStreamSession.id,app.id,{role:'assistant',content:streamText,...(streamToolCalls.length ? {tool_calls:streamToolCalls} : {})},{kind:'provider_response'});
           }
+          await recordAgentRun(streamAgent.agent?.id ?? streamAgentId, 'success', {latencyMs:Date.now()-startedAt, model, providerId:provider.id, path:'stream'});
           res.write('data: [DONE]\n\n');
         } catch (e) {
+          await recordAgentRun(streamAgent.agent?.id ?? streamAgentId, 'failure', {latencyMs:Date.now()-startedAt, path:'stream'});
           res.write(`event: error\ndata: ${JSON.stringify({error:'stream_failed',requestId})}\n\n`);
         } finally { res.end(); }
         return;
@@ -1133,7 +1166,9 @@ const requestHandler = async (req,res) => {
       const personaId = String(input.agent ?? input.persona ?? 'code-guru');
       const goal = String(input.goal ?? input.messages?.filter?.(m=>m?.role==='user').at(-1)?.content ?? 'chat request');
       await requestLog.debug('agent.resolve.request', {applicationId:app.id,agentId:personaId,personaId,goalPresent:Boolean(input.goal),toolCount:Array.isArray(input.toolIds)?input.toolIds.length:0});
+      requestState.agentId=personaId;
       const agentPrepared = await agentRunner.prepare({agentId:personaId,personaId,goal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
+      requestState.agentId=agentPrepared.agent?.id ?? personaId;
       const session = input.sessionId ? await sessionClient.resolve({sessionId:input.sessionId,applicationId:app.id}) : (input.createSession ? await sessionClient.resolve({applicationId:app.id,createIfMissing:true,userId:input.userId}) : null);
       const incomingMetadata = {
         sessionSource: input.sessionSource ?? req.headers['x-session-source'] ?? 'api',
@@ -1192,6 +1227,8 @@ const requestHandler = async (req,res) => {
         await sessionState.append(currentSession.id,app.id,{role:'assistant',content:assistantMessage.content ?? '',...(assistantMessage.tool_calls ? {tool_calls:assistantMessage.tool_calls} : {})},{kind:'provider_response'});
       }
       requestState.outcome = 'observed_unverified';
+      requestState.agentId=agentPrepared.agent?.id ?? null;
+      await recordAgentRun(agentPrepared.agent?.id, 'success', {latencyMs:Date.now()-startedAt, model, providerId:provider.id, path:'chat'});
       await requestLog.info('chat.completed',{applicationId:app.id,agentId:agentPrepared.agent?.id,personaId:agentPrepared.persona?.id,providerId:provider.id,model,sessionId:currentSession?.id ?? null,evidenceStatus:'observed',verified:false,routeId:route.routeId,contextInjected:true});
       return send(res,200,{...masked,applicationId:app.id,meta:{phase:RUNTIME_PHASE,taskPolicy,route:{routeId:route.routeId,providerId:'masked',model:route.publicModel || masked.model,publicModel:route.publicModel || masked.model,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status},provider:{name:'ZombieCoder',id:'masked'},model:masked.model,session:currentSession,context,project,syllabus:syllabusDoc,memory:memoryDoc,entities,agent:agentPrepared.agent,persona:agentPrepared.persona,constitution:CORE_CONSTITUTION,sessionMetadata:currentSession?.metadata ?? incomingMetadata,systemPrompt:{injected:true,visibleToClient:false,contextCompiled:true},receivedMessages:Array.isArray(input.messages)?input.messages.length:0,evidence:maskEvidenceForPublic(evidence),verified:false,verificationRequired}});
     }
@@ -1246,6 +1283,9 @@ const requestHandler = async (req,res) => {
     // upstream message stays in the logs and audit trail, never in the response,
     // because it can contain the remote server's filesystem layout.
     const publicError = publicErrors.has(message) || /^mcp_[a-z0-9_]+$/.test(message) ? message : 'request_failed';
+    // An agent-scoped request that threw before its completion hook is a failed
+    // run for that agent; record it here so the counter cannot silently miss it.
+    if (requestState.agentId) await recordAgentRun(requestState.agentId, 'failure', {latencyMs:Date.now()-startedAt, path:requestState.operation});
     return send(res, statusCode, {error: publicError, requestId, ...(message === 'outbound_circuit_open' ? {retryAfterMs:e.retryAfterMs} : {}), ...(e?.mcpCode ? {mcpCode:e.mcpCode} : {}), ...(e?.remoteCode ? {remoteCode:e.remoteCode} : {})}, headers);
   }
 };
