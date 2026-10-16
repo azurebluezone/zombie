@@ -457,6 +457,13 @@ Treat a green suite as *locally tested*, never as *live verified*.
 - **Path boundaries** are enforced with symlink-escape and must-exist checks, in both
   access modes.
 - **Consent** is required before risky or irreversible actions.
+- **The chat page provisions its own application** when the admin API is reachable
+  without a token on loopback: it creates (or rotates) one `chat-local-*` application per
+  browser and stores the key in that browser's `localStorage`, so a normal user can just
+  type. This grants no new authority — it uses the same loopback admin bypass that already
+  exists — but it is another reason this runtime must stay on `127.0.0.1`. Where the admin
+  API is protected, the create call answers `401` and the page falls back to the manual key
+  bar.
 - **Local auth bypass is a development affordance**, not a security control. If you enable
   remote access, set `ADMIN_TOKEN` and application keys, and terminate TLS properly.
 

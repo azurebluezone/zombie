@@ -112,11 +112,12 @@ button:disabled{opacity:.45;cursor:not-allowed}
 </footer>
 
 <script>
-(() => {
+(async () => {
 'use strict';
 const el = id => document.getElementById(id);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const KEY_STORE = 'zc_chat_key';
+const APP_STORE = 'zc_chat_app';
 let key = localStorage.getItem(KEY_STORE) || '';
 let history = [];   // [{role, content}]
 let busy = false;
@@ -124,6 +125,43 @@ let current = null; // {bodyEl, metaEl, textEl}
 
 function setStatus(text, on) { el('status-text').textContent = text; el('status-dot').className = 'dot' + (on ? ' on' : ''); }
 function showKeyBar(show) { el('keybar').classList.toggle('show', !!show); }
+
+// Local convenience. On loopback the admin API is reachable without a token, so
+// this page can provision its own application instead of asking the operator to
+// create one in Admin -> Settings and paste the key. Each browser owns one
+// application, named randomly and remembered here, so two browsers never fight
+// over the same key. A deployment that protects the admin API simply answers
+// 401 and we fall back to the manual key bar.
+async function ensureKey() {
+  if (key) return true;
+  try {
+    const name = localStorage.getItem(APP_STORE) || ('chat-local-' + Math.random().toString(16).slice(2, 6));
+    const listRes = await fetch('/v1/admin/applications');
+    if (!listRes.ok) return false;
+    const apps = (await listRes.json()).applications || [];
+    const existing = apps.find(a => a.name === name && a.status === 'active');
+    let apiKey = '';
+    if (existing) {
+      const rotated = await fetch('/v1/admin/applications/' + encodeURIComponent(existing.id) + '/rotate-key', { method: 'POST' });
+      if (!rotated.ok) return false;
+      apiKey = (await rotated.json()).apiKey || '';
+    } else {
+      const created = await fetch('/v1/admin/applications', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name, note: 'Auto-provisioned by the chat page for local work.' })
+      });
+      if (!created.ok) return false;
+      apiKey = (await created.json()).apiKey || '';
+    }
+    if (!apiKey) return false;
+    localStorage.setItem(APP_STORE, name);
+    localStorage.setItem(KEY_STORE, apiKey);
+    key = apiKey;
+    el('hint').textContent = 'Local application "' + name + '" is in use. Its key is stored in this browser only.';
+    return true;
+  } catch { return false; }
+}
 
 async function loadModels() {
   try {
@@ -157,14 +195,15 @@ function scroll() { const m = document.querySelector('main'); m.scrollTop = m.sc
 
 function autoGrow(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 200) + 'px'; }
 
-async function send(text) {
+async function send(text, isRetry) {
   if (busy || !text.trim()) return;
-  showKeyBar(!key);
+  if (!key) { await ensureKey(); showKeyBar(!key); }
   if (!key) { setStatus('key required', false); el('keyinput').focus(); return; }
   busy = true; el('send').disabled = true;
+  let handedOff = false;
   el('empty').style.display = 'none';
   history.push({ role: 'user', content: text });
-  append(msgHtml('user', text, null));
+  const userNode = append(msgHtml('user', text, null));
   scroll();
 
   const model = el('model').value || '';
@@ -181,7 +220,22 @@ async function send(text) {
     if (!res.ok) {
       let msg = 'http_' + res.status;
       try { const j = await res.json(); msg = j.error || msg; } catch {}
-      if (res.status === 401) { setStatus('unauthorized', false); showKeyBar(true); }
+      if (res.status === 401) {
+        setStatus('unauthorized', false);
+        // The stored key may have been revoked or rotated. Re-provision once and
+        // resend, so a normal user never has to understand what happened.
+        localStorage.removeItem(KEY_STORE); key = '';
+        localStorage.removeItem(APP_STORE); // a revoked app must not be reused by name
+        await ensureKey();
+        if (key && !isRetry) {
+          node.remove(); userNode.remove(); history.pop();
+          busy = false; el('send').disabled = false;
+          setStatus('ready', true);
+          handedOff = true;
+          return send(text, true);
+        }
+        showKeyBar(true);
+      }
       throw new Error(msg);
     }
     if (!res.body) throw new Error('no_stream_body');
@@ -232,7 +286,7 @@ async function send(text) {
     if (!acc) node.remove();
     history.pop(); // drop the user turn so a retry does not duplicate it
   } finally {
-    busy = false; el('send').disabled = false; scroll();
+    if (!handedOff) { busy = false; el('send').disabled = false; scroll(); }
   }
 }
 
@@ -253,7 +307,12 @@ el('newchat').addEventListener('click', () => { history = []; current = null; el
 document.querySelectorAll('.card').forEach(c => c.addEventListener('click', () => { el('input').value = c.dataset.p; el('send').click(); }));
 
 loadModels(); ping();
-if (!key) showKeyBar(true); else setStatus('ready', true);
+if (key) setStatus('ready', true);
+else {
+  const provisioned = await ensureKey();
+  showKeyBar(!provisioned);
+  if (provisioned) setStatus('ready', true);
+}
 setInterval(ping, 30000);
 el('input').focus();
 })();
