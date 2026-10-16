@@ -31,6 +31,29 @@ function pathListEnv(name) {
   return env(name, '').split(',').map(x => x.trim()).filter(Boolean).map(value => resolveRuntimePath(value));
 }
 
+// Provider API keys. `PROVIDER_KEY_<ID>` is the explicit, provider-scoped form
+// and always wins. Ollama's own documented convention is a single
+// `OLLAMA_API_KEY`, so honour that as a fallback for every provider whose
+// configured driver is `ollama` (matched from PROVIDER_CONFIG_JSON rather than
+// a hardcoded id list, so a renamed or extra Ollama provider keeps working).
+function resolveProviderApiKeys() {
+  const keys = Object.fromEntries(Object.entries(process.env)
+    .filter(([key]) => key.startsWith('PROVIDER_KEY_'))
+    .map(([key, value]) => [key.slice('PROVIDER_KEY_'.length).toLowerCase().replace(/_/g, '-'), value]));
+  const ollamaKey = env('OLLAMA_API_KEY', '');
+  if (!ollamaKey) return keys;
+  let declared = [];
+  try {
+    const parsed = JSON.parse(env('PROVIDER_CONFIG_JSON', '[]'));
+    if (Array.isArray(parsed)) declared = parsed;
+  } catch { declared = []; }
+  for (const provider of declared) {
+    if (provider?.driver !== 'ollama' || !provider?.id) continue;
+    if (!keys[provider.id]) keys[provider.id] = ollamaKey;
+  }
+  return keys;
+}
+
 export const config = {
   host: env('HOST', '127.0.0.1'),
   port: numberEnv('PORT', 9999, {min:1,max:65535}),
@@ -137,7 +160,5 @@ export const config = {
     allowHosts: listEnv('PROVIDER_ALLOW_HOSTS'),
     maxResponseBytes: numberEnv('MAX_PROVIDER_RESPONSE_BYTES', 4 * 1024 * 1024, {min:1024,max:32 * 1024 * 1024})
   },
-  providerApiKeys: Object.fromEntries(Object.entries(process.env)
-    .filter(([key]) => key.startsWith('PROVIDER_KEY_'))
-    .map(([key, value]) => [key.slice('PROVIDER_KEY_'.length).toLowerCase().replace(/_/g, '-'), value]))
+  providerApiKeys: resolveProviderApiKeys()
 };
