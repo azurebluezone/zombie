@@ -77,7 +77,14 @@ export class McpRegistry {
     } catch (error) {
       const raw = String(error?.mcpCode ?? error?.message ?? 'mcp_discovery_failed');
       const code = /^mcp_[a-zA-Z0-9_.:-]{1,80}$/.test(raw) ? raw : 'mcp_discovery_failed';
-      const failed = {...endpoint, status:'error', lastErrorCode:code, lastErrorAt:new Date().toISOString()};
+      // Keep the human-readable reason next to the stable code. Without it an
+      // operator only sees `mcp_discovery_failed` and cannot tell a dead port
+      // from a protocol mismatch. Sanitised, deduplicated and truncated: this is
+      // rendered in the console, and the URL cannot carry credentials because
+      // validateUrl rejects those.
+      const reason = [...new Set([error?.message, error?.cause?.code].filter(Boolean).map(String))]
+        .join(' · ').replace(/\s+/g, ' ').trim().slice(0, 300) || null;
+      const failed = {...endpoint, status:'error', lastErrorCode:code, lastErrorMessage:reason, lastErrorAt:new Date().toISOString()};
       await this.store.write('mcp-endpoints', endpoints.map(item => item.id === endpointId ? failed : item));
       throw new Error(code);
     }

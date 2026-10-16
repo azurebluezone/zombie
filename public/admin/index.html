@@ -838,7 +838,7 @@ VIEWS.mcp = { title: 'MCP', sub: 'Inbound server, connected clients and the outb
     '<td><strong>' + esc(e.name || e.id) + '</strong><div class="sub mono">' + esc(e.id) + '</div></td>' +
     '<td class="mono" style="font-size:11.5px">' + esc(e.url) + '</td>' +
     '<td>' + (e.hasAuth ? '<span class="tag ok">key set</span>' : '<span class="tag mute">none</span>') + '</td>' +
-    '<td>' + statusTag(e.status || 'unknown') + '<div class="sub mono">' + esc(e.lastErrorCode || '') + '</div></td>' +
+    '<td>' + statusTag(e.status || 'unknown') + '<div class="sub mono">' + esc(e.lastErrorCode || '') + '</div>' + (e.lastErrorMessage ? '<div class="sub" style="max-width:280px">' + esc(String(e.lastErrorMessage).slice(0, 200)) + '</div>' : '') + '</td>' +
     '<td>' + esc(e.protocolVersion || '—') + '<div class="sub">' + (Array.isArray(e.tools) ? e.tools.length : 0) + ' tool(s)</div></td>' +
     '<td class="actions"><div class="row">' +
       '<button class="btn tiny primary" data-act="mcp-discover" data-id="' + esc(e.id) + '">Verify</button>' +
