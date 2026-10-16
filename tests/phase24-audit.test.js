@@ -13,14 +13,15 @@ import path from 'node:path';
 test('phase24 route map is explicit and matches the current inventory', () => {
   const report = routeMapReport();
   assert.equal(report.legacyConcreteRoutes, 31);
-  // Bumped 69 -> 86: the inventory now also lists the routes added for the
+  // Bumped 69 -> 86 -> 89: the inventory also lists the routes added for the
   // admin console (logs + SSE stream, agent metrics, runtime metrics, model and
   // masking-model catalogs, agent-model mappings, tool status update, provider
-  // live test, persona update/deletion, and the inbound MCP server/client
-  // endpoints plus endpoint removal). The pinned number is intentional: it must
-  // be raised deliberately whenever the route inventory changes.
-  assert.equal(report.currentConcreteRoutes, 86);
-  assert.equal(report.currentHandlerBlocks, 51);
+  // live test, persona update/deletion, the inbound MCP server/client endpoints
+  // plus endpoint removal, and the inbound MCP auth policy GET/PATCH/DELETE).
+  // The pinned number is intentional: it must be raised deliberately whenever the
+  // route inventory changes.
+  assert.equal(report.currentConcreteRoutes, 89);
+  assert.equal(report.currentHandlerBlocks, 54);
   assert.equal(report.notes.length, 5);
 });
 

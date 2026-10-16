@@ -17,6 +17,7 @@ import { validateToolArguments } from './mcp/schema.js';
 import { AppLimits } from './mcp/limits.js';
 import { McpConnections } from './mcp/connections.js';
 import { McpClientSessions } from './mcp/sessions.js';
+import { McpServerAuth } from './mcp/server-auth.js';
 import { McpReconciliation } from './mcp/reconciliation.js';
 import { ProjectContextStore } from './context/project-context.js';
 import { EntityDoor } from './entities/entity-door.js';
@@ -125,6 +126,8 @@ const mcpAudit = new McpAudit(store);
 const connections = new McpConnections(store, {leaseMs:Number(process.env.MCP_CONNECTION_LEASE_MS ?? 300000)});
 // Inbound MCP client sessions (clients talking to this runtime's /mcp server).
 const mcpClients = new McpClientSessions(store, {idleMs:Number(process.env.MCP_CLIENT_IDLE_MS ?? 120000)});
+// Inbound MCP auth policy: env default, admin override wins. See src/mcp/server-auth.js.
+const mcpServerAuth = new McpServerAuth(store, {requireAuth: config.mcpRequireAuth});
 const reconciliation = new McpReconciliation(mcpAudit, {graceMs:Number(process.env.MCP_RECONCILIATION_GRACE_MS ?? 30000)});
 await connections.cleanupExpired();
 if (process.env.MCP_RECONCILE_ON_START === 'true') await reconciliation.reconcile();
@@ -434,11 +437,23 @@ const requestHandler = async (req,res) => {
         res.writeHead(204,{'mcp-session-id':ended}); return res.end();
       }
       if (req.method!=='POST') { res.writeHead(405,{'allow':'POST, DELETE'}); return res.end(); }
-      const mcpApp=authenticateApiKey(bearer(req), await applications());
+      // A presented key always wins, so an authenticated client is attributed to
+      // its own application even while authentication is disabled. Only when no
+      // key is presented (or the key is invalid) does the policy decide: either
+      // 401 as before, or the auto-provisioned local application signs the call in
+      // so sessions, tool permissions and audit still have an owner.
+      const presentedApp=authenticateApiKey(bearer(req), await applications());
+      const mcpAuthPolicy=await mcpServerAuth.policy();
+      let mcpApp=presentedApp;
+      if (!mcpApp && mcpAuthPolicy.requireAuth===false) mcpApp=await mcpServerAuth.localApplication();
       if (!mcpApp) {
         requestState.outcome='unauthorized';
-        await requestLog.warn('mcp.server.auth_failed',{reason:'missing_or_invalid_or_expired_key'});
-        return send(res,401,{jsonrpc:'2.0',id:null,error:{code:-32001,message:'unauthorized'}});
+        await requestLog.warn('mcp.server.auth_failed',{reason:'missing_or_invalid_or_expired_key',requireAuth:true});
+        // RFC 6750: a 401 on a bearer-protected resource carries a challenge.
+        // No `resource_metadata` is advertised on purpose: this runtime is not an
+        // OAuth authorization server, so an OAuth-capable client should fall back
+        // to a static token instead of attempting Dynamic Client Registration.
+        return send(res,401,{jsonrpc:'2.0',id:null,error:{code:-32001,message:'unauthorized'}},{'www-authenticate':'Bearer realm="zombiecoder", error="invalid_token"'});
       }
       let mcpMessage;
       try { mcpMessage=await body(req, config.maxBodyBytes); }
@@ -461,6 +476,9 @@ const requestHandler = async (req,res) => {
           clientInfo: mcpMessage?.method === 'initialize' ? (mcpMessage?.params?.clientInfo ?? null) : null,
           protocolVersion: mcpMessage?.method === 'initialize' ? negotiateProtocolVersion(mcpMessage?.params?.protocolVersion) : null,
           applicationId: mcpApp.id,
+          applicationName: mcpApp.name ?? null,
+          userAgent: req.headers['user-agent'] ?? null,
+          authMode: presentedApp ? 'key' : 'local-auto',
           method: mcpMessage?.method ?? null,
           requestId: mcpRequestId
         }).catch(()=>{});
@@ -956,13 +974,52 @@ const requestHandler = async (req,res) => {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{tools:await mcp.tools()});
     }
+    // Inbound MCP authentication policy. The env var sets the default; an admin
+    // override persisted in `mcp-settings` wins, so authentication can be turned
+    // off for local work from the console without editing .env or restarting.
+    if (req.method==='GET' && url.pathname==='/v1/admin/mcp/auth') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const policy=await mcpServerAuth.policy();
+      const local=policy.requireAuth===false ? await mcpServerAuth.localApplication() : null;
+      return send(res,200,{
+        requireAuth:policy.requireAuth,
+        source:policy.source,
+        envRequireAuth:policy.envRequireAuth,
+        updatedAt:policy.updatedAt,
+        serverEnabled:config.mcpServerEnabled===true,
+        localApplication:local?{id:local.id,name:local.name,createdAt:local.createdAt,autoProvisioned:true}:null,
+        note:policy.requireAuth
+          ?'POST /mcp requires a valid application key (Authorization: Bearer zc_...).'
+          :'POST /mcp accepts unauthenticated calls; they are signed in as the auto-provisioned local application.'
+      });
+    }
+    if (req.method==='PATCH' && url.pathname==='/v1/admin/mcp/auth') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      let input;
+      try { input=await body(req, config.maxBodyBytes); }
+      catch (error) { return send(res,Number(error?.statusCode)||400,{error:'invalid_body'}); }
+      if (typeof input?.requireAuth!=='boolean') return send(res,400,{error:'requireAuth_must_be_boolean'});
+      const policy=await mcpServerAuth.setRequireAuth(input.requireAuth);
+      const local=policy.requireAuth===false ? await mcpServerAuth.localApplication() : null;
+      await requestLog.info('mcp.server.auth_policy_changed',{requireAuth:policy.requireAuth,source:policy.source});
+      return send(res,200,{requireAuth:policy.requireAuth,source:policy.source,envRequireAuth:policy.envRequireAuth,localApplication:local?{id:local.id,name:local.name}:null});
+    }
+    if (req.method==='DELETE' && url.pathname==='/v1/admin/mcp/auth') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const policy=await mcpServerAuth.clearOverride();
+      await requestLog.info('mcp.server.auth_policy_reset',{requireAuth:policy.requireAuth,source:policy.source});
+      return send(res,200,{requireAuth:policy.requireAuth,source:policy.source,envRequireAuth:policy.envRequireAuth});
+    }
     // Inbound MCP server: what it advertises and who is connected to it.
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/server') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const enabled=config.mcpServerEnabled===true;
       const clients=await mcpClients.list();
+      const authPolicy=await mcpServerAuth.policy();
       return send(res,200,{
         enabled,
+        requireAuth:authPolicy.requireAuth,
+        authSource:authPolicy.source,
         url:enabled?`${req.headers['x-forwarded-proto']||'http'}://${req.headers.host||`localhost:${config.port}`}/mcp`:null,
         name:MCP_SERVER_NAME,
         protocolVersion:LATEST_MCP_PROTOCOL_VERSION,

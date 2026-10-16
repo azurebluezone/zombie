@@ -756,10 +756,11 @@ VIEWS.tools = { title: 'Tools', sub: 'Native tool registry, global on/off switch
 // the verification actually discovered instead of a flash message that is gone.
 let lastMcpVerify = null;
 VIEWS.mcp = { title: 'MCP', sub: 'Inbound server, connected clients and the outbound MCP fabric', actions: '<button class="btn" data-act="mcp-reconcile">Reconcile</button> <button class="btn" data-act="mcp-sync">Sync external</button>', render: async (v) => {
-  const [config, server, { clients, active, idleMs }, { endpoints }, { tools }, { connections }, { permissions }, { applications }] = await Promise.all([
+  const [config, server, { clients, active, idleMs }, { endpoints }, { tools }, { connections }, { permissions }, { applications }, auth] = await Promise.all([
     api('/api/config/mcp'), api('/v1/admin/mcp/server'), api('/v1/admin/mcp/clients'),
     api('/v1/admin/mcp/endpoints'), api('/v1/admin/mcp/tools'), api('/v1/admin/mcp/connections'),
-    api('/v1/admin/mcp/permissions'), api('/v1/admin/applications')
+    api('/v1/admin/mcp/permissions'), api('/v1/admin/applications'),
+    api('/v1/admin/mcp/auth').catch(() => null)
   ]);
   const audit = await api('/v1/admin/mcp/audit?limit=50').catch(() => ({ events: [] }));
   const incomplete = await api('/v1/admin/mcp/incomplete').catch(() => ({ incomplete: [] }));
@@ -777,10 +778,15 @@ VIEWS.mcp = { title: 'MCP', sub: 'Inbound server, connected clients and the outb
         : '<p class="muted" style="font-size:12.5px;margin:0">The runtime is acting as an MCP client only. Set <span class="mono">MCP_SERVER_ENABLED=true</span> to expose POST /mcp.</p>') +
     '</div>');
 
+  // Identity is the client's own initialize clientInfo plus the raw User-Agent
+  // header: some clients send only one of the two, and the console should show
+  // what actually arrived rather than a guess.
   const clientRows = clients.map(c => '<tr>' +
-    '<td><strong>' + esc(c.clientName || 'unknown client') + '</strong><div class="sub mono">' + esc(c.clientVersion || '') + '</div></td>' +
+    '<td><strong>' + esc(c.clientName || 'unknown client') + '</strong><div class="sub mono">' + esc(c.clientVersion || '') + '</div>' +
+      (c.userAgent ? '<div class="sub muted" style="font-size:11px">' + esc(c.userAgent.slice(0, 60)) + '</div>' : '') + '</td>' +
     '<td class="mono" style="font-size:11.5px">' + esc(c.sessionId) + '</td>' +
     '<td>' + esc(appName(c.applicationId)) + '<div class="sub mono">' + esc(c.applicationId || '') + '</div></td>' +
+    '<td>' + (c.authMode === 'key' ? '<span class="tag ok">key</span>' : c.authMode === 'local-auto' ? '<span class="tag warn">auto local</span>' : '<span class="tag mute">—</span>') + '</td>' +
     '<td class="mono">' + esc(c.protocolVersion || '') + '</td>' +
     '<td>' + c.requestCount + '<div class="sub">' + (c.methods || []).length + ' method(s)</div></td>' +
     '<td class="mono">' + esc(c.lastMethod || '') + '</td>' +
@@ -806,6 +812,33 @@ VIEWS.mcp = { title: 'MCP', sub: 'Inbound server, connected clients and the outb
     '<td class="actions"><button class="btn tiny danger" data-act="mcp-perm-revoke" data-app="' + esc(p.applicationId) + '" data-name="' + esc(p.qualifiedName) + '">Revoke</button></td></tr>').join('');
   const aRows = (audit.events || []).slice(-40).reverse().map(ev => '<tr><td class="mono" style="font-size:11.5px">' + esc(ev.timestamp || ev.ts || '') + '</td><td>' + statusTag(ev.action || ev.stage || '') + '</td><td>' + statusTag(ev.outcome || '') + '</td><td class="mono">' + esc(ev.qualifiedName || '') + '</td><td>' + esc(appName(ev.applicationId)) + '</td></tr>').join('');
 
+  // Inbound MCP authentication switch. Off means /mcp stops asking for a key,
+  // which is what stops an OAuth-capable client (e.g. OpenCode Desktop) from
+  // walking into OAuth discovery and failing at Dynamic Client Registration: a
+  // 200 never triggers that flow, a 401 does.
+  const authCard = panel('Inbound authentication', auth ? (auth.requireAuth ? 'required' : 'disabled') : 'unavailable',
+    '<div class="panel-b">' + (!auth
+      ? '<p class="muted" style="font-size:12.5px;margin:0">The auth policy endpoint did not answer.</p>'
+      : '<div class="tsum" style="margin-bottom:10px">' +
+          (auth.requireAuth ? '<span class="tag ok">required</span>' : '<span class="tag warn">disabled</span>') +
+          '<span class="tag mute">source: ' + esc(auth.source) + '</span>' +
+          '<span class="tag mute">env default: ' + (auth.envRequireAuth ? 'required' : 'disabled') + '</span>' +
+        '</div>' +
+        '<p class="muted" style="font-size:12.5px;margin:0 0 10px">' + esc(auth.note) + '</p>' +
+        (auth.localApplication
+          ? '<div class="sect">Unauthenticated calls are signed in as</div><div class="tsum">' +
+            '<span class="tag mute mono">' + esc(auth.localApplication.name) + '</span>' +
+            '<span class="tag mute mono">' + esc(auth.localApplication.id) + '</span></div>'
+          : '') +
+        '<div class="row" style="margin-top:12px">' +
+          '<button class="btn ' + (auth.requireAuth ? 'danger' : 'primary') + '" data-act="mcp-auth-toggle" data-next="' + (auth.requireAuth ? 'false' : 'true') + '">' +
+            (auth.requireAuth ? 'Disable authentication' : 'Require authentication') + '</button>' +
+          (auth.source === 'admin' ? '<button class="btn" data-act="mcp-auth-reset">Use env default</button>' : '') +
+        '</div>' +
+        (!auth.requireAuth
+          ? '<p class="muted" style="font-size:11.5px;margin:10px 0 0">Anyone who can reach <span class="mono">' + esc(server.url || 'this host') + '</span> can call the advertised tools. Keep the runtime bound to loopback while this is off.</p>'
+          : '')) + '</div>');
+
   v.innerHTML =
     '<div class="grid g4" style="margin-bottom:14px">' +
       stat('Inbound tools', server.tools.length, server.enabled ? 'advertised on /mcp' : 'server disabled') +
@@ -814,7 +847,8 @@ VIEWS.mcp = { title: 'MCP', sub: 'Inbound server, connected clients and the outb
       stat('Client tools', tools.length, 'discovered qualified tools') +
     '</div>' +
     serverCard +
-    panel('Connected clients', clients.length + ' session(s)', table(['Client', 'Session id', 'Application', 'Protocol', 'Requests', 'Last method', 'State', ''], clientRows, 'No MCP client has connected to /mcp yet.')) +
+    authCard +
+    panel('Connected clients', clients.length + ' session(s)', table(['Client', 'Session id', 'Application', 'Auth', 'Protocol', 'Requests', 'Last method', 'State', ''], clientRows, 'No MCP client has connected to /mcp yet.')) +
     panel('Add an MCP tool', 'register a base URL, then verify it', '<div class="panel-b"><div class="row" style="align-items:flex-end">' +
       '<label class="f" style="min-width:300px;flex:1">Base URL<input id="m-url" placeholder="https://host/mcp"></label>' +
       '<label class="f" style="min-width:220px">API key (optional)<input id="m-apikey" type="password" placeholder="Bearer token" autocomplete="off"></label>' +
@@ -1542,6 +1576,16 @@ document.addEventListener('click', async (ev) => {
     if (act === 'mcp-client-close') {
       await api('/v1/admin/mcp/clients/' + encodeURIComponent(b.dataset.id), { method: 'DELETE' });
       return done('Client session disconnected ✓');
+    }
+    if (act === 'mcp-auth-toggle') {
+      const next = b.dataset.next === 'true';
+      const r = await api('/v1/admin/mcp/auth', { method: 'PATCH', body: { requireAuth: next } });
+      // done() re-renders the view, so the panel reflects the new policy.
+      return done(next ? 'Authentication required on /mcp ✓' : 'Authentication disabled on /mcp ✓' + (r.localApplication ? ' · ' + r.localApplication.id : ''));
+    }
+    if (act === 'mcp-auth-reset') {
+      await api('/v1/admin/mcp/auth', { method: 'DELETE' });
+      return done('Auth policy reset to the environment default ✓');
     }
     if (act === 'mcp-verify') {
       const url = el('m-url').value.trim();

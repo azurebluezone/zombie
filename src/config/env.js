@@ -17,6 +17,14 @@ function listEnv(name) {
   return env(name, '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
 }
 
+// MCP_SERVER_AUTH accepts `required` (default) or `disabled`. Anything that reads
+// as false/off/none also counts as disabled, so an operator can write
+// MCP_SERVER_AUTH=false naturally without learning a vocabulary.
+function mcpAuthRequiredEnv() {
+  const value = env('MCP_SERVER_AUTH', 'required').trim().toLowerCase();
+  return !['disabled', 'false', 'off', 'none', 'no', '0'].includes(value);
+}
+
 // Same as listEnv but for filesystem paths: case is significant on Linux and
 // each entry is anchored to the runtime root instead of the caller's cwd.
 function pathListEnv(name) {
@@ -107,6 +115,12 @@ export const config = {
   // default project root (DATA_DIR); per-call _meta.projectRoot may override it,
   // bounded by PROJECT_ROOTS / the runtime's allowed roots.
   mcpServerProjectRoot: env('MCP_SERVER_PROJECT_ROOT', ''),
+  // Inbound MCP authentication. `required` keeps POST /mcp behind an application
+  // key (the existing behaviour). `disabled` is for loopback-only local work: the
+  // runtime then signs inbound MCP in as an auto-provisioned local application so
+  // sessions, tool permissions and audit entries still have a real owner. An
+  // admin override can change this at runtime without editing .env or restarting.
+  mcpRequireAuth: mcpAuthRequiredEnv(),
   // Explicit browser CORS allowlist. Empty means same-origin only (no CORS headers).
   corsAllowOrigins: env('CORS_ALLOW_ORIGINS', '').split(',').map(x => x.trim()).filter(Boolean),
   providerNetworkPolicy: {

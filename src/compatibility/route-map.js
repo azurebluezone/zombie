@@ -141,6 +141,9 @@ export const CURRENT_ROUTE_MAP = Object.freeze([
   ['POST','/v1/admin/providers/{id}/test','provider live test'],
   ['PATCH','/v1/admin/personas/{id}','persona update'],
   ['DELETE','/v1/admin/personas/{id}','persona deletion'],
+  ['GET','/v1/admin/mcp/auth','inbound MCP auth policy'],
+  ['PATCH','/v1/admin/mcp/auth','inbound MCP auth policy update'],
+  ['DELETE','/v1/admin/mcp/auth','inbound MCP auth policy reset'],
   ['GET','/v1/admin/mcp/server','inbound MCP server status'],
   ['GET','/v1/admin/mcp/clients','inbound MCP client sessions'],
   ['DELETE','/v1/admin/mcp/clients/{id}','inbound MCP client disconnect'],
@@ -156,7 +159,7 @@ export function routeMapReport() {
     legacyConcreteRoutes: LEGACY_ROUTE_COUNT,
     legacyCompatibilityRoutes: LEGACY_COMPATIBILITY_ROUTE_MAP.length,
     currentConcreteRoutes: CURRENT_ROUTE_COUNT,
-    currentHandlerBlocks: 51,
+    currentHandlerBlocks: 54,
     notes: [
       'Legacy route count is a concrete route inventory reconstructed from api.md.',
       'Current route count treats /revoke and /extend as two concrete routes although they share one matcher.',

@@ -42,11 +42,14 @@ export class McpClientSessions {
    * @param {{name?:string,version?:string}|null} [msg.clientInfo]  from initialize params
    * @param {string|null} [msg.protocolVersion]
    * @param {string|null} [msg.applicationId]  authenticated MCP caller
+   * @param {string|null} [msg.applicationName]
+   * @param {string|null} [msg.userAgent]      raw User-Agent header, a second identity signal
+   * @param {string|null} [msg.authMode]       'key' | 'local-auto'
    * @param {string|null} [msg.method]         JSON-RPC method just handled
    * @param {string|null} [msg.requestId]
    * @param {boolean} [msg.closed]
    */
-  async touch({ sessionId, clientInfo = null, protocolVersion = null, applicationId = null, method = null, requestId = null, closed = false } = {}) {
+  async touch({ sessionId, clientInfo = null, protocolVersion = null, applicationId = null, applicationName = null, userAgent = null, authMode = null, method = null, requestId = null, closed = false } = {}) {
     const sid = String(sessionId ?? '').trim();
     if (!sid) return null;
     const rows = await this._read();
@@ -64,6 +67,9 @@ export class McpClientSessions {
       clientVersion: clientInfo?.version ? String(clientInfo.version).slice(0, 60) : existing.clientVersion ?? null,
       protocolVersion: protocolVersion ? String(protocolVersion) : existing.protocolVersion ?? null,
       applicationId: applicationId ?? existing.applicationId ?? null,
+      applicationName: applicationName ?? existing.applicationName ?? null,
+      userAgent: userAgent ? String(userAgent).slice(0, 200) : existing.userAgent ?? null,
+      authMode: authMode ?? existing.authMode ?? null,
       lastMethod: method ?? existing.lastMethod ?? null,
       lastRequestId: requestId ?? existing.lastRequestId ?? null,
       lastSeenAt: now,
