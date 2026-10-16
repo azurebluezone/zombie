@@ -99,7 +99,7 @@ tools/common/            # the 25 runnable tool implementations
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 233 tests, run with node --test
+tests/                   # 248 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -343,6 +343,65 @@ curl -s http://127.0.0.1:9999/health | head -c 200
 
 Stop it with `node start.js --stop`.
 
+### Windows
+
+The runtime has **zero npm dependencies**, so there is no install step — but two things
+trip Windows users up: the Node.js version and the PowerShell execution policy.
+`scripts/start-windows.ps1` handles the first:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-windows.ps1
+```
+
+It checks for Node.js >= 22.5.0, offers to install the LTS build with `winget` if it is
+missing or too old (and makes no change if you decline), then starts the runtime the same
+way `npm start` does. The Unix domain socket is disabled by default on Windows.
+
+### Linux (systemd service)
+
+`scripts/setup-os-runtime.sh` installs the runtime as a systemd service. It makes **no
+change at all** unless it is running as root, on Linux, with systemd available, and the
+Node.js version check passes:
+
+```bash
+sudo bash scripts/setup-os-runtime.sh
+```
+
+Templates live in `scripts/systemd/` (the unit file plus a short README) and
+`scripts/nginx/zombiecoder.conf.template` for a reverse-proxy front end. Read section 16
+first: the runtime is designed for loopback, and a reverse proxy must not be the thing that
+exposes it.
+
+### Verify a deployment
+
+```bash
+node scripts/verify-deployment.mjs                          # probes http://127.0.0.1:9999
+ZC_VERIFY_URL=http://127.0.0.1:10001 node scripts/verify-deployment.mjs
+```
+
+It runs live checks (health, model catalog, TLS endpoint when enabled, an authenticated chat
+call and an authenticated streaming call) and writes a JSON report, by default to
+`./data/deployment-verification.json`. It is a live probe, so treat its output as observed
+evidence rather than a guarantee.
+
+### The `.zombiecoder/` directory
+
+The first start creates a `.zombiecoder/` directory inside the project root the runtime is
+working in. It is runtime-owned scratch space — it is in `.gitignore` and is not source:
+
+| Path | What it is |
+| --- | --- |
+| `SSOT.md` | Project state the runtime observed: detected technologies and file structure. It is rebuilt when it is missing **or was not written by this runtime**, so a stale file left behind by an editor plugin cannot be handed to the model as project truth. A foreign file is preserved as `SSOT.imported.md`. |
+| `agents/syllabus.md` | Knowledge entries for this project. |
+| `agents/memory.json` | Project notes. Starts empty — see the note below. |
+| `version.json`, `mcp-config.json`, `vscode.json`, `jetbrains.json`, `editor-config.json` | Markers an editor integration reads. |
+
+`syllabus.md` and `memory.json` are written through `POST /v1/context/syllabus` and
+`POST /v1/context/memory`. Nothing writes them automatically and no tool lets an agent record
+a note yet, so a default install reports `memory entries: 0`. The **reader** side is fully
+wired: the context compiler selects only the sections relevant to the current request, under
+the `COMPILED_CONTEXT_BYTES` budget, instead of pasting the whole file into the prompt.
+
 ## 12. Configuration
 
 `.env` is gitignored; `.env.example` documents every key. Sections:
@@ -438,7 +497,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **233 tests, 231 passing, 2 failing.** The two failures are known and
+Current baseline: **248 tests, 246 passing, 2 failing.** The two failures are known and
 pre-existing:
 
 - `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the
