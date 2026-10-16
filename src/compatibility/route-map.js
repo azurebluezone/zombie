@@ -96,6 +96,8 @@ export const CURRENT_ROUTE_MAP = Object.freeze([
   ['POST','/v1/admin/registry/skills','skill registration'],
   ['GET','/v1/admin/registry/agents/tool-boundaries','agent tool boundaries'],
   ['GET','/v1/admin/registry/agents/{id}/tool-boundary','agent tool boundary'],
+  ['GET','/v1/admin/registry/agents/{id}/boundary','agent tool-access scope'],
+  ['PATCH','/v1/admin/registry/agents/{id}/boundary','agent tool-access scope update'],
   ['GET','/v1/admin/registry/agents','agent registry'],
   ['GET','/v1/admin/registry/agents/runtime-audit','agent runtime audit'],
   ['POST','/v1/admin/registry/agents','agent registration'],
@@ -159,12 +161,13 @@ export function routeMapReport() {
     legacyConcreteRoutes: LEGACY_ROUTE_COUNT,
     legacyCompatibilityRoutes: LEGACY_COMPATIBILITY_ROUTE_MAP.length,
     currentConcreteRoutes: CURRENT_ROUTE_COUNT,
-    currentHandlerBlocks: 54,
+    currentHandlerBlocks: 55,
     notes: [
       'Legacy route count is a concrete route inventory reconstructed from api.md.',
       'Current route count treats /revoke and /extend as two concrete routes although they share one matcher.',
       'Three admin provider handlers are duplicated in src/server.js and should be consolidated.'
       ,'Phase 25 adds three application-scoped Tool permission control-plane routes.',
+      'Phase 26 adds the agent tool-access scope routes: one GET/PATCH pair that reads and writes the persisted toolBoundary (global | working-directory) and workingDirectory on the agents table.',
       'Counts describe route inventory only; they do not claim legacy behavioral parity.'
     ],
     legacy: LEGACY_ROUTE_MAP,

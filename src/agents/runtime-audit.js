@@ -1,3 +1,5 @@
+import { agentAccessRecord } from './access.js';
+
 export async function auditAgentRuntime({registry, personas, boundaryResolver} = {}) {
   if (!registry || !personas) throw new Error('agent_runtime_audit_dependencies_required');
   const agents = await registry.list();
@@ -9,6 +11,7 @@ export async function auditAgentRuntime({registry, personas, boundaryResolver} =
     try { resolved = await registry.resolve(agent.id); } catch (e) { error = String(e?.message ?? e); }
     try { persona = await personas.resolve(agent.id); } catch (e) { error = error ?? String(e?.message ?? e); }
     const boundary = boundaryResolver?.(agent.id) ?? null;
+    const scope = agentAccessRecord(agent);
     results.push({
       id: agent.id,
       name: agent.name,
@@ -20,6 +23,11 @@ export async function auditAgentRuntime({registry, personas, boundaryResolver} =
       toolBoundary: boundary ? 'explicit' : 'task-policy-derived',
       toolIds: boundary?.toolIds ?? [],
       externalMcp: boundary?.externalMcp ?? [],
+      // The operator-editable reach of the agent. Every agent has one now, so the
+      // audit reports it next to (not instead of) the legacy ecommerce profile.
+      accessScope: scope.toolBoundary,
+      accessWorkingDirectory: scope.workingDirectory,
+      accessToolSurface: 'all',
       error
     });
   }
@@ -30,6 +38,7 @@ export async function auditAgentRuntime({registry, personas, boundaryResolver} =
     ready: results.length - failed.length,
     failed: failed.length,
     explicitToolBoundaryAgents: results.filter(x => x.toolBoundary === 'explicit').map(x => x.id),
+    agentsByAccessScope: results.reduce((acc, x) => ({ ...acc, [x.accessScope]: (acc[x.accessScope] ?? 0) + 1 }), {}),
     agents: results
   };
 }

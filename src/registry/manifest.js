@@ -25,6 +25,10 @@ export function normalizeManifest(input, expectedType) {
     status,
     source: String(input.source ?? 'runtime'),
     metadata: input.metadata && typeof input.metadata === 'object' ? input.metadata : {},
+    // Agent tool-access scope. Null for every other manifest type; for agents the
+    // registry fills in the defaults ('global' / null) so the shape is stable.
+    toolBoundary: input.toolBoundary == null || String(input.toolBoundary).trim() === '' ? null : String(input.toolBoundary).trim(),
+    workingDirectory: input.workingDirectory == null || String(input.workingDirectory).trim() === '' ? null : String(input.workingDirectory).trim(),
     updatedAt: new Date().toISOString()
   };
 }

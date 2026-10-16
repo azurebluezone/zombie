@@ -71,6 +71,7 @@ import { compileContext } from './context/compiler.js';
 import { CapabilityConfigResolver } from './registry/config-resolver.js';
 import { ExternalMcpRegistry } from './registry/external-mcp.js';
 import { ECOMMERCE_AGENT_TOOL_BOUNDARIES, getAgentToolBoundary } from './agents/ecommerce-tool-boundaries.js';
+import { TOOL_BOUNDARY_MODES, agentAccessRecord, isToolBoundaryMode, resolveAgentAccess } from './agents/access.js';
 import { configureOutboundCircuitLogger, configureOutboundCircuitBreaker, sharedOutboundCircuitBreaker } from './network/circuit-breaker.js';
 import { RUNTIME_VERSION, RUNTIME_PHASE } from './runtime/version.js';
 import { auditAgentRuntime } from './agents/runtime-audit.js';
@@ -702,6 +703,33 @@ const requestHandler = async (req,res) => {
       const boundary=getAgentToolBoundary(agentId);
       if (!boundary) return send(res,404,{error:'agent_tool_boundary_not_found'});
       return send(res,200,{agentId,boundary});
+    }
+    // Agent tool-access scope: the persisted boundary mode plus the working
+    // directory it pins to. The legacy /tool-boundary route above is the static
+    // ecommerce profile; this one is the operator-editable scope every agent has.
+    if ((req.method==='GET'||req.method==='PATCH') && url.pathname.match(/^\/v1\/admin\/registry\/agents\/[^/]+\/boundary$/)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const agentId=decodeURIComponent(url.pathname.split('/')[5]);
+      // `resolve()` throws for an unknown or disabled agent; the admin surface
+      // wants a plain 404 for "no such agent", so look the record up directly.
+      const agent=(await agentsRegistry.list()).find(item=>item.id===agentId) ?? null;
+      if (!agent) return send(res,404,{error:'agent_not_found',agentId});
+      const effective=(record)=>resolveAgentAccess(record,{defaultRoot:projectContext.defaultRoot});
+      if (req.method==='GET') {
+        return send(res,200,{agentId,access:agentAccessRecord(agent),modes:TOOL_BOUNDARY_MODES,effective:effective(agent)});
+      }
+      const input=await body(req,config.maxBodyBytes);
+      if (input?.toolBoundary !== undefined && !isToolBoundaryMode(input.toolBoundary)) {
+        return send(res,400,{error:'tool_boundary_mode_invalid',allowedModes:TOOL_BOUNDARY_MODES,toolBoundary:input.toolBoundary});
+      }
+      const wanted=agentAccessRecord({...agent,...input});
+      if (wanted.toolBoundary==='working-directory' && !wanted.workingDirectory) {
+        return send(res,400,{error:'working_directory_required',toolBoundary:wanted.toolBoundary});
+      }
+      const next=await agentsRegistry.setAccess(agentId,input);
+      const access=agentAccessRecord(next);
+      await requestLog.info('agent.access.updated',{agentId,toolBoundary:access.toolBoundary,workingDirectory:access.workingDirectory});
+      return send(res,200,{agentId,access,modes:TOOL_BOUNDARY_MODES,effective:effective(next)});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/registry/agents') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});

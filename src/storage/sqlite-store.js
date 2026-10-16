@@ -24,6 +24,17 @@ const TABLES = {
   'mcp-settings': 'mcp_settings',
 };
 
+// Records whose JSON payload is mirrored into queryable columns. `data` stays the
+// source of truth; these columns exist so an operator can SELECT them directly.
+const EXTRA_COLUMNS = {
+  agents: ['tool_boundary', 'working_directory'],
+};
+
+const EXTRA_VALUES = {
+  tool_boundary: item => (item.toolBoundary == null || String(item.toolBoundary).trim() === '' ? null : String(item.toolBoundary)),
+  working_directory: item => (item.workingDirectory == null || String(item.workingDirectory).trim() === '' ? null : String(item.workingDirectory)),
+};
+
 export class SqliteStore {
   constructor(file) { this.filePath = path.resolve(file); this.db = null; }
   async init() {
@@ -56,8 +67,29 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_mcp_connections_session ON mcp_connections(json_extract(data,'$.sessionId'));
       CREATE INDEX IF NOT EXISTS idx_mcp_connections_lease ON mcp_connections(json_extract(data,'$.leaseExpiresAt'));
     `);
+    this._ensureColumns();
+  }
+  // Some records carry a few fields that operators want to query without parsing
+  // the JSON payload. They stay in `data` as the source of truth and are mirrored
+  // into real columns here, so a plain SELECT shows them.
+  _ensureColumns() {
+    for (const [table, columns] of Object.entries(EXTRA_COLUMNS)) {
+      const existing = new Set(this.db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name));
+      for (const name of columns) {
+        if (existing.has(name)) continue;
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} TEXT`);
+      }
+    }
   }
   _table(name) { const t = TABLES[name]; if (!t) throw new Error(`sqlite_collection_not_supported:${name}`); return t; }
+  _upsertStatement(table, extra = []) {
+    const columns = ['id', 'data', 'created_at', 'updated_at', ...extra];
+    const updates = ['data=excluded.data', 'updated_at=excluded.updated_at', ...extra.map(c => `${c}=excluded.${c}`)];
+    return this.db.prepare(`INSERT INTO ${table}(${columns.join(',')}) VALUES(${columns.map(() => '?').join(',')}) ON CONFLICT(id) DO UPDATE SET ${updates.join(',')}`);
+  }
+  _rowValues(item, now, extra = []) {
+    return [String(item.id), JSON.stringify(item), item.createdAt ?? now, now, ...extra.map(c => EXTRA_VALUES[c](item))];
+  }
   async read(name, fallback=[]) {
     const table=this._table(name);
     if(name==='mcp-audit') {
@@ -75,10 +107,11 @@ export class SqliteStore {
     }
     const existing=this.db.prepare(`SELECT id FROM ${table}`).all().map(r=>r.id);
     const keep=new Set();
-    const upsert=this.db.prepare(`INSERT INTO ${table}(id,data,created_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at`);
+    const extra=EXTRA_COLUMNS[name] ?? [];
+    const upsert=this._upsertStatement(table, extra);
     this.db.exec('BEGIN');
     try {
-      for(const item of value) { if(!item?.id) throw new Error(`sqlite_record_id_required:${name}`); keep.add(item.id); upsert.run(String(item.id),JSON.stringify(item),item.createdAt??now,now); }
+      for(const item of value) { if(!item?.id) throw new Error(`sqlite_record_id_required:${name}`); keep.add(item.id); upsert.run(...this._rowValues(item, now, extra)); }
       const del=this.db.prepare(`DELETE FROM ${table} WHERE id=?`); for(const old of existing) if(!keep.has(old)) del.run(old);
       this.db.exec('COMMIT');
     } catch(e) { this.db.exec('ROLLBACK'); throw e; }
@@ -91,8 +124,8 @@ export class SqliteStore {
       const stmt=this.db.prepare(`INSERT INTO ${table}(data,created_at) VALUES(?,?)`);
       stmt.run(JSON.stringify(item), item.timestamp ?? now); return item;
     }
-    const stmt=this.db.prepare(`INSERT INTO ${table}(id,data,created_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at`);
-    stmt.run(String(item.id), JSON.stringify(item), item.createdAt ?? now, now); return item;
+    const stmt=this._upsertStatement(table, EXTRA_COLUMNS[name] ?? []);
+    stmt.run(...this._rowValues(item, now, EXTRA_COLUMNS[name] ?? [])); return item;
   }
   async deleteById(name, id) {
     const table=this._table(name); const stmt=this.db.prepare(`DELETE FROM ${table} WHERE id=?`); return stmt.run(String(id)).changes;
