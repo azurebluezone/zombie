@@ -556,6 +556,18 @@ const requestHandler = async (req,res) => {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,201,{component:await toolsRegistry.register(await body(req, config.maxBodyBytes))});
     }
+    // Global tool switch. Execution only accepts REGISTERED/ENABLED/VERIFIED
+    // (see canResolveManifest), so DISABLED is what actually stops a tool from
+    // being runnable. Per-application switches live on
+    // /v1/admin/applications/capabilities/tools.
+    if (req.method==='PATCH' && /^\/v1\/admin\/registry\/tools\/[^/]+$/.test(url.pathname)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const toolId=decodeURIComponent(url.pathname.split('/')[5]);
+      const current=(await toolsRegistry.list()).find(t=>t.id===toolId);
+      if(!current) return send(res,404,{error:'tool_not_found'});
+      const patch=await body(req,config.maxBodyBytes);
+      return send(res,200,{component:await toolsRegistry.register({...current,...patch,id:toolId})});
+    }
     if (req.method==='GET' && url.pathname==='/v1/admin/registry/skills') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{components:await skillsRegistry.list()});

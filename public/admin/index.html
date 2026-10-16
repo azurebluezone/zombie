@@ -564,26 +564,35 @@ VIEWS['agent-mappings'] = { title: 'Agent Mappings', sub: 'Pin an agent to a spe
 } };
 
 /* tools */
-VIEWS.tools = { title: 'Tools', sub: 'Native tool registry and per-application permissions', render: async (v) => {
+VIEWS.tools = { title: 'Tools', sub: 'Native tool registry, global on/off switches and per-application permissions', render: async (v) => {
   const [{ components }, { permissions }, { applications }] = await Promise.all([
     api('/v1/admin/registry/tools'), api('/v1/admin/tools/permissions'), api('/v1/admin/applications')
   ]);
-  const nativeCount = components.filter(t => t.entry && (t.status === 'ENABLED' || t.status === 'VERIFIED')).length;
-  const rows = components.map(t =>
-    '<tr><td><strong>' + esc(t.name || t.id) + '</strong><div class="sub mono">' + esc(t.id) + '</div></td>' +
-    '<td>' + esc((t.capabilities || []).join(', ')) + '</td>' +
-    '<td>' + statusTag(t.status) + (t.requiresConsent ? ' <span class="tag warn">consent</span>' : '') + '</td>' +
-    '<td class="mono">' + esc(t.entry || '—') + '</td></tr>').join('');
+  // A tool is only runnable when it is enabled, has an entry point and its
+  // status is one the execution boundary accepts (REGISTERED/ENABLED/VERIFIED).
+  const isOn = t => t.enabled !== false && ['REGISTERED', 'ENABLED', 'VERIFIED'].includes(String(t.status || '').toUpperCase()) && Boolean(t.entry);
+  const runnable = components.filter(isOn).length;
+  const rows = components.map(t => {
+    const on = isOn(t);
+    return '<tr><td><strong>' + esc(t.name || t.id) + '</strong><div class="sub mono">' + esc(t.id) + '</div></td>' +
+      '<td>' + esc((t.capabilities || []).join(', ')) + '</td>' +
+      '<td>' + statusTag(t.status) + (t.requiresConsent ? ' <span class="tag warn">consent</span>' : '') +
+        '<div class="sub">' + (t.entry ? '<span class="mono">' + esc(t.entry) + '</span>' : '<span class="muted">no entry point</span>') + '</div></td>' +
+      '<td>' + (on ? '<span class="tag ok">runnable</span>' : '<span class="tag off">not runnable</span>') + '</td>' +
+      '<td class="actions"><div class="row">' +
+        '<button class="btn tiny ' + (on ? 'danger' : 'primary') + '" data-act="tool-toggle" data-id="' + esc(t.id) + '" data-on="' + on + '">' + (on ? 'Disable' : 'Enable') + '</button>' +
+      '</div></td></tr>';
+  }).join('');
   const prows = permissions.map(p => '<tr><td class="mono">' + esc(p.applicationId) + '</td><td class="mono">' + esc(p.toolId) + '</td><td>' + statusTag(p.effect) + '</td><td class="muted">' + esc(dash(p.createdAt)) + '</td>' +
-    '<td><button class="btn tiny danger" data-act="perm-revoke" data-app="' + esc(p.applicationId) + '" data-tool="' + esc(p.toolId) + '">Revoke</button></td></tr>').join('');
+    '<td class="actions"><button class="btn tiny danger" data-act="perm-revoke" data-app="' + esc(p.applicationId) + '" data-tool="' + esc(p.toolId) + '">Revoke</button></td></tr>').join('');
   v.innerHTML =
-    panel('Tool registry', nativeCount + ' runnable / ' + components.length + ' total', table(['Tool', 'Capabilities', 'Status', 'Entry'], rows, 'No tools.')) +
+    panel('Tool registry', runnable + ' runnable / ' + components.length + ' total', table(['Tool', 'Capabilities', 'Status', 'Runnable', ''], rows, 'No tools.')) +
     panel('Permissions', permissions.length + ' grant(s)', table(['Application', 'Tool', 'Effect', 'Created', ''], prows, 'No tool permissions granted.')) +
-    panel('Grant permission', '', '<div class="panel-b"><div class="row">' +
+    panel('Grant permission', '', '<div class="panel-b"><div class="row" style="align-items:flex-end">' +
       '<label class="f">Application<select id="perm-app">' + applications.map(a => '<option value="' + esc(a.id) + '">' + esc(a.name + ' (' + a.id + ')') + '</option>').join('') + '</select></label>' +
       '<label class="f">Tool<select id="perm-tool">' + components.filter(t => t.entry).map(t => '<option value="' + esc(t.id) + '">' + esc(t.id) + '</option>').join('') + '</select></label>' +
-      '<button class="btn primary" data-act="perm-grant">Grant</button>' +
-    '</div></div>');
+      '<button class="btn primary" data-act="perm-grant">Grant</button></div>' +
+      '<p class="muted" style="font-size:11.5px;margin:10px 0 0">Disabling a tool above stops it for every application. A grant here only permits one application; both must allow it.</p></div>');
 } };
 
 /* mcp */
@@ -798,8 +807,13 @@ document.addEventListener('click', async (ev) => {
     if (act === 'agent-add') { const id = el('a-id').value.trim(); if (!id) return toast('id required', true); await api('/v1/admin/registry/agents', { method: 'POST', body: { id, name: el('a-name').value.trim() || id, role: el('a-role').value.trim() } }); return done('Agent created'); }
     if (act === 'map-save') { await api('/v1/admin/agent-model-mappings/' + encodeURIComponent(el('map-agent').value), { method: 'PUT', body: { model: el('map-model').value } }); return done('Mapping saved'); }
     if (act === 'map-del') { await api('/v1/admin/agent-model-mappings/' + encodeURIComponent(b.dataset.id), { method: 'DELETE' }); return done('Mapping removed'); }
-    if (act === 'perm-grant') { await api('/v1/admin/tools/permissions', { method: 'POST', body: { applicationId: el('perm-app').value, toolId: el('perm-tool').value } }); return done('Permission granted'); }
-    if (act === 'perm-revoke') { await api('/v1/admin/tools/permissions', { method: 'DELETE', body: { applicationId: b.dataset.app, toolId: b.dataset.tool } }); return done('Permission revoked'); }
+    if (act === 'tool-toggle') {
+      const on = b.dataset.on === 'true';
+      await api('/v1/admin/registry/tools/' + encodeURIComponent(b.dataset.id), { method: 'PATCH', body: { status: on ? 'DISABLED' : 'ENABLED' } });
+      return done(b.dataset.id + (on ? ' disabled ✓' : ' enabled ✓'));
+    }
+    if (act === 'perm-grant') { await api('/v1/admin/tools/permissions', { method: 'POST', body: { applicationId: el('perm-app').value, toolId: el('perm-tool').value } }); return done('Permission granted ✓'); }
+    if (act === 'perm-revoke') { await api('/v1/admin/tools/permissions', { method: 'DELETE', body: { applicationId: b.dataset.app, toolId: b.dataset.tool } }); return done('Permission revoked ✓'); }
     if (act === 'mcp-discover') { await api('/v1/admin/mcp/endpoints/' + encodeURIComponent(b.dataset.id) + '/discover', { method: 'POST', body: {} }); return done('Endpoint discovered'); }
     if (act === 'mcp-reconcile') { await api('/v1/admin/mcp/reconcile', { method: 'POST', body: {} }); return done('Reconciled'); }
     if (act === 'mcp-sync') { await api('/v1/admin/registry/external-mcp/sync', { method: 'POST', body: {} }); return done('External MCP synced'); }
