@@ -824,7 +824,7 @@ VIEWS.mcp = { title: 'MCP', sub: 'Inbound server, connected clients and the outb
       (c.userAgent ? '<div class="sub muted" style="font-size:11px">' + esc(c.userAgent.slice(0, 60)) + '</div>' : '') + '</td>' +
     '<td class="mono" style="font-size:11.5px">' + esc(c.sessionId) + '</td>' +
     '<td>' + esc(appName(c.applicationId)) + '<div class="sub mono">' + esc(c.applicationId || '') + '</div></td>' +
-    '<td>' + (c.authMode === 'key' ? '<span class="tag ok">key</span>' : c.authMode === 'local-auto' ? '<span class="tag warn">auto local</span>' : '<span class="tag mute">—</span>') + '</td>' +
+    '<td>' + (c.authMode === 'key' ? '<span class="tag ok">key</span>' : (c.authMode === 'auto' || c.authMode === 'local-auto') ? '<span class="tag warn">auto</span>' : '<span class="tag mute">—</span>') + '</td>' +
     '<td class="mono">' + esc(c.protocolVersion || '') + '</td>' +
     '<td>' + c.requestCount + '<div class="sub">' + (c.methods || []).length + ' method(s)</div></td>' +
     '<td class="mono">' + esc(c.lastMethod || '') + '</td>' +
@@ -863,10 +863,10 @@ VIEWS.mcp = { title: 'MCP', sub: 'Inbound server, connected clients and the outb
           '<span class="tag mute">env default: ' + (auth.envRequireAuth ? 'required' : 'disabled') + '</span>' +
         '</div>' +
         '<p class="muted" style="font-size:12.5px;margin:0 0 10px">' + esc(auth.note) + '</p>' +
-        (auth.localApplication
+        (auth.application
           ? '<div class="sect">Unauthenticated calls are signed in as</div><div class="tsum">' +
-            '<span class="tag mute mono">' + esc(auth.localApplication.name) + '</span>' +
-            '<span class="tag mute mono">' + esc(auth.localApplication.id) + '</span></div>'
+            '<span class="tag mute mono">' + esc(auth.application.name) + '</span>' +
+            '<span class="tag mute mono">' + esc(auth.application.id) + '</span></div>'
           : '') +
         '<div class="row" style="margin-top:12px">' +
           '<button class="btn ' + (auth.requireAuth ? 'danger' : 'primary') + '" data-act="mcp-auth-toggle" data-next="' + (auth.requireAuth ? 'false' : 'true') + '">' +
@@ -1643,7 +1643,7 @@ document.addEventListener('click', async (ev) => {
       const next = b.dataset.next === 'true';
       const r = await api('/v1/admin/mcp/auth', { method: 'PATCH', body: { requireAuth: next } });
       // done() re-renders the view, so the panel reflects the new policy.
-      return done(next ? 'Authentication required on /mcp ✓' : 'Authentication disabled on /mcp ✓' + (r.localApplication ? ' · ' + r.localApplication.id : ''));
+      return done(next ? 'Authentication required on /mcp ✓' : 'Authentication disabled on /mcp ✓' + (r.application ? ' · ' + r.application.id : ''));
     }
     if (act === 'mcp-auth-reset') {
       await api('/v1/admin/mcp/auth', { method: 'DELETE' });

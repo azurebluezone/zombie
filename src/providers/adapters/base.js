@@ -4,7 +4,7 @@ import { assertSafeOutboundUrl } from '../../network/outbound-policy.js';
 import { protectOutbound } from '../../network/circuit-breaker.js';
 import { RUNTIME_USER_AGENT } from '../../runtime/version.js';
 
-// Socket inactivity budget for a single provider call. Local CPU-only runtimes
+// Socket inactivity budget for a single provider call. A CPU-only runtime
 // can spend a long time loading a model before the first byte arrives, so the
 // effective value is configurable through PROVIDER_TIMEOUT_MS and can be
 // overridden per request with input.timeoutMs.

@@ -4,6 +4,22 @@ import { resolveRuntimePath } from '../runtime/paths.js';
 export const envLoadResult = loadEnvFile();
 export function env(name, fallback = undefined) { return process.env[name] ?? fallback; }
 
+// Reads a renamed variable, still honouring the name a previous release shipped so
+// an existing .env keeps working. The deprecation is reported once, with the exact
+// line to change, rather than failing silently or breaking a running deployment.
+const deprecatedEnvReported = new Set();
+function renamedEnv(currentName, legacyName, fallback = '') {
+  const current = process.env[currentName];
+  if (current !== undefined) return current;
+  const legacy = process.env[legacyName];
+  if (legacy === undefined) return fallback;
+  if (!deprecatedEnvReported.has(legacyName)) {
+    deprecatedEnvReported.add(legacyName);
+    console.warn(`[env] ${legacyName} is deprecated; rename it to ${currentName} in .env (the old name still works).`);
+  }
+  return legacy;
+}
+
 function numberEnv(name, fallback, {min = null, max = null} = {}) {
   const raw = env(name, String(fallback));
   const value = Number(raw);
@@ -36,15 +52,37 @@ function pathListEnv(name) {
 // `OLLAMA_API_KEY`, so honour that as a fallback for every provider whose
 // configured driver is `ollama` (matched from PROVIDER_CONFIG_JSON rather than
 // a hardcoded id list, so a renamed or extra Ollama provider keeps working).
-function resolveProviderApiKeys() {
-  const keys = Object.fromEntries(Object.entries(process.env)
-    .filter(([key]) => key.startsWith('PROVIDER_KEY_'))
-    .map(([key, value]) => [key.slice('PROVIDER_KEY_'.length).toLowerCase().replace(/_/g, '-'), value]));
-  const ollamaKey = env('OLLAMA_API_KEY', '');
+// A provider id that an earlier release shipped. Operators already have the old
+// variable name in .env, so it keeps working: the legacy name is mapped onto the
+// renamed provider instead of silently becoming an unused variable that leaves the
+// provider unauthenticated. The explicit (new) name always wins.
+const PROVIDER_KEY_ALIASES = Object.freeze({ 'ollama-local': 'ollama-selfhosted' });
+
+function providerKeyIdFromEnvName(key) {
+  return key.slice('PROVIDER_KEY_'.length).toLowerCase().replace(/_/g, '-');
+}
+
+// Exported (with an injectable environment) so the alias mapping can be verified
+// directly instead of by re-implementing it in a test.
+export function resolveProviderApiKeys(source = process.env) {
+  const entries = Object.entries(source).filter(([key]) => key.startsWith('PROVIDER_KEY_'));
+  const keys = {};
+  // Pass 1: explicit names, so a renamed variable always beats its legacy alias.
+  for (const [key, value] of entries) {
+    const id = providerKeyIdFromEnvName(key);
+    if (PROVIDER_KEY_ALIASES[id]) continue;
+    keys[id] = value;
+  }
+  // Pass 2: legacy names, only where the explicit name is absent.
+  for (const [key, value] of entries) {
+    const target = PROVIDER_KEY_ALIASES[providerKeyIdFromEnvName(key)];
+    if (target && keys[target] === undefined) keys[target] = value;
+  }
+  const ollamaKey = source.OLLAMA_API_KEY ?? '';
   if (!ollamaKey) return keys;
   let declared = [];
   try {
-    const parsed = JSON.parse(env('PROVIDER_CONFIG_JSON', '[]'));
+    const parsed = JSON.parse(source.PROVIDER_CONFIG_JSON ?? '[]');
     if (Array.isArray(parsed)) declared = parsed;
   } catch { declared = []; }
   for (const provider of declared) {
@@ -73,13 +111,15 @@ export const config = {
     path: resolveRuntimePath(env('UDS_PATH', './data/runtime.sock'))
   },
   adminToken: env('ADMIN_TOKEN', ''),
-  localAuthBypass: env('LOCAL_AUTH_BYPASS', 'false') === 'true',
+  // Loopback requests are the operator sitting at the machine; a request arriving
+  // from anywhere else is not. The old LOCAL_AUTH_BYPASS name still works.
+  loopbackAuthBypass: renamedEnv('LOOPBACK_AUTH_BYPASS', 'LOCAL_AUTH_BYPASS', 'false') === 'true',
   runtimeSecret: env('RUNTIME_SECRET', ''),
   dataDir: resolveRuntimePath(env('DATA_DIR', './data')),
   sqlitePath: resolveRuntimePath(env('SQLITE_PATH', './data/runtime.sqlite')),
   migrateJsonOnStart: env('MIGRATE_JSON_ON_START', 'false') === 'true',
   allowPlaintextHttp: env('ALLOW_PLAINTEXT_HTTP', 'false') === 'true',
-  // Tool execution remains disabled until the local deployment verification loop passes.
+  // Tool execution remains disabled until the deployment verification loop passes.
   executionMode: ['tools-enabled', 'chat-only'].includes(env('ZOMBIECODER_EXECUTION_MODE', 'chat-only')) ? env('ZOMBIECODER_EXECUTION_MODE', 'chat-only') : 'chat-only',
   ollamaBaseUrl: env('OLLAMA_BASE_URL', 'http://127.0.0.1:11434/v1'),
   providerCatalogSyncUrl: env('PROVIDER_CATALOG_SYNC_URL', ''),
@@ -87,7 +127,7 @@ export const config = {
   providerCatalogApiKey: env('PROVIDER_CATALOG_API_KEY', ''),
   providerSyncTimeoutMs: numberEnv('PROVIDER_SYNC_TIMEOUT_MS', 30000, {min:1000,max:120000}),
   // Socket inactivity budget for one provider chat/models call. Raise it for slow
-  // local runtimes whose cold model load can exceed the 30s default.
+  // a self-hosted runtime whose cold model load can exceed the 30s default.
   providerTimeoutMs: numberEnv('PROVIDER_TIMEOUT_MS', 30000, {min:1000,max:600000}),
   // Discover each enabled provider's real model list during startup bootstrap so
   // the stored catalog reflects what the upstream actually serves instead of a
@@ -139,8 +179,8 @@ export const config = {
   // bounded by PROJECT_ROOTS / the runtime's allowed roots.
   mcpServerProjectRoot: env('MCP_SERVER_PROJECT_ROOT', ''),
   // Inbound MCP authentication. `required` keeps POST /mcp behind an application
-  // key (the existing behaviour). `disabled` is for loopback-only local work: the
-  // runtime then signs inbound MCP in as an auto-provisioned local application so
+  // key (the existing behaviour). `disabled` is for loopback-only work: the
+  // runtime then signs inbound MCP in as an auto-provisioned application so
   // sessions, tool permissions and audit entries still have a real owner. An
   // admin override can change this at runtime without editing .env or restarting.
   mcpRequireAuth: mcpAuthRequiredEnv(),

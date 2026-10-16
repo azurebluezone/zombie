@@ -7,6 +7,13 @@ export function parseProviderBootConfig(raw = '') {
 
 const PLACEHOLDER_PATTERN = /^REPLACE_WITH_/i;
 
+// A provider id that a previous release shipped, mapped to the id that replaced it.
+// `ollama-local` was renamed to `ollama-selfhosted`: the old wording made an
+// operator (and other agents reading the config) treat a real, OpenAI-compatible
+// endpoint as a throwaway toy. A stored row under a legacy id is retired on boot
+// so the console does not list a provider that no longer exists in the seed.
+const LEGACY_PROVIDER_IDS = Object.freeze({ 'ollama-local': 'ollama-selfhosted' });
+
 // Fields that belong to the running deployment rather than to the .env seed:
 // they are produced by model discovery, by an operator through the admin API, or
 // by a health check. Restarting the runtime must never reset them.
@@ -86,6 +93,18 @@ export async function refreshProviderModelsOnStart({ registry, config = {}, logg
 export async function bootstrapProviders({ registry, config, logger, bootConfig = undefined } = {}) {
   const boot = Array.isArray(bootConfig) ? bootConfig : parseProviderBootConfig(process.env.PROVIDER_CONFIG_JSON ?? '');
   const existingById = new Map((await registry.list()).map(item => [item.id, item]));
+  // Retire a stored provider that only a previous release's id can explain. The
+  // operator's own config always wins: an id the seed still declares is untouched.
+  const declaredIds = new Set(boot.map(item => String(item.id)));
+  const retired = [];
+  for (const [legacyId, replacementId] of Object.entries(LEGACY_PROVIDER_IDS)) {
+    if (declaredIds.has(legacyId) || !declaredIds.has(replacementId) || !existingById.has(legacyId)) continue;
+    if (await registry.remove(legacyId)) {
+      existingById.delete(legacyId);
+      retired.push({ id: legacyId, replacedBy: replacementId });
+    }
+  }
+  if (retired.length) await logger?.info?.('provider.legacy_id_retired', { providers: retired });
   const registered = [];
   for (const item of boot) {
     const seeded = carryForwardProviderState(existingById.get(item.id), item);

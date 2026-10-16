@@ -26,7 +26,7 @@ const rows = [
   ['auto-ssot', 'maintain a bounded project source of truth', 'MERGE', 'src/context/ssot.js + src/context/project-context.js', 'Keep the purpose; do not reproduce legacy autoSSOT file mutation semantics blindly.'],
   ['syllabus-memory', 'retain project/session knowledge without unbounded prompt growth', 'MERGE', 'src/context/syllabus.js + src/context/memory.js + src/session/state.js', 'Use bounded retrieval rather than unconditional full-history injection.'],
   ['mcp.permissions', 'prevent unauthorized external tool execution', 'KEEP', 'src/mcp/permissions.js + src/mcp/audit.js', 'Default-deny and durable audit are the correct control-plane boundary.'],
-  ['mcp.uds', 'low-overhead local process transport', 'KEEP', 'src/transport/server.js', 'UDS is a transport boundary; it must not be confused with UDP or provider protocol semantics.'],
+  ['mcp.uds', 'low-overhead process transport', 'KEEP', 'src/transport/server.js', 'UDS is a transport boundary; it must not be confused with UDP or provider protocol semantics.'],
   ['web-function', 'answer from external web evidence', 'REPLACE', 'src/execution/task-policy.js + registered web_search tool', 'Expose only web_search for this task profile; no unrelated filesystem or execution tools are needed.'],
   ['file-line-answer', 'answer with exact workspace evidence', 'REPLACE', 'src/execution/task-policy.js + registered read_file tool', 'Require source + locator evidence; a browser-only function should not invent file access.'],
   ['workspace-user-directory', 'create a bounded per-user workspace', 'MERGE', 'src/execution/context.js + src/execution/tool-adapter.js', 'Directory creation belongs to execution scope/path policy, not to a generic chat function.'],

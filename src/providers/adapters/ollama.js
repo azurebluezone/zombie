@@ -3,7 +3,7 @@ import { stripRuntimeFields } from './request-shape.js';
 import { OpenAIFamilyProvider } from './openai-family.js';
 
 export class OllamaProvider {
-  constructor({ id='ollama-local', baseUrl, apiKey='', defaultModel='', mode='openai-compatible', networkPolicy = {}, timeoutMs = undefined } = {}) {
+  constructor({ id='ollama-selfhosted', baseUrl, apiKey='', defaultModel='', mode='openai-compatible', networkPolicy = {}, timeoutMs = undefined } = {}) {
     this.id=id; this.name='Ollama'; this.mode=mode; this.defaultModel=defaultModel; this.apiKey=apiKey; this.baseUrl=String(baseUrl ?? '').replace(/\/$/,''); this.networkPolicy=networkPolicy; this.timeoutMs=timeoutMs;
     this.capabilities={streaming:true,functionCalling:true,chatCompletions:true,models:true};
     if (mode === 'openai-compatible') this.compat = new OpenAIFamilyProvider({id,name:this.name,baseUrl:this.baseUrl,apiKey,defaultModel,networkPolicy,timeoutMs});

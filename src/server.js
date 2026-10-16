@@ -154,7 +154,7 @@ function isLoopbackRequest(req) {
   return address === '127.0.0.1' || address === '::1';
 }
 const adminOk = (req) => isAdminAuthorized(bearer(req), config.adminToken) ||
-  (config.localAuthBypass && !config.adminToken && isLoopbackRequest(req));
+  (config.loopbackAuthBypass && !config.adminToken && isLoopbackRequest(req));
 // The runnable native tool surface. An agent's access scope is "all", so this is
 // the surface every agent sees: registered tools that can actually execute.
 async function runnableToolIds() {
@@ -187,7 +187,7 @@ async function executeMcpServerTool(applicationId, toolId, args, requestId, meta
   const decision = await toolPolicy.decision(applicationId, toolId);
   if (!decision.allowed) throw new Error(`tool_not_permitted:${decision.reason}`);
   const requestedRoot = String(meta?.projectRoot ?? config.mcpServerProjectRoot ?? '').trim() || null;
-  // In the unrestricted local mode the project-root allowlist is no longer the
+  // In the unrestricted mode the project-root allowlist is no longer the
   // boundary, matching what an agent scope already grants the chat path.
   const projectRoot = projectContext.root(requestedRoot, { allowAnyRoot: config.toolAccessMode === 'unrestricted' });
   const goal = `mcp tools/call ${toolId}`;
@@ -466,12 +466,12 @@ const requestHandler = async (req,res) => {
       // A presented key always wins, so an authenticated client is attributed to
       // its own application even while authentication is disabled. Only when no
       // key is presented (or the key is invalid) does the policy decide: either
-      // 401 as before, or the auto-provisioned local application signs the call in
+      // 401 as before, or the auto-provisioned application signs the call in
       // so sessions, tool permissions and audit still have an owner.
       const presentedApp=authenticateApiKey(bearer(req), await applications());
       const mcpAuthPolicy=await mcpServerAuth.policy();
       let mcpApp=presentedApp;
-      if (!mcpApp && mcpAuthPolicy.requireAuth===false) mcpApp=await mcpServerAuth.localApplication();
+      if (!mcpApp && mcpAuthPolicy.requireAuth===false) mcpApp=await mcpServerAuth.autoProvisionedApplication();
       if (!mcpApp) {
         requestState.outcome='unauthorized';
         await requestLog.warn('mcp.server.auth_failed',{reason:'missing_or_invalid_or_expired_key',requireAuth:true});
@@ -504,7 +504,7 @@ const requestHandler = async (req,res) => {
           applicationId: mcpApp.id,
           applicationName: mcpApp.name ?? null,
           userAgent: req.headers['user-agent'] ?? null,
-          authMode: presentedApp ? 'key' : 'local-auto',
+          authMode: presentedApp ? 'key' : 'auto',
           method: mcpMessage?.method ?? null,
           requestId: mcpRequestId
         }).catch(()=>{});
@@ -1029,21 +1029,25 @@ const requestHandler = async (req,res) => {
     }
     // Inbound MCP authentication policy. The env var sets the default; an admin
     // override persisted in `mcp-settings` wins, so authentication can be turned
-    // off for local work from the console without editing .env or restarting.
+    // off from the console without editing .env or restarting.
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/auth') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const policy=await mcpServerAuth.policy();
-      const local=policy.requireAuth===false ? await mcpServerAuth.localApplication() : null;
+      const autoApp=policy.requireAuth===false ? await mcpServerAuth.autoProvisionedApplication() : null;
+      const autoAppView=autoApp?{id:autoApp.id,name:autoApp.name,createdAt:autoApp.createdAt,autoProvisioned:true}:null;
       return send(res,200,{
         requireAuth:policy.requireAuth,
         source:policy.source,
         envRequireAuth:policy.envRequireAuth,
         updatedAt:policy.updatedAt,
         serverEnabled:config.mcpServerEnabled===true,
-        localApplication:local?{id:local.id,name:local.name,createdAt:local.createdAt,autoProvisioned:true}:null,
+        application:autoAppView,
+        // `localApplication` is the field name an earlier release returned; it is kept
+        // so an already-installed client keeps reading the same payload.
+        localApplication:autoAppView,
         note:policy.requireAuth
           ?'POST /mcp requires a valid application key (Authorization: Bearer zc_...).'
-          :'POST /mcp accepts unauthenticated calls; they are signed in as the auto-provisioned local application.'
+          :'POST /mcp accepts unauthenticated calls; they are signed in as the auto-provisioned application.'
       });
     }
     if (req.method==='PATCH' && url.pathname==='/v1/admin/mcp/auth') {
@@ -1053,9 +1057,10 @@ const requestHandler = async (req,res) => {
       catch (error) { return send(res,Number(error?.statusCode)||400,{error:'invalid_body'}); }
       if (typeof input?.requireAuth!=='boolean') return send(res,400,{error:'requireAuth_must_be_boolean'});
       const policy=await mcpServerAuth.setRequireAuth(input.requireAuth);
-      const local=policy.requireAuth===false ? await mcpServerAuth.localApplication() : null;
+      const autoApp=policy.requireAuth===false ? await mcpServerAuth.autoProvisionedApplication() : null;
+      const autoAppView=autoApp?{id:autoApp.id,name:autoApp.name}:null;
       await requestLog.info('mcp.server.auth_policy_changed',{requireAuth:policy.requireAuth,source:policy.source});
-      return send(res,200,{requireAuth:policy.requireAuth,source:policy.source,envRequireAuth:policy.envRequireAuth,localApplication:local?{id:local.id,name:local.name}:null});
+      return send(res,200,{requireAuth:policy.requireAuth,source:policy.source,envRequireAuth:policy.envRequireAuth,application:autoAppView,localApplication:autoAppView});
     }
     if (req.method==='DELETE' && url.pathname==='/v1/admin/mcp/auth') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -1101,7 +1106,7 @@ const requestHandler = async (req,res) => {
       return send(res,200,{providerId:input.provider,models:await provider.listModels()});
     }
     if (req.method==='POST' && url.pathname==='/v1/mcp/tools/call') {
-      if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled',message:'Tool execution is disabled until the local verification loop passes.'});
+      if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled',message:'Tool execution is disabled until the deployment verification loop passes.'});
       const app=await authenticateRequest(req, requestLog, requestState);
       if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
       const input=await body(req, config.maxBodyBytes);
@@ -1139,7 +1144,7 @@ const requestHandler = async (req,res) => {
       return send(res,200,{applicationId:app.id, taskPolicy, ...await execution.prepare({...input, toolIds:taskPolicy.effectiveToolIds})});
     }
     if (req.method==='POST' && url.pathname==='/v1/execution/run') {
-      if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled',message:'Execution is disabled until the local verification loop passes.'});
+      if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled',message:'Execution is disabled until the deployment verification loop passes.'});
       const app=await authenticateRequest(req, requestLog, requestState);
       if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
       let input=await applyAgentModelMapping(await body(req, config.maxBodyBytes));
@@ -1210,7 +1215,7 @@ const requestHandler = async (req,res) => {
       return send(res,200,{applicationId:app.id,session,taskPolicy,prepared,result:publicResult,evidence:maskEvidenceForPublic(evidenceState),verified});
     }
     if (req.method==='POST' && url.pathname==='/v1/execution/stream') {
-      if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled',message:'Execution is disabled until the local verification loop passes.'});
+      if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled',message:'Execution is disabled until the deployment verification loop passes.'});
       const app=await authenticateRequest(req, requestLog, requestState);
       if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
       let input=await applyAgentModelMapping(await body(req, config.maxBodyBytes));

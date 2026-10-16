@@ -10,7 +10,7 @@ export class ToolPolicy {
     const permission = await this.permissionAllowed(applicationId,toolId);
     const setting = this.configResolver ? await this.configResolver.toolSetting(applicationId,toolId) : {enabled:null,source:'unconfigured'};
     if (setting.enabled === false) return {allowed:false,reason:'tool_disabled_by_configuration',permission,setting};
-    // `unrestricted` is the loopback-only local mode: the operator has declared
+    // `unrestricted` is the loopback-only mode: the operator has declared
     // that every application may reach every runnable tool, so a missing grant is
     // no longer a refusal. An explicit configuration disable still wins above.
     if (this.accessMode === 'unrestricted') return {allowed:true,reason:'allowed_by_access_mode',permission,setting};

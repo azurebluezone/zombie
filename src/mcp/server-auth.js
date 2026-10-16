@@ -1,7 +1,7 @@
 /**
  * Inbound MCP authentication policy.
  *
- * The runtime is normally loopback-only, so an operator working locally does not
+ * The runtime is normally loopback-only, so an operator at the machine does not
  * want to hand every MCP client an application key before it can call a tool.
  * This module owns two things:
  *
@@ -11,26 +11,29 @@
  *      restart. The existing auth flow is untouched while the policy stays
  *      `required`.
  *
- *   2. The auto-provisioned local application that signs in unauthenticated
- *      inbound MCP traffic when authentication is disabled. Sessions, tool
- *      permissions and audit entries are all keyed by application id, so the
- *      runtime still needs a real owner even when nobody presented a key. The key
- *      is generated, hashed and stored, and the raw value is discarded on purpose:
- *      with authentication disabled no caller needs it, so there is nothing to
- *      leak.
+ *   2. The auto-provisioned application that signs in unauthenticated inbound MCP
+ *      traffic when authentication is disabled. Sessions, tool permissions and
+ *      audit entries are all keyed by application id, so the runtime still needs a
+ *      real owner even when nobody presented a key. The key is generated, hashed
+ *      and stored, and the raw value is discarded on purpose: with authentication
+ *      disabled no caller needs it, so there is nothing to leak.
  */
 import { createApiKey, hashSecret } from '../auth/application-auth.js';
 import { id } from '../core/ids.js';
 
 const SETTINGS_ID = 'mcp-server-auth';
-const LOCAL_APP_NAME = 'mcp-local-auto';
+const AUTO_APP_NAME = 'mcp-auto-provisioned';
+// The name this application was created with by an earlier release. It is renamed
+// in place on read so an existing deployment stops showing the old wording without
+// losing the application id that sessions and audit entries already point at.
+const LEGACY_AUTO_APP_NAMES = ['mcp-local-auto'];
 
 export class McpServerAuth {
   constructor(store, { requireAuth = true, collection = 'mcp-settings' } = {}) {
     this.store = store;
     this.collection = collection;
     this.envRequireAuth = requireAuth !== false;
-    this._localAppInFlight = null;
+    this._autoAppInFlight = null;
   }
 
   async _settings() {
@@ -80,16 +83,23 @@ export class McpServerAuth {
    * then reused. The raw key is never stored or returned: it exists only long
    * enough to be hashed, because nothing authenticates with it.
    */
-  async localApplication() {
-    if (this._localAppInFlight) return this._localAppInFlight;
-    this._localAppInFlight = (async () => {
+  async autoProvisionedApplication() {
+    if (this._autoAppInFlight) return this._autoAppInFlight;
+    this._autoAppInFlight = (async () => {
       const apps = await this.store.read('applications', []);
       const list = Array.isArray(apps) ? apps : [];
       const existing = list.find(app => app.managedBy === 'mcp-server' && app.autoProvisioned === true);
-      if (existing) return existing;
+      if (existing) {
+        if (LEGACY_AUTO_APP_NAMES.includes(existing.name)) {
+          const renamed = { ...existing, name: AUTO_APP_NAME };
+          await this.store.write('applications', list.map(app => (app.id === existing.id ? renamed : app)));
+          return renamed;
+        }
+        return existing;
+      }
       const app = {
         id: id('app'),
-        name: LOCAL_APP_NAME,
+        name: AUTO_APP_NAME,
         status: 'active',
         expiresAt: null,
         apiKeyHash: hashSecret(createApiKey()),
@@ -101,7 +111,7 @@ export class McpServerAuth {
       };
       await this.store.write('applications', [...list, app]);
       return app;
-    })().finally(() => { this._localAppInFlight = null; });
-    return this._localAppInFlight;
+    })().finally(() => { this._autoAppInFlight = null; });
+    return this._autoAppInFlight;
   }
 }

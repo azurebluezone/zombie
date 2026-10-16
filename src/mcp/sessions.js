@@ -44,7 +44,7 @@ export class McpClientSessions {
    * @param {string|null} [msg.applicationId]  authenticated MCP caller
    * @param {string|null} [msg.applicationName]
    * @param {string|null} [msg.userAgent]      raw User-Agent header, a second identity signal
-   * @param {string|null} [msg.authMode]       'key' | 'local-auto'
+   * @param {string|null} [msg.authMode]       'key' | 'auto' (a stored session may still carry the legacy 'local-auto')
    * @param {string|null} [msg.method]         JSON-RPC method just handled
    * @param {string|null} [msg.requestId]
    * @param {boolean} [msg.closed]

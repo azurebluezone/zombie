@@ -1,6 +1,6 @@
 # ZombieCoder Runtime
 
-**An evidence-first, local-first, provider-neutral runtime for AI agents.**
+**An evidence-first, provider-neutral runtime for AI agents.**
 
 `v0.49.0` · Node.js `>= 22.5.0` · **zero runtime dependencies** · single process, loopback-first
 
@@ -60,7 +60,7 @@ ZombieCoder Runtime হলো একটি **provider-neutral AI runtime** — �
 
 ## 1. What this is
 
-ZombieCoder Runtime is a **local runtime**, not a SaaS. One Node.js process gives you:
+ZombieCoder Runtime is a **self-hosted runtime**, not a SaaS. One Node.js process gives you:
 
 | Layer | What it does |
 | --- | --- |
@@ -242,8 +242,8 @@ can expose the same tool name safely. Calls are recorded in an MCP audit trail w
 
 **As a server**, when `MCP_SERVER_ENABLED=true` the runtime exposes `POST /mcp` with the
 same 25 runnable tools, negotiates the protocol version, and supports optional
-authentication. For loopback-only local work an admin switch can relax inbound auth while
-still auto-provisioning a local application, so sessions, permissions and audit rows keep
+authentication. For loopback-only work an admin switch can relax inbound auth while
+still auto-provisioning an application, so sessions, permissions and audit rows keep
 a real owner.
 
 External MCP tool calls are reachable through `POST /v1/mcp/tools/call` (application
@@ -280,7 +280,7 @@ The evidence gate is the spine of the runtime:
 | --- | --- |
 | **Intended** | design goal only |
 | **Implemented** | code exists in a named build; correctness is not implied |
-| **Locally tested** | a local test passed; live compatibility is not implied |
+| **Suite-verified** | the test suite passed; live compatibility is not implied |
 | **Live verified** | an identified real endpoint/client passed a recorded test |
 | **Not tested** | the check was not run |
 | **Unverified** | evidence is missing or incomplete |
@@ -349,7 +349,7 @@ Stop it with `node start.js --stop`.
 
 | Section | Covers |
 | --- | --- |
-| Runtime | host, port, HTTPS, UDS, data/log dirs, SQLite path, execution mode, admin token, local auth bypass |
+| Runtime | host, port, HTTPS, UDS, data/log dirs, SQLite path, execution mode, admin token, loopback auth bypass |
 | Provider routing | provider catalog sync, timeouts, model refresh, API keys |
 | Network policy | plaintext HTTP, private networks, host allowlists, response size caps |
 | MCP | external endpoints, discovery, inbound server, inbound auth, network policy |
@@ -396,7 +396,7 @@ concrete routes plus 17 compatibility routes). The 91 current routes group as fo
 second source of truth.
 
 Admin API calls work on loopback without a token when `LOCAL_AUTH_BYPASS=true` and
-`ADMIN_TOKEN` is empty — which is the intended local development setup, and the reason
+`ADMIN_TOKEN` is empty — which is the intended setup on a machine you control, and the reason
 this runtime must never be exposed beyond `127.0.0.1`.
 
 A tool-loop chat requires explicit consent:
@@ -445,7 +445,7 @@ pre-existing:
   runtime now negotiates (stale fixture).
 - `server-side PHP integration` — requires a `php` binary that is not installed here.
 
-Treat a green suite as *locally tested*, never as *live verified*.
+Treat a green suite as *suite-verified*, never as *live verified*.
 
 ## 16. Security model
 
@@ -458,16 +458,16 @@ Treat a green suite as *locally tested*, never as *live verified*.
   access modes.
 - **Consent** is required before risky or irreversible actions.
 - **The chat page provisions its own application** when the admin API is reachable
-  without a token on loopback: it creates (or rotates) one `chat-local-*` application per
+  without a token on loopback: it creates (or rotates) one `chat-page-*` application per
   browser and stores the key in that browser's `localStorage`, so a normal user can just
   type. This grants no new authority — it uses the same loopback admin bypass that already
   exists — but it is another reason this runtime must stay on `127.0.0.1`. Where the admin
   API is protected, the create call answers `401` and the page falls back to the manual key
   bar.
-- **Local auth bypass is a development affordance**, not a security control. If you enable
+- **The loopback auth bypass is a development affordance**, not a security control. If you enable
   remote access, set `ADMIN_TOKEN` and application keys, and terminate TLS properly.
 
-Known, accepted local-only gaps: `DELETE /mcp` terminates a session without authentication
+Known, accepted gaps: `DELETE /mcp` terminates a session without authentication
 (loopback only), and `GET /mcp` returns `405` (optional in Streamable HTTP).
 
 ## 17. Known limitations

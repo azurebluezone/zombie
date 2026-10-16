@@ -24,7 +24,7 @@ const PROFILES = Object.freeze({
   }),
   task_planning: Object.freeze({
     id: 'task_planning',
-    purpose: 'Create or maintain a project-local plan without executing unrelated actions.',
+    purpose: 'Create or maintain a plan for this project without executing unrelated actions.',
     consentRequired: false,
     evidence: {mode: 'plan_only', requireSource: false, requireLocator: false},
     allowedToolHints: Object.freeze(['task_planner','todo_manager','read_file','list_directory']),

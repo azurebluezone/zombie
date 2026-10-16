@@ -13,8 +13,8 @@ function requireConfiguredModel(model) {
 
 function defaultProvider(config) {
   return {
-    id: 'ollama-local',
-    name: 'Ollama Local Compatible Endpoint',
+    id: 'ollama-selfhosted',
+    name: 'Ollama Self-Hosted',
     baseUrl: config?.ollamaBaseUrl ?? process.env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434/v1',
     defaultModel: '',
     models: [],
@@ -85,6 +85,20 @@ export class ProviderRegistry {
     await this.store.write('providers', next);
     this.cache.delete(item.id);
     return item;
+  }
+
+  /**
+   * Remove a stored provider. Used by the boot migration that retires an id a
+   * previous release shipped, so a renamed provider does not leave a phantom row
+   * behind in the admin console.
+   */
+  async remove(id) {
+    const list = await this.list();
+    const next = list.filter((p) => p.id !== String(id));
+    if (next.length === list.length) return false;
+    await this.store.write('providers', next);
+    this.cache.delete(String(id));
+    return true;
   }
 
   async resolve(id) {

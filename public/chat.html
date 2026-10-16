@@ -126,7 +126,7 @@ let current = null; // {bodyEl, metaEl, textEl}
 function setStatus(text, on) { el('status-text').textContent = text; el('status-dot').className = 'dot' + (on ? ' on' : ''); }
 function showKeyBar(show) { el('keybar').classList.toggle('show', !!show); }
 
-// Local convenience. On loopback the admin API is reachable without a token, so
+// Convenience. On loopback the admin API is reachable without a token, so
 // this page can provision its own application instead of asking the operator to
 // create one in Admin -> Settings and paste the key. Each browser owns one
 // application, named randomly and remembered here, so two browsers never fight
@@ -135,7 +135,7 @@ function showKeyBar(show) { el('keybar').classList.toggle('show', !!show); }
 async function ensureKey() {
   if (key) return true;
   try {
-    const name = localStorage.getItem(APP_STORE) || ('chat-local-' + Math.random().toString(16).slice(2, 6));
+    const name = localStorage.getItem(APP_STORE) || ('chat-page-' + Math.random().toString(16).slice(2, 6));
     const listRes = await fetch('/v1/admin/applications');
     if (!listRes.ok) return false;
     const apps = (await listRes.json()).applications || [];
@@ -149,7 +149,7 @@ async function ensureKey() {
       const created = await fetch('/v1/admin/applications', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name, note: 'Auto-provisioned by the chat page for local work.' })
+        body: JSON.stringify({ name, note: 'Auto-provisioned by the chat page.' })
       });
       if (!created.ok) return false;
       apiKey = (await created.json()).apiKey || '';
@@ -158,7 +158,7 @@ async function ensureKey() {
     localStorage.setItem(APP_STORE, name);
     localStorage.setItem(KEY_STORE, apiKey);
     key = apiKey;
-    el('hint').textContent = 'Local application "' + name + '" is in use. Its key is stored in this browser only.';
+    el('hint').textContent = 'Application "' + name + '" is in use. Its key is stored in this browser only.';
     return true;
   } catch { return false; }
 }
@@ -301,7 +301,7 @@ el('keysave').addEventListener('click', () => {
   if (!key) return;
   localStorage.setItem(KEY_STORE, key);
   el('keyinput').value = ''; showKeyBar(false); setStatus('ready', true);
-  el('hint').textContent = 'Key saved locally in this browser (localStorage). It is never sent anywhere except this runtime.';
+  el('hint').textContent = 'Key saved in this browser (localStorage). It is never sent anywhere except this runtime.';
 });
 el('newchat').addEventListener('click', () => { history = []; current = null; el('log').innerHTML = ''; renderEmpty(); });
 document.querySelectorAll('.card').forEach(c => c.addEventListener('click', () => { el('input').value = c.dataset.p; el('send').click(); }));
