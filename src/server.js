@@ -1,0 +1,1207 @@
+import { mkdir, readFile, open, stat } from 'node:fs/promises';
+import path from 'node:path';
+import { config } from './config/env.js';
+import { PROJECT_ROOT, fromRoot } from './runtime/paths.js';
+import { createStore } from './storage/storage.js';
+import { createApiKey, hashSecret, authenticateApiKey } from './auth/application-auth.js';
+import { isAdminAuthorized } from './auth/admin-auth.js';
+import { id } from './core/ids.js';
+import { McpRegistry } from './mcp/registry.js';
+import { ProviderRegistry } from './providers/registry.js';
+import { ContextResolver } from './context/resolver.js';
+import { McpPermissions } from './mcp/permissions.js';
+import { McpAudit } from './mcp/audit.js';
+import { callMcpTool, LATEST_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSIONS } from './mcp/client.js';
+import { handleMcpServerMessage, mcpServerToolCatalog } from './mcp/server.js';
+import { validateToolArguments } from './mcp/schema.js';
+import { AppLimits } from './mcp/limits.js';
+import { McpConnections } from './mcp/connections.js';
+import { McpReconciliation } from './mcp/reconciliation.js';
+import { ProjectContextStore } from './context/project-context.js';
+import { EntityDoor } from './entities/entity-door.js';
+import { CanonicalResponseNormalizer } from './providers/normalizer/canonical-response.js';
+import { PersonaRegistry } from './agents/persona-registry.js';
+import { AdminService } from './admin/admin-service.js';
+import { CORE_CONSTITUTION } from './policy/constitution.js';
+import { send, body, bearer } from './http/json.js';
+import { applySecurityHeaders, isTlsRequest } from './http/security-headers.js';
+import { providerErrorDetail } from './providers/adapters/request-shape.js';
+import { ExecutionOrchestrator } from './execution/orchestrator.js';
+import { ToolRegistry } from './tools/registry.js';
+import { SkillRegistry } from './skills/registry.js';
+import { AgentRegistry } from './agents/registry.js';
+import { TransportRegistry } from './transport/registry.js';
+import { ExtensionResolver } from './registry/resolver.js';
+import { ProviderExecutionAdapter } from './execution/provider-adapter.js';
+import { ToolExecutionAdapter } from './execution/tool-adapter.js';
+import { McpExecutionAdapter } from './execution/mcp-adapter.js';
+import { ExecutionAdapter } from './execution/execution-adapter.js';
+import { EvidenceGate } from './evidence/gate.js';
+import { SessionService } from './session/service.js';
+import { SessionClient } from './session/client.js';
+import { AgentRunner } from './agents/runner.js';
+import { buildSystemMessage } from './agents/system-prompt.js';
+import { SessionStateStore } from './session/state.js';
+import { ToolLoopExecutor } from './execution/tool-loop.js';
+import { SystemLogger } from './core/logger.js';
+import { envLoadResult } from './config/env.js';
+import { legacyFeatureReport } from './compatibility/legacy/feature-registry.js';
+import { reconciliationReport } from './compatibility/legacy/reconciliation.js';
+import { buildTaskPolicy } from './execution/task-policy.js';
+import { routeMapReport } from './compatibility/route-map.js';
+import { startTransportServers, stopTransportServers } from './transport/server.js';
+import { SSOTService } from './context/ssot.js';
+import { SyllabusService } from './context/syllabus.js';
+import { ProjectMemoryService } from './context/memory.js';
+import { AutoSetupService } from './context/auto-setup.js';
+import { SmartRouter } from './providers/router/smart-router.js';
+import { maskCanonicalResponse, maskEvidenceForPublic, maskRouteForPublic } from './providers/masking/provider-mask.js';
+import { ZOMBIECODER_MODELS } from './providers/masking/zombie-models.js';
+import { completionToStreamChunk } from './providers/normalizer/stream-chunk.js';
+import { createRuntimeIdentity, acquireRuntimeLock } from './runtime/identity.js';
+import { createExecutionContext } from './execution/context.js';
+import { ToolPolicy } from './tools/policy.js';
+import { sanitizeSessionMetadata } from './session/metadata.js';
+import { ExecutionLifecycle } from './execution/lifecycle.js';
+import { bootstrapProviders } from './startup/provider-bootstrap.js';
+import { buildBoundedContext } from './context/context-budget.js';
+import { compileContext } from './context/compiler.js';
+import { CapabilityConfigResolver } from './registry/config-resolver.js';
+import { ExternalMcpRegistry } from './registry/external-mcp.js';
+import { ECOMMERCE_AGENT_TOOL_BOUNDARIES, getAgentToolBoundary } from './agents/ecommerce-tool-boundaries.js';
+import { configureOutboundCircuitLogger, configureOutboundCircuitBreaker, sharedOutboundCircuitBreaker } from './network/circuit-breaker.js';
+import { RUNTIME_VERSION, RUNTIME_PHASE } from './runtime/version.js';
+import { auditAgentRuntime } from './agents/runtime-audit.js';
+import { legacyModelList, legacyProviderModelList, legacyNormalizeList, legacyDomain, legacyPusherConfig } from './compatibility/legacy/frontend-contract.js';
+import { toolParityReport } from './compatibility/legacy/tool-parity.js';
+
+const logger = new SystemLogger({dir:config.logDir,file:config.logFile,level:config.logLevel,stdout:config.logToStdout,maxBytes:config.logMaxBytes,maxFiles:config.logMaxFiles,allowPayloads:config.logPayloads});
+configureOutboundCircuitLogger(logger);
+configureOutboundCircuitBreaker(config.circuitBreaker);
+await mkdir(config.dataDir, {recursive:true});
+const runtimeIdentity = createRuntimeIdentity(config);
+const releaseRuntimeLock = await acquireRuntimeLock(config.dataDir, runtimeIdentity, {logger});
+process.env.RUNTIME_ID = runtimeIdentity.runtimeId;
+process.env.INSTANCE_ID = runtimeIdentity.instanceId;
+if (config.uds.enabled && (!process.env.UDS_PATH || process.env.UDS_PATH === './data/runtime.sock')) config.uds.path = path.resolve(config.dataDir, `runtime-${runtimeIdentity.runtimeId.replace(/[^a-zA-Z0-9._-]/g,'_')}.sock`);
+await logger.info('runtime.env_loaded', {path:envLoadResult.path,loaded:envLoadResult.loaded,keys:envLoadResult.keys,totalKeys:envLoadResult.totalKeys,skipped:envLoadResult.skipped});
+const store = await createStore(config);
+const mcp = new McpRegistry(store, {networkPolicy:config.mcpNetworkPolicy});
+const externalMcp = new ExternalMcpRegistry({store, mcpRegistry:mcp, root:fromRoot('external-mcp'), logger});
+const providers = new ProviderRegistry(store, config);
+const providerBootstrap = await bootstrapProviders({ registry: providers, config, logger });
+const externalMcpBootstrap = await externalMcp.sync({
+  discover: config.externalMcpDiscoverOnStart,
+  discoverTimeoutMs: config.externalMcpDiscoverTimeoutMs,
+  refreshDiscovered: config.externalMcpRefreshToolsOnStart
+});
+const contexts = new ContextResolver(store);
+// Allowed project roots never depend on the launch directory: the runtime's own
+// tree, its data directory, and the caller's cwd (the conventional "current
+// project"). Extra roots come from PROJECT_ROOTS.
+const projectAllowedRoots = config.projectRoots.length ? config.projectRoots : [...new Set([config.dataDir, PROJECT_ROOT, process.cwd()])];
+const projectContext = new ProjectContextStore({defaultRoot:config.dataDir, allowedRoots:projectAllowedRoots});
+const ssot = new SSOTService({contextStore:projectContext});
+const syllabus = new SyllabusService({contextStore:projectContext});
+const memory = new ProjectMemoryService({contextStore:projectContext, maxEntries:config.memoryMaxEntries ?? 500});
+const autoSetup = new AutoSetupService({contextStore:projectContext, ssot, syllabus, memory});
+await autoSetup.ensure(config.dataDir, {refreshSSOT:false});
+const entityDoor = new EntityDoor();
+const normalizer = new CanonicalResponseNormalizer();
+const personas = new PersonaRegistry(store, logger);
+await personas.ensureDefaults();
+const admin = new AdminService(store);
+const toolsRegistry = new ToolRegistry(store);
+const skillsRegistry = new SkillRegistry(store);
+const agentsRegistry = new AgentRegistry(store);
+const transportsRegistry = new TransportRegistry(store);
+const extensionResolver = new ExtensionResolver({agents: agentsRegistry, skills: skillsRegistry, tools: toolsRegistry, transports: transportsRegistry});
+const permissions = new McpPermissions(store);
+const mcpAudit = new McpAudit(store);
+const connections = new McpConnections(store, {leaseMs:Number(process.env.MCP_CONNECTION_LEASE_MS ?? 300000)});
+const reconciliation = new McpReconciliation(mcpAudit, {graceMs:Number(process.env.MCP_RECONCILIATION_GRACE_MS ?? 30000)});
+await connections.cleanupExpired();
+if (process.env.MCP_RECONCILE_ON_START === 'true') await reconciliation.reconcile();
+const limits = new AppLimits({maxRequests:Number(process.env.APP_RATE_LIMIT ?? 60), maxConcurrent:Number(process.env.APP_CONCURRENCY ?? 4)});
+const smartRouter = new SmartRouter({providers, logger});
+const capabilityConfig = new CapabilityConfigResolver({store});
+const toolPolicy = new ToolPolicy(store, {configResolver:capabilityConfig});
+const toolExecution = new ToolExecutionAdapter({registry:toolsRegistry, toolRoot:config.toolRoot, logger, policy:toolPolicy});
+const mcpExecution = new McpExecutionAdapter({registry:mcp, permissions, audit:mcpAudit, connections, limits, logger});
+const evidenceGate = new EvidenceGate({store, logger});
+const sessions = new SessionService(store);
+const executionLifecycle = new ExecutionLifecycle({sessions, evidenceGate, normalizer, logger, requireSystemPrompt:true});
+const providerExecution = new ProviderExecutionAdapter({providers, normalizer, logger, router: smartRouter, lifecycle: executionLifecycle});
+const sessionClient = new SessionClient({service:sessions});
+const sessionState = new SessionStateStore({store, sessions, maxMessages:config.sessionMaxMessages});
+const executionAdapter = new ExecutionAdapter({provider:providerExecution, tool:toolExecution, mcp:mcpExecution});
+const toolLoop = new ToolLoopExecutor({providers, executionAdapter, normalizer, evidenceGate, sessionState, logger, router:smartRouter, lifecycle:executionLifecycle, maxRounds:config.toolLoopMaxRounds, maxToolCallsPerRound:config.toolLoopMaxToolCallsPerRound, maxRepeatedCalls:config.toolLoopMaxRepeatedCalls});
+executionAdapter.loop = toolLoop;
+const agentRunner = new AgentRunner({registry:agentsRegistry, personas, evidenceGate, logger});
+const execution = new ExecutionOrchestrator({extensionResolver, executor:executionAdapter});
+function isLoopbackRequest(req) {
+  const address = String(req.socket?.remoteAddress ?? '').replace(/^::ffff:/, '');
+  return address === '127.0.0.1' || address === '::1';
+}
+const adminOk = (req) => isAdminAuthorized(bearer(req), config.adminToken) ||
+  (config.localAuthBypass && !config.adminToken && isLoopbackRequest(req));
+// Executes one native tool for an inbound MCP tools/call. Auth, the application
+// tool-permission check and the project-root sandbox are enforced here, exactly
+// as the chat tool loop enforces them: an MCP client gets no more authority than
+// the application it authenticated as already has.
+async function executeMcpServerTool(applicationId, toolId, args, requestId, meta = {}) {
+  if (config.executionMode !== 'tools-enabled') { const error = new Error('tool_execution_not_verified'); error.statusCode = 503; throw error; }
+  const decision = await toolPolicy.decision(applicationId, toolId);
+  if (!decision.allowed) throw new Error(`tool_not_permitted:${decision.reason}`);
+  const requestedRoot = String(meta?.projectRoot ?? config.mcpServerProjectRoot ?? '').trim() || null;
+  const projectRoot = projectContext.root(requestedRoot);
+  const goal = `mcp tools/call ${toolId}`;
+  const prepared = await execution.prepare({ goal, consent: true, agentId: 'code-guru', toolIds: [toolId] });
+  const context = createExecutionContext({ applicationId, requestId, projectRoot, workingDirectory: projectRoot, agentId: 'code-guru', goal, toolId, transport: 'mcp' }, runtimeIdentity);
+  const outcome = await toolExecution.execute({ prepared, input: { toolId, arguments: args }, applicationId, context });
+  return outcome.result ?? outcome;
+}
+// Bounded tail read of the structured runtime log, for the admin observability
+// view. Reads at most the last 512 KiB so a large log can never be pulled into
+// memory whole, and drops a possibly-truncated first line after a partial read.
+async function tailJsonLines(limit) {
+  const file = path.join(config.logDir, config.logFile);
+  const info = await stat(file);
+  const maxBytes = 512 * 1024;
+  const start = Math.max(0, info.size - maxBytes);
+  const handle = await open(file, 'r');
+  try {
+    const length = info.size - start;
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, start);
+    const lines = buffer.toString('utf8').split('\n').filter(Boolean);
+    if (start > 0 && lines.length) lines.shift();
+    return lines.slice(-limit).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+  } finally { await handle.close(); }
+}
+async function applyAgentModelMapping(input) {
+  const agentId=String(input?.agent??input?.persona??'code-guru');
+  const mapping=(await store.read('agentModelMappings',[])).find(item=>item.agentId===agentId);
+  // An agent mapping only supplies the DEFAULT model. A model the client named
+  // explicitly always wins: rewriting an explicit public alias here would make
+  // the published masking catalog and its response echo meaningless.
+  if(mapping && !input?.model) {
+    return {...input,model:mapping.model,meta:{...(input.meta??{}),agentModelMapping:{agentId,model:mapping.model}}};
+  }
+  return input;
+}
+
+function maskUrlSecrets(value) {
+  if (!value) return value;
+  try {
+    const u = new URL(String(value));
+    if (u.username) u.username = '***';
+    if (u.password) u.password = '***';
+    for (const key of [...u.searchParams.keys()]) if (/key|token|secret|auth|password|credential/i.test(key)) u.searchParams.set(key, '***');
+    return u.toString();
+  } catch { return String(value).replace(/(key|token|secret|password)=([^&]+)/ig, '$1=***'); }
+}
+function publicProvider(provider) {
+  const {apiKey, api_key, secret, token, ...safe} = provider ?? {};
+  return {...safe, baseUrl:maskUrlSecrets(safe.baseUrl), syncUrl:maskUrlSecrets(safe.syncUrl)};
+}
+
+const applications = async () => store.read('applications', []);
+async function authenticateRequest(req, requestLog, requestState) {
+  const app = authenticateApiKey(bearer(req), await applications());
+  if (!app) {
+    requestState.outcome = 'unauthorized';
+    await requestLog.warn('application.auth.failed', {reason:'missing_or_invalid_or_expired_key'});
+    return null;
+  }
+  requestState.applicationId = app.id;
+  requestState.outcome = 'accepted';
+  await requestLog.info('application.auth.succeeded', {applicationId:app.id});
+  return app;
+}
+const legacyAudit = legacyFeatureReport();
+const legacyReconciliation = reconciliationReport();
+
+function boundedConversation(inputMessages, recentSession, archiveSession, userInput) {
+  const incoming = Array.isArray(inputMessages) ? inputMessages.filter(m => m?.role !== 'system') : [];
+  const archive = Array.isArray(archiveSession) ? archiveSession : [];
+  const recent = Array.isArray(recentSession) ? recentSession.slice(-config.contextRecentMessages) : archive.slice(-config.contextRecentMessages);
+  const bounded = buildBoundedContext({userInput, recent, archive, maxBytes:config.contextBudgetBytes, recentLimit:config.contextRecentMessages});
+  const seen = new Set();
+  const messages = [];
+  for (const m of [...bounded.recent, ...incoming]) {
+    const key = JSON.stringify(m);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    messages.push(m);
+  }
+  let out = messages;
+  while (Buffer.byteLength(JSON.stringify(out)) > config.contextBudgetBytes && out.length > 1) out = out.slice(1);
+  return {messages:out, archiveSelected:bounded.archive.length, bytes:Buffer.byteLength(JSON.stringify(out)), maxBytes:config.contextBudgetBytes};
+}
+
+function latestUserMessage(messages = [], fallback = '') {
+  const user = Array.isArray(messages) ? messages.filter(m => m?.role === 'user').at(-1) : null;
+  return user ? {role:'user', content:user.content ?? ''} : {role:'user', content:fallback};
+}
+
+function compileRuntimeContext({goal, input, projectRoot, project, syllabusDoc, memoryDoc, session, taskPolicy}) {
+  const archive = session ? session._compiledArchive ?? [] : [];
+  return compileContext({
+    goal,
+    userInput: input.messages?.filter?.(m => m?.role === 'user').at(-1)?.content ?? goal,
+    recent: Array.isArray(input.messages) ? input.messages.slice(-config.contextRecentMessages) : [],
+    memory: memoryDoc ?? [],
+    ssot: project,
+    syllabus: syllabusDoc,
+    projectRoot,
+    workingDirectory: input.workingDirectory ?? projectRoot,
+    sessionId: session?.id ?? input.sessionId ?? null,
+    taskPolicy,
+    maxBytes: config.compiledContextBytes,
+    recentLimit: config.contextRecentMessages
+  });
+}
+
+const requestHandler = async (req,res) => {
+  const requestId = String(req.headers['x-request-id'] || id('req'));
+  const traceId = String(req.headers['x-trace-id'] || id('trace'));
+  const startedAt = Date.now();
+  const requestState = {applicationId:null, operation:null, outcome:'unknown'};
+  res.setHeader('x-request-id', requestId);
+  res.setHeader('x-trace-id', traceId);
+  // Hardening headers apply to every response (JSON, HTML, stream, UDS) because
+  // Node merges headers set here with any later writeHead() call.
+  applySecurityHeaders(res, {isTls:isTlsRequest(req), origin:req.headers.origin, allowedOrigins:config.corsAllowOrigins});
+  const requestLog = logger.child({requestId, traceId, runtimeId:runtimeIdentity.runtimeId, instanceId:runtimeIdentity.instanceId, method:req.method, path:req.url});
+  const originalEnd = res.end.bind(res);
+  res.end = (...args) => {
+    const outcome = requestState.outcome === 'unknown'
+      ? (res.statusCode >= 400 ? 'failure' : 'success')
+      : requestState.outcome;
+    requestLog.info('http.response', {statusCode:res.statusCode, durationMs:Date.now()-startedAt, applicationId:requestState.applicationId, operation:requestState.operation, outcome});
+    return originalEnd(...args);
+  };
+  requestState.operation = `${req.method} ${new URL(req.url, `http://${req.headers.host ?? 'localhost'}`).pathname}`;
+  requestLog.info('http.request', {operation:requestState.operation});
+  try {
+    const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
+    // CORS preflight: hardening + allowlisted CORS headers were applied above.
+    if (req.method==='OPTIONS') { res.writeHead(204); res.end(); return; }
+    if (req.method==='GET' && (url.pathname==='/admin' || url.pathname==='/admin/')) {
+      const html = await readFile(fromRoot('public','admin','index.html'), 'utf8');
+      // The page is self-contained (inline style + inline script), so CSP is
+      // scoped to 'unsafe-inline' for those two sources and nothing else.
+      res.writeHead(200, {'content-type':'text/html; charset=utf-8','content-security-policy':"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"});
+      res.end(html); return;
+    }
+    if (req.method==='GET' && url.pathname==='/health') {
+      const coreModules = {
+        ssot: typeof ssot?.read === 'function', memory: typeof memory?.recent === 'function', entityDoor: typeof entityDoor?.resolve === 'function', normalizer: typeof normalizer?.normalize === 'function',
+        adminApi: typeof admin?.applications === 'function', personas: typeof personas?.resolve === 'function', executionBoundary: typeof execution?.prepare === 'function', registries: Boolean(agentsRegistry && toolsRegistry && skillsRegistry && transportsRegistry),
+        extensionResolution: typeof extensionResolver?.resolve === 'function', providerExecution: typeof providerExecution?.execute === 'function', toolExecution: typeof toolExecution?.execute === 'function', mcpExecutionBoundary: typeof mcpExecution?.execute === 'function',
+        providerAdapters: Boolean(providers), evidenceGate: typeof evidenceGate?.canClaimSuccess === 'function', sessionClient: typeof sessionClient?.resolve === 'function', agentBoundary: typeof agentRunner?.prepare === 'function', transportLayer: Boolean(transportServers),
+        toolLoop: typeof toolLoop?.execute === 'function', sessionState: typeof sessionState?.list === 'function', envLoader: Boolean(envLoadResult), systemLogger: typeof logger?.info === 'function', ssotService: typeof ssot?.read === 'function',
+        syllabusService: typeof syllabus?.read === 'function', memoryService: typeof memory?.recent === 'function', autoSetup: typeof autoSetup?.ensure === 'function', smartRouter: typeof smartRouter?.route === 'function', providerMasking: typeof maskCanonicalResponse === 'function',
+        toolParser: true, verificationGate: typeof evidenceGate?.canClaimSuccess === 'function', systemPrompt: typeof buildSystemMessage === 'function', capabilityConfig: typeof capabilityConfig?.snapshot === 'function', externalMcpRegistry: typeof externalMcp?.sync === 'function',
+        commonTools: typeof toolsRegistry?.list === 'function', agentToolBoundaries: Object.keys(ECOMMERCE_AGENT_TOOL_BOUNDARIES).length > 0, sessionMetadata: typeof sanitizeSessionMetadata === 'function', circuitBreaker: Boolean(sharedOutboundCircuitBreaker), mcpClient: typeof mcp?.tools === 'function', mcpServer: config.mcpServerEnabled===true
+      };
+      const agentAudit = await auditAgentRuntime({registry:agentsRegistry,personas,boundaryResolver:getAgentToolBoundary});
+      requestState.outcome = 'success';
+      return send(res,200,{ok:true,service:'zombiecoder-runtime',version:RUNTIME_VERSION,phase:RUNTIME_PHASE,runtime:runtimeIdentity,executionMode:config.executionMode,providerMode:'configured-compatible-endpoint',providerBootstrap:{registered:providerBootstrap.registered.length,sync:providerBootstrap.sync ? {ok:providerBootstrap.sync.ok !== false,providerCount:providerBootstrap.sync.providerCount ?? null,modelCount:providerBootstrap.sync.modelCount ?? null} : null},externalMcp:{folderCount:externalMcpBootstrap.folderCount,environmentCount:externalMcpBootstrap.environmentCount,registered:externalMcpBootstrap.definitions.filter(x=>x.status==='registered').length},legacyFeatureAudit:{source:legacyAudit.source,behaviorParityVerified:legacyAudit.behaviorParityVerified,counts:legacyAudit.counts,warnings:legacyAudit.warnings.length},legacyPurposeReconciliation:{behaviorParityVerified:legacyReconciliation.behaviorParityVerified,counts:legacyReconciliation.counts},coreModules,agentRuntime:agentAudit,circuitBreaker:{failureThreshold:sharedOutboundCircuitBreaker.failureThreshold,resetTimeoutMs:sharedOutboundCircuitBreaker.resetTimeoutMs,halfOpenMaxCalls:sharedOutboundCircuitBreaker.halfOpenMaxCalls}});
+    }
+    // Legacy frontend read contracts. These are compatibility envelopes, not provider disclosure.
+    if (req.method==='GET' && url.pathname==='/v1/models') {
+      return send(res,200,legacyModelList({agents:await agentsRegistry.list(),providers:await providers.list()}));
+    }
+    if (req.method==='GET' && (url.pathname==='/api/v0/models' || url.pathname==='/api/v1/models')) {
+      return send(res,200,legacyProviderModelList(await providers.list()));
+    }
+    if (req.method==='GET' && url.pathname==='/api/agents') {
+      const agents=await agentsRegistry.list();
+      return send(res,200,{count:agents.length,source:'runtime-agent-registry',agents:agents.map(a=>({id:a.id,name:a.name,role:a.role,model:'masked',provider:'ZombieCoder'}))});
+    }
+    if (req.method==='GET' && url.pathname==='/api/domain') return send(res,200,legacyDomain({requestHost:req.headers.host||'localhost',version:RUNTIME_VERSION,projectRoot:config.dataDir}));
+    if (req.method==='GET' && url.pathname==='/api/pusher-config') return send(res,200,legacyPusherConfig());
+    if (req.method==='GET' && url.pathname==='/api/normalize-list') return send(res,200,legacyNormalizeList({providers:await providers.list(),models:(await providers.list()).flatMap(p=>p.models||[])}));
+    if (req.method==='GET' && url.pathname==='/api/ssot') {
+      const root=url.searchParams.get('projectRoot')||config.dataDir;
+      await autoSetup.ensure(root);
+      const doc=await ssot.read(root);
+      return send(res,doc?200:404,doc?{success:true,source:'runtime',project_root:root,ssot_path:path.join(root,'.zombiecoder','SSOT.md'),length:doc.content?.length??0,content:doc.content,note:'Runtime SSOT compatibility view'}:{success:false,message:'No SSOT found'});
+    }
+    if (req.method==='GET' && url.pathname==='/api/config') {
+      return send(res,200,{success:true,config:{version:RUNTIME_VERSION,phase:RUNTIME_PHASE,projectRoot:config.dataDir,toolRoot:config.toolRoot},domain:legacyDomain({requestHost:req.headers.host||'localhost',version:RUNTIME_VERSION,projectRoot:config.dataDir})});
+    }
+    if (url.pathname==='/mcp') {
+      if (config.mcpServerEnabled !== true) {
+        // Honest answer instead of a bare 404. Without MCP_SERVER_ENABLED=true this
+        // runtime consumes MCP servers as a CLIENT only; the API must not advertise
+        // a server capability that is switched off.
+        return send(res,501,{error:'mcp_server_not_implemented',role:'mcp-client',protocol:'JSON-RPC 2.0',supported_protocol_versions:MCP_PROTOCOL_VERSIONS,note:'This runtime consumes MCP servers as a client; it does not expose an MCP server endpoint.'});
+      }
+      // Inbound MCP (Streamable HTTP server). POST carries JSON-RPC 2.0;
+      // GET/DELETE are the optional session-channel/termination verbs.
+      if (req.method==='DELETE') { res.writeHead(204,{'mcp-session-id':String(req.headers['mcp-session-id']??'')}); return res.end(); }
+      if (req.method!=='POST') { res.writeHead(405,{'allow':'POST, DELETE'}); return res.end(); }
+      const mcpApp=authenticateApiKey(bearer(req), await applications());
+      if (!mcpApp) {
+        requestState.outcome='unauthorized';
+        await requestLog.warn('mcp.server.auth_failed',{reason:'missing_or_invalid_or_expired_key'});
+        return send(res,401,{jsonrpc:'2.0',id:null,error:{code:-32001,message:'unauthorized'}});
+      }
+      let mcpMessage;
+      try { mcpMessage=await body(req, config.maxBodyBytes); }
+      catch (error) { return send(res, Number(error?.statusCode)||400, {jsonrpc:'2.0',id:null,error:{code:-32700,message:'parse_error'}}); }
+      const mcpRequestId=String(mcpMessage?.id ?? id('req'));
+      const inboundSession=req.headers['mcp-session-id'] ? String(req.headers['mcp-session-id']) : null;
+      requestState.operation='POST /mcp';
+      const outcome=await handleMcpServerMessage(mcpMessage, {
+        tools: await toolsRegistry.list(),
+        sessionId: inboundSession,
+        executeTool: (name,args,meta)=>executeMcpServerTool(mcpApp.id,name,args,mcpRequestId,meta)
+      });
+      requestState.outcome='accepted';
+      const headers=outcome.sessionId?{'mcp-session-id':outcome.sessionId,'mcp-protocol-version':LATEST_MCP_PROTOCOL_VERSION}:{};
+      if (!outcome.body) { res.writeHead(202,headers); return res.end(); }
+      return send(res,200,outcome.body,headers);
+    }
+    if (req.method==='GET' && url.pathname==='/api/config/mcp') {
+      const publicUrl=`${req.headers['x-forwarded-proto']||'http'}://${req.headers.host||`localhost:${config.port}`}`;
+      const endpoints=await mcp.list();
+      const serverEnabled=config.mcpServerEnabled===true;
+      const serverTools=serverEnabled?mcpServerToolCatalog(await toolsRegistry.list()).map(tool=>tool.name):[];
+      return send(res,200,{name:'ZombieCoder Runtime',role:serverEnabled?'mcp-client+server':'mcp-client',server:{implemented:serverEnabled,protocol:'JSON-RPC 2.0',protocol_version:LATEST_MCP_PROTOCOL_VERSION,supported_protocol_versions:MCP_PROTOCOL_VERSIONS,note:serverEnabled?'This runtime consumes MCP servers as a client and, because MCP_SERVER_ENABLED=true, also serves MCP on POST /mcp.':'This runtime consumes MCP servers as a client; it does not expose an MCP server endpoint.',tools:serverTools},transport:{type:'http',url:serverEnabled?`${publicUrl}/mcp`:null,implemented:serverEnabled},endpoints:{http:publicUrl,connect:null},client:{supported_protocol_versions:MCP_PROTOCOL_VERSIONS,endpoints:endpoints.map(endpoint=>({id:endpoint.id,name:endpoint.name,status:endpoint.status,protocol_version:endpoint.protocolVersion??null,toolCount:Array.isArray(endpoint.tools)?endpoint.tools.length:0}))},tools:(await mcp.tools()).map(t=>t.qualifiedName),timeout:300000});
+    }
+    if (req.method==='GET' && url.pathname==='/api/mcp-clients') {
+      const publicUrl=`${req.headers['x-forwarded-proto']||'http'}://${req.headers.host||`localhost:${config.port}`}`;
+      const serverEnabled=config.mcpServerEnabled===true;
+      return send(res,200,{domain:req.headers.host||'localhost',serverType:'runtime',version:RUNTIME_VERSION,total_requests:null,active_connections:null,connected_clients:await connections.list(),tools:(await mcp.tools()).length,server_url:serverEnabled?`${publicUrl}/mcp`:null,server_implemented:serverEnabled,protocol:'JSON-RPC 2.0',protocol_version:LATEST_MCP_PROTOCOL_VERSION,supported_protocol_versions:MCP_PROTOCOL_VERSIONS,outbound_protocol_version:LATEST_MCP_PROTOCOL_VERSION,note:serverEnabled?'This runtime also serves MCP on POST /mcp (MCP_SERVER_ENABLED=true); protocol_version is the version this runtime uses as an MCP client and server.':'No MCP server endpoint is exposed; protocol_version is the version this runtime uses when it acts as an MCP client.'});
+    }
+    if (req.method==='GET' && url.pathname==='/api/clients') return send(res,200,{clients:await connections.list(),count:(await connections.list()).length});
+
+    if (req.method==='POST' && url.pathname==='/v1/admin/applications') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,201,{...await admin.createApplication(await body(req, config.maxBodyBytes)),warning:'Store this key now; it will not be shown again.'});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/applications') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{applications:await admin.applications() .then(xs=>xs.map(({apiKeyHash,...x})=>x))});
+    }
+    if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/applications\/[^/]+\/rotate-key$/)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const appId=url.pathname.split('/')[4]; return send(res,200,{...await admin.rotateKey(appId),warning:'Store this key now; it will not be shown again.'});
+    }
+    if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/applications\/[^/]+\/(revoke|extend)$/)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const appId=url.pathname.split('/')[4], action=url.pathname.split('/')[5], input=await body(req, config.maxBodyBytes);
+      const patch=action==='revoke'?{status:'revoked'}:{expiresAt:input.expiresAt??null};
+      return send(res,200,{application:await admin.updateApplication(appId,patch)});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/sessions') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      requestState.outcome = 'accepted';
+      const input = await body(req, config.maxBodyBytes);
+      return send(res,201,{session:await sessions.create({applicationId:app.id,userId:input.userId ?? null,metadata:sanitizeSessionMetadata(input.metadata ?? {})})});
+    }
+    if (req.method==='GET' && url.pathname.match(/^\/v1\/sessions\/[^/]+$/)) {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const session=await sessions.get(url.pathname.split('/')[3],app.id);
+      return session ? send(res,200,{session}) : send(res,404,{error:'session_not_found'});
+    }
+    if (req.method==='PATCH' && url.pathname.match(/^\/v1\/sessions\/[^/]+\/metadata$/)) {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const sessionId=url.pathname.split('/')[3];
+      const input=await body(req, config.maxBodyBytes);
+      const session=await sessions.updateMetadata(sessionId,app.id,input.metadata ?? input);
+      if (!session) return send(res,404,{error:'session_not_found'});
+      return send(res,200,{session});
+    }
+    if (req.method==='GET' && url.pathname.match(/^\/v1\/sessions\/[^/]+\/messages$/)) {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const sessionId=url.pathname.split('/')[3];
+      try { return send(res,200,{sessionId,messages:await sessionState.list(sessionId,app.id)}); }
+      catch (e) { if (e?.message === 'session_not_found') return send(res,404,{error:'session_not_found'}); throw e; }
+    }
+    if (req.method==='POST' && url.pathname.match(/^\/v1\/sessions\/[^/]+\/close$/)) {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const session=await sessions.close(url.pathname.split('/')[3],app.id);
+      return session ? send(res,200,{session}) : send(res,404,{error:'session_not_found'});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/compatibility/tools') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,toolParityReport(await toolsRegistry.list()));
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/compatibility/features') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,legacyFeatureReport());
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/task-profiles') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{profiles:(await import('./execution/task-policy.js')).getTaskProfiles()});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/compatibility/reconciliation') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,legacyReconciliation);
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/compatibility/routes') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,routeMapReport());
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/evidence') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{evidence:await store.read('evidence',[])});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/logs') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const limit=Math.max(1,Math.min(500,Number(url.searchParams.get('limit')??200)||200));
+      try { return send(res,200,{file:path.join(config.logDir,config.logFile),limit,events:await tailJsonLines(limit)}); }
+      catch(error) { if(error?.code==='ENOENT') return send(res,200,{file:null,limit,events:[],note:'log file not created yet'}); throw error; }
+    }
+    if (req.method==='POST' && url.pathname==='/v1/context/setup') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const input=await body(req, config.maxBodyBytes);
+      return send(res,200,{applicationId:app.id, setup:await autoSetup.ensure(input.projectRoot || config.dataDir,{refreshSSOT:input.refreshSSOT === true})});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/context') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const root=url.searchParams.get('projectRoot') || config.dataDir;
+      await autoSetup.ensure(root);
+      const [project,syllabusDoc,memoryDoc]=await Promise.all([ssot.read(root),syllabus.read(root),memory.read(root)]);
+      return send(res,200,{applicationId:app.id,project,syllabus:syllabusDoc,memory:memoryDoc});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/context/ssot/refresh') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const input=await body(req, config.maxBodyBytes);
+      return send(res,200,{applicationId:app.id,ssot:await ssot.refresh(input.projectRoot || config.dataDir,{reason:input.reason || 'api_refresh'})});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/context/syllabus') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const input=await body(req, config.maxBodyBytes);
+      return send(res,201,{applicationId:app.id,entry:await syllabus.append(input.projectRoot || config.dataDir,input)});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/context/memory') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const input=await body(req, config.maxBodyBytes);
+      return send(res,201,{applicationId:app.id,entry:await memory.append(input.projectRoot || config.dataDir,{...input,applicationId:app.id})});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/context/memory/recent') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const root=url.searchParams.get('projectRoot') || config.dataDir;
+      return send(res,200,{applicationId:app.id,entries:await memory.recent(root,url.searchParams.get('limit') || 10)});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/tools/permissions') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{permissions:await toolPolicy.list()});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/tools/permissions') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const input=await body(req,config.maxBodyBytes);
+      const knownTools=await toolsRegistry.list();
+      if (!input?.toolId || !knownTools.some(tool=>tool.id===String(input.toolId))) return send(res,400,{error:'tool_not_found',toolId:input?.toolId??null});
+      return send(res,201,{permission:await toolPolicy.grant(input)});
+    }
+    if (req.method==='DELETE' && url.pathname==='/v1/admin/tools/permissions') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const input=await body(req,config.maxBodyBytes); return send(res,200,{revoked:await toolPolicy.revoke(input.applicationId,input.toolId)});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/registry/external-mcp') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{servers:await externalMcp.status(),endpoints:await mcp.list()});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/registry/external-mcp/sync') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{sync:await externalMcp.sync(),servers:await externalMcp.status()});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/applications/capabilities') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const applicationId=String(url.searchParams.get('applicationId') ?? '');
+      if (!applicationId) return send(res,400,{error:'application_id_required'});
+      const tools=await toolsRegistry.list();
+      return send(res,200,{applicationId,tools:await capabilityConfig.snapshot(applicationId,tools.map(x=>x.id))});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/applications/capabilities/tools') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const input=await body(req,config.maxBodyBytes);
+      const setting=await capabilityConfig.setToolSetting(input.applicationId,input.toolId,input.enabled);
+      return send(res,200,{setting,decision:await toolPolicy.decision(input.applicationId,input.toolId)});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/registry/tools') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{components:await toolsRegistry.list()});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/registry/tools') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,201,{component:await toolsRegistry.register(await body(req, config.maxBodyBytes))});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/registry/skills') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{components:await skillsRegistry.list()});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/registry/skills') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,201,{component:await skillsRegistry.register(await body(req, config.maxBodyBytes))});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/registry/agents/tool-boundaries') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{boundaries:ECOMMERCE_AGENT_TOOL_BOUNDARIES});
+    }
+    if (req.method==='GET' && url.pathname.match(/^\/v1\/admin\/registry\/agents\/[^/]+\/tool-boundary$/)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const agentId=url.pathname.split('/')[5];
+      const boundary=getAgentToolBoundary(agentId);
+      if (!boundary) return send(res,404,{error:'agent_tool_boundary_not_found'});
+      return send(res,200,{agentId,boundary});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/registry/agents') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{components:await agentsRegistry.list()});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/registry/agents/runtime-audit') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,await auditAgentRuntime({registry:agentsRegistry,personas,boundaryResolver:getAgentToolBoundary}));
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/registry/agents') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,201,{component:await agentsRegistry.register(await body(req, config.maxBodyBytes))});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/registry/transports') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{components:await transportsRegistry.list()});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/registry/transports') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,201,{component:await transportsRegistry.register(await body(req, config.maxBodyBytes))});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/providers') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{providers:(await providers.list()).map(publicProvider)});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/providers/route') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const input=await body(req, config.maxBodyBytes);
+      return send(res,200,{route:await smartRouter.route(input)});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/providers') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,201,{provider:publicProvider(await providers.register(await body(req, config.maxBodyBytes)))});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/masking-models') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{models:ZOMBIECODER_MODELS});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/models') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const filter=url.searchParams.get('provider');
+      const list=(await providers.list()).filter(p=>!filter||p.id===filter);
+      return send(res,200,{models:list.flatMap(p=>(p.models??[]).map(model=>({id:`${p.id}:${model}`,providerId:p.id,providerName:p.name,model,enabled:p.enabled!==false,defaultModel:p.defaultModel===model,priority:p.priority??10}))) });
+    }
+    if (req.method==='PATCH' && /^\/v1\/admin\/providers\/[^/]+$/.test(url.pathname)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const providerId=decodeURIComponent(url.pathname.split('/')[4]);
+      const current=(await providers.list()).find(p=>p.id===providerId);
+      if (!current) return send(res,404,{error:'provider_not_found'});
+      const patch=await body(req,config.maxBodyBytes);
+      const merged={...current,...patch,id:providerId}; delete merged.apiKey; delete merged.api_key;
+      return send(res,200,{provider:publicProvider(await providers.register(merged))});
+    }
+    if (req.method==='DELETE' && /^\/v1\/admin\/providers\/[^/]+$/.test(url.pathname)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const providerId=decodeURIComponent(url.pathname.split('/')[4]); const list=await providers.list();
+      if(!list.some(p=>p.id===providerId)) return send(res,404,{error:'provider_not_found'});
+      await store.write('providers',list.filter(p=>p.id!==providerId)); return send(res,200,{deleted:true,providerId});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/models/sync-all') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const results=[];
+      for (const item of (await providers.list()).filter(p=>p.enabled!==false)) {
+        try { const updated=await providers.refreshModels(item.id); results.push({providerId:item.id,status:'updated',modelCount:updated.models.length}); }
+        catch(error) { results.push({providerId:item.id,status:'failed',error:String(error?.message??'model_sync_failed').replace(/[^a-zA-Z0-9_.:-]/g,'_').slice(0,100)}); }
+      }
+      return send(res,200,{results});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/agent-model-mappings') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{mappings:await store.read('agentModelMappings',[])});
+    }
+    if (req.method==='PUT' && /^\/v1\/admin\/agent-model-mappings\/[^/]+$/.test(url.pathname)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const agentId=decodeURIComponent(url.pathname.split('/')[4]);
+      if (!(await agentsRegistry.list()).some(a=>a.id===agentId)) return send(res,404,{error:'agent_not_found'});
+      const input=await body(req,config.maxBodyBytes); const model=String(input.model??'').trim();
+      if (!model) return send(res,400,{error:'model_required'});
+      const list=await store.read('agentModelMappings',[]); const item={id:agentId,agentId,model,updatedAt:new Date().toISOString()};
+      await store.write('agentModelMappings',[...list.filter(x=>x.agentId!==agentId),item]); return send(res,200,{mapping:item});
+    }
+    if (req.method==='DELETE' && /^\/v1\/admin\/agent-model-mappings\/[^/]+$/.test(url.pathname)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const agentId=decodeURIComponent(url.pathname.split('/')[4]);
+      await store.write('agentModelMappings',(await store.read('agentModelMappings',[])).filter(x=>x.agentId!==agentId));
+      return send(res,200,{deleted:true,agentId});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/metrics') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const [ps,as,apps,maps,auditEvents]=await Promise.all([providers.list(),agentsRegistry.list(),applications(),store.read('agentModelMappings',[]),store.read('mcp-audit',[])]);
+      return send(res,200,{generatedAt:new Date().toISOString(),providers:{total:ps.length,enabled:ps.filter(p=>p.enabled!==false).length},models:{total:ps.reduce((n,p)=>n+(p.models?.length??0),0)},agents:{total:as.length,mapped:maps.length},applications:{total:apps.length,active:apps.filter(a=>a.status==='active').length},auditEvents:auditEvents.length,executionMode:config.executionMode});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/providers/sync') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const input=await body(req, config.maxBodyBytes);
+      return send(res,200,{sync:await providers.syncAll({syncUrl:input.syncUrl || config.providerCatalogSyncUrl, apiKey:input.apiKey || config.providerCatalogApiKey, timeoutMs:input.timeoutMs || config.providerSyncTimeoutMs})});
+    }
+    if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/providers\/[^/]+\/health$/)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const providerId=decodeURIComponent(url.pathname.split('/')[4]);
+      const current=(await providers.list()).find(p=>p.id===providerId); if(!current) return send(res,404,{error:'provider_not_found'});
+      const checkedAt=new Date().toISOString();
+      try {
+        const refreshed=await providers.refreshModels(providerId);
+        const healthy=await providers.register({...refreshed,healthStatus:'healthy',lastHealthCheckAt:checkedAt,lastHealthError:null});
+        return send(res,200,{provider:publicProvider(healthy),health:{status:'healthy',checkedAt,modelCount:healthy.models?.length??0}});
+      } catch(error) {
+        const raw=String(error?.message??'provider_health_check_failed');
+        const code=/^[a-zA-Z0-9_.:-]{1,100}$/.test(raw)?raw:'provider_health_check_failed';
+        const failed=await providers.register({...current,healthStatus:'error',lastHealthCheckAt:checkedAt,lastHealthError:code});
+        return send(res,200,{provider:publicProvider(failed),health:{status:'error',checkedAt,error:code}});
+      }
+    }
+    if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/providers\/[^/]+\/sync$/)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const providerId=url.pathname.split('/')[5];
+      const input=await body(req, config.maxBodyBytes);
+      return send(res,200,{sync:await providers.syncProvider(providerId,{syncUrl:input.syncUrl,timeoutMs:input.timeoutMs || config.providerSyncTimeoutMs})});
+    }
+    if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/providers\/[^/]+\/models\/refresh$/)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{provider:await providers.refreshModels(url.pathname.split('/')[4])});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/personas') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{personas:await personas.list()});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/personas') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,201,{persona:await personas.register(await body(req, config.maxBodyBytes))});
+    }
+    if (req.method==='PATCH' && /^\/v1\/admin\/personas\/[^/]+$/.test(url.pathname)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const personaId=decodeURIComponent(url.pathname.split('/')[4]);
+      const current=(await personas.list()).find(p=>p.id===personaId); if(!current) return send(res,404,{error:'persona_not_found'});
+      const patch=await body(req,config.maxBodyBytes);
+      return send(res,200,{persona:await personas.register({...current,...patch,id:personaId})});
+    }
+    if (req.method==='DELETE' && /^\/v1\/admin\/personas\/[^/]+$/.test(url.pathname)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const personaId=decodeURIComponent(url.pathname.split('/')[4]);
+      const current=await personas.list(); if(!current.some(p=>p.id===personaId)) return send(res,404,{error:'persona_not_found'});
+      const item=current.find(p=>p.id===personaId);
+      return send(res,200,{persona:await personas.register({...item,enabled:false})});
+    }
+    if (req.method==='PATCH' && /^\/v1\/admin\/registry\/agents\/[^/]+$/.test(url.pathname)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const agentId=decodeURIComponent(url.pathname.split('/')[5]);
+      const current=(await agentsRegistry.list()).find(a=>a.id===agentId); if(!current) return send(res,404,{error:'agent_not_found'});
+      const patch=await body(req,config.maxBodyBytes);
+      return send(res,200,{component:await agentsRegistry.register({...current,...patch,id:agentId})});
+    }
+    if (req.method==='DELETE' && /^\/v1\/admin\/registry\/agents\/[^/]+$/.test(url.pathname)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const agentId=decodeURIComponent(url.pathname.split('/')[5]);
+      const current=await agentsRegistry.list(); if(!current.some(a=>a.id===agentId)) return send(res,404,{error:'agent_not_found'});
+      const agent=current.find(a=>a.id===agentId);
+      return send(res,200,{component:await agentsRegistry.register({...agent,status:'DISABLED'})});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/constitution') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{constitution:CORE_CONSTITUTION});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/mcp/endpoints') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,201,{endpoint:await mcp.register(await body(req, config.maxBodyBytes))});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/mcp/endpoints') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{endpoints:await mcp.list()});
+    }
+    if (req.method==='POST' && url.pathname.startsWith('/v1/admin/mcp/endpoints/') && url.pathname.endsWith('/discover')) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const endpointId = url.pathname.split('/')[5];
+      const input = await body(req, config.maxBodyBytes);
+      const endpoint = await mcp.discover(endpointId);
+      let connection = null;
+      if (input.runtimeId || input.clientId) connection = await connections.upsert({ ...input, endpointId, sessionId:endpoint.sessionId });
+      return send(res,200,{endpoint,connection});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/mcp/permissions') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,201,{permission:await permissions.grant(await body(req, config.maxBodyBytes))});
+    }
+    if (req.method==='DELETE' && url.pathname==='/v1/admin/mcp/permissions') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const input=await body(req, config.maxBodyBytes);
+      return send(res,200,{revoked:await permissions.revoke(input.applicationId,input.qualifiedName)});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/mcp/permissions') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{permissions:await permissions.list()});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/mcp/connections') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{connections:await connections.list()});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/mcp/connections') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{connection:await connections.upsert(await body(req, config.maxBodyBytes))});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/admin/mcp/reconcile') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,await reconciliation.reconcile());
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/mcp/incomplete') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{incomplete:await reconciliation.findIncomplete()});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/mcp/audit') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{events:await mcpAudit.list(url.searchParams.get('limit'))});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/mcp/tools') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{tools:await mcp.tools()});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/providers/models') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const input = Object.fromEntries(url.searchParams.entries());
+      if (!input.provider) return send(res,400,{error:'provider_required'});
+      const provider = await providers.resolve(String(input.provider));
+      return send(res,200,{providerId:input.provider,models:await provider.listModels()});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/mcp/tools/call') {
+      if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled',message:'Tool execution is disabled until the local verification loop passes.'});
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const input=await body(req, config.maxBodyBytes);
+      const requestId=String(input.requestId || id('req'));
+      const qualifiedName=String(input.qualifiedName ?? '');
+      if (!qualifiedName) return send(res,400,{error:'qualified_tool_required'});
+      let release;
+      try { release=limits.acquire(app.id); } catch(e) { const code=String(e?.message ?? 'application_limit'); return send(res,429,{error:code==='application_rate_limited'||code==='application_concurrency_limited'?code:'application_limit'}); }
+      const allowed=await permissions.allowed(app.id,qualifiedName);
+      if (!allowed) { release();
+        await mcpAudit.append({requestId,applicationId:app.id,qualifiedName,action:'tool_call',stage:'permission',outcome:'denied'});
+        return send(res,403,{error:'mcp_tool_not_permitted',qualifiedName,requestId});
+      }
+      let endpoint;
+      try {
+        const resolved=await mcp.resolveTool(qualifiedName); endpoint=resolved.endpoint; const tool=resolved.tool;
+        validateToolArguments(tool,input.arguments ?? {});
+        const connection=await connections.resolve({connectionId:input.connectionId,sessionId:input.sessionId,runtimeId:input.runtimeId,clientId:input.clientId});
+        const sessionId=connection?.sessionId || input.sessionId || endpoint.sessionId;
+        await mcpAudit.append({requestId,applicationId:app.id,endpointId:endpoint.id,qualifiedName,action:'tool_call',stage:'request',outcome:'started',connectionId:connection?.connectionId??null,sessionId:sessionId??null});
+        const result=await callMcpTool(endpoint,tool.name,input.arguments ?? {},{sessionId});
+        if(connection) await connections.touch(connection.connectionId,{sessionId});
+        await mcpAudit.append({requestId,applicationId:app.id,endpointId:endpoint.id,qualifiedName,action:'tool_call',stage:'result',outcome:'success',connectionId:connection?.connectionId??null,sessionId:sessionId??null});
+        release(); return send(res,200,{result,applicationId:app.id,endpointId:endpoint.id,qualifiedName,requestId,connectionId:connection?.connectionId??null,sessionId:sessionId??null});
+      } catch (e) {
+        await mcpAudit.append({requestId,applicationId:app.id,endpointId:endpoint?.id,qualifiedName,action:'tool_call',stage:'result',outcome:'error',error:e.message,remoteCode:e.remoteCode??null,remoteMessage:e.remoteMessage??null});
+        release(); throw e;
+      }
+    }
+    if (req.method==='POST' && url.pathname==='/v1/execution/prepare') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const input = await applyAgentModelMapping(await body(req, config.maxBodyBytes));
+      const taskPolicy = buildTaskPolicy(input);
+      return send(res,200,{applicationId:app.id, taskPolicy, ...await execution.prepare({...input, toolIds:taskPolicy.effectiveToolIds})});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/execution/run') {
+      if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled',message:'Execution is disabled until the local verification loop passes.'});
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      let input=await applyAgentModelMapping(await body(req, config.maxBodyBytes));
+      const taskPolicy=buildTaskPolicy(input);
+      input={...input,toolIds:taskPolicy.effectiveToolIds,allowedToolIds:taskPolicy.effectiveToolIds};
+      const registeredNativeTools=(await toolsRegistry.list()).filter(t=>input.toolIds.includes(t.id)&&t.entry&&['ENABLED','VERIFIED'].includes(t.status));
+      const generatedToolBindings=Object.fromEntries(registeredNativeTools.map(t=>[t.id,{toolId:t.id}]));
+      input={...input,tools:registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}})),toolBindings:{...(input.toolBindings??{}),...generatedToolBindings},allowJsonToolFallback:true};
+      const session=input.sessionId ? await sessionClient.resolve({sessionId:input.sessionId,applicationId:app.id}) : (input.createSession ? await sessionClient.resolve({applicationId:app.id,createIfMissing:true,userId:input.userId}) : null);
+      const executionMetadata={sessionSource:input.sessionSource ?? req.headers['x-session-source'] ?? 'execution',clientId:input.clientId ?? req.headers['x-client-id'] ?? null,editor:input.editor ?? req.headers['x-editor'] ?? null,editorVersion:input.editorVersion ?? req.headers['x-editor-version'] ?? null,clientVersion:input.clientVersion ?? req.headers['x-client-version'] ?? null,osPlatform:input.osPlatform ?? req.headers['x-os-platform'] ?? null,deviceInfo:input.deviceInfo ?? req.headers['x-device-info'] ?? null};
+      if(session) await sessions.updateMetadata(session.id,app.id,Object.fromEntries(Object.entries(executionMetadata).filter(([,v])=>v != null && String(v).trim())));
+      const currentSession=session ? await sessions.get(session.id,app.id) : null;
+      const executionEvidence=currentSession ? (await store.read('evidence',[])).filter(item=>item.contextId===currentSession.id).slice(-8) : [];
+      const executionProjectRoot=input.projectRoot ? projectContext.root(input.projectRoot) : null;
+      if(executionProjectRoot) await autoSetup.ensure(executionProjectRoot);
+      const executionProject=executionProjectRoot ? await ssot.read(executionProjectRoot) : null;
+      const executionMemory=executionProjectRoot ? await memory.recent(executionProjectRoot,10) : [];
+      const executionSyllabus=executionProjectRoot ? await syllabus.read(executionProjectRoot) : null;
+      const executionAgentId=String(input.agent ?? input.persona ?? 'code-guru');
+      const executionGoal=String(input.goal ?? 'execution');
+      const executionAgent=await agentRunner.prepare({agentId:executionAgentId,personaId:executionAgentId,goal:executionGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
+      const executionRoute=await smartRouter.route(input);
+      const executionCompiledContext=compileContext({goal:executionGoal,userInput:input.messages?.filter?.(m=>m?.role==='user').at(-1)?.content ?? executionGoal,recent:input.messages ?? [],memory:executionMemory ?? [],ssot:executionProject,syllabus:executionSyllabus,projectRoot:executionProjectRoot,workingDirectory:input.workingDirectory ?? executionProjectRoot,sessionId:currentSession?.id ?? input.sessionId ?? null,taskPolicy,evidence:executionEvidence,maxBytes:config.compiledContextBytes,recentLimit:config.contextRecentMessages});
+      const executionSystem=buildSystemMessage({constitution:CORE_CONSTITUTION,agent:executionAgent.agent,persona:executionAgent.persona,goal:executionGoal,expectedOutcome:input.expectedOutcome,projectRoot:executionProjectRoot,ssot:executionProject,syllabus:executionSyllabus,memory:executionMemory,session:currentSession,route:executionRoute,tools:input.toolIds,toolCatalog:registeredNativeTools,compiledContext:executionCompiledContext});
+      const executionArchive=session ? await sessionState.archive(session.id,app.id) : [];
+      const boundedExecution=boundedConversation(input.messages,[...(executionMemory ?? [])],executionArchive,executionGoal);
+      const incomingMessages=boundedExecution.messages.length ? boundedExecution.messages : [{role:'user',content:executionGoal}];
+      input={...input,messages:[executionSystem,...incomingMessages],sessionId:currentSession?.id ?? input.sessionId};
+      const prepared=await execution.prepare(input);
+      const executionContext=createExecutionContext({...input,applicationId:app.id,sessionId:session?.id ?? input.sessionId,requestId,projectRoot:executionProjectRoot,workingDirectory:input.workingDirectory ?? executionProjectRoot,agentId:executionAgentId,goal:executionGoal,expectedOutcome:input.expectedOutcome,transport:'http'},runtimeIdentity);
+      const result=await execution.execute(prepared,{...input,sessionId:session?.id ?? input.sessionId,requestId,workingDirectory:executionContext.workingDirectory,applicationId:app.id},app.id,executionContext);
+      requestState.outcome = result?.status === 'completed' && result?.verified === true ? 'verified' : (result?.status ?? 'completed');
+      await requestLog.info('execution.completed', {applicationId:app.id,agentId:input.agent ?? input.persona ?? 'code-guru',personaId:input.persona ?? input.agent ?? 'code-guru',providerId:result?.providerId ?? null,model:result?.model ?? null,status:result?.status ?? null,stoppedReason:result?.stoppedReason ?? null,verified:result?.verified ?? false});
+      const evidence=Array.isArray(result?.evidence)?result.evidence:[];
+      const evidenceState=evidence.length ? evidenceGate.validate(evidence) : [];
+      const verified=evidenceGate.canClaimSuccess(evidenceState);
+      const safeResult={...result,verified};
+      if (!verified) { safeResult.response=null; safeResult.status='awaiting_verification'; }
+      // Public projection: the run result is internal routing/execution state. A client
+      // only ever sees the masked provider identity, a masked route summary and masked
+      // evidence sources; the real upstream ids stay in the runtime log.
+      const publicModel=safeResult.route?.publicModel ?? safeResult.identity?.model ?? executionRoute?.publicModel ?? null;
+      const publicResult={...safeResult,
+        providerId:'masked',
+        model:publicModel,
+        route:maskRouteForPublic(safeResult.route,{publicModel}),
+        evidence:maskEvidenceForPublic(safeResult.evidence),
+        verification:safeResult.verification ? {...safeResult.verification,evidence:maskEvidenceForPublic(safeResult.verification.evidence)} : safeResult.verification
+      };
+      if (input.projectRoot) {
+        await autoSetup.ensure(input.projectRoot);
+        await syllabus.append(input.projectRoot,{topic:String(input.goal ?? 'execution').slice(0,120),source:'runtime.phase-22',summary:verified?'Execution produced verified evidence':'Execution observed a provider/tool result but verification evidence is still required',status:verified?'verified':'unverified',evidence:evidence.map(x=>x.summary ?? x.source).join('; ')});
+      }
+      return send(res,200,{applicationId:app.id,session,taskPolicy,prepared,result:publicResult,evidence:maskEvidenceForPublic(evidenceState),verified});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/execution/stream') {
+      if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled',message:'Execution is disabled until the local verification loop passes.'});
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      let input=await applyAgentModelMapping(await body(req, config.maxBodyBytes));
+      const taskPolicy=buildTaskPolicy(input);
+      input={...input,stream:true,toolIds:taskPolicy.effectiveToolIds,allowedToolIds:taskPolicy.effectiveToolIds};
+      const registeredNativeTools=(await toolsRegistry.list()).filter(t=>input.toolIds.includes(t.id)&&t.entry&&['ENABLED','VERIFIED'].includes(t.status));
+      const generatedToolBindings=Object.fromEntries(registeredNativeTools.map(t=>[t.id,{toolId:t.id}]));
+      input={...input,tools:registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}})),toolBindings:{...(input.toolBindings??{}),...generatedToolBindings},allowJsonToolFallback:true};
+      const session=input.sessionId ? await sessionClient.resolve({sessionId:input.sessionId,applicationId:app.id}) : (input.createSession ? await sessionClient.resolve({applicationId:app.id,createIfMissing:true,userId:input.userId}) : null);
+      const streamMetadata={sessionSource:input.sessionSource ?? req.headers['x-session-source'] ?? 'execution-stream',clientId:input.clientId ?? req.headers['x-client-id'] ?? null,editor:input.editor ?? req.headers['x-editor'] ?? null,editorVersion:input.editorVersion ?? req.headers['x-editor-version'] ?? null,clientVersion:input.clientVersion ?? req.headers['x-client-version'] ?? null,osPlatform:input.osPlatform ?? req.headers['x-os-platform'] ?? null,deviceInfo:input.deviceInfo ?? req.headers['x-device-info'] ?? null};
+      if(session) await sessions.updateMetadata(session.id,app.id,Object.fromEntries(Object.entries(streamMetadata).filter(([,v])=>v != null && String(v).trim())));
+      const currentSession=session ? await sessions.get(session.id,app.id) : null;
+      const streamProjectRoot=input.projectRoot ? projectContext.root(input.projectRoot) : null;
+      if(streamProjectRoot) await autoSetup.ensure(streamProjectRoot);
+      const streamProject=streamProjectRoot ? await ssot.read(streamProjectRoot) : null;
+      const streamMemory=streamProjectRoot ? await memory.recent(streamProjectRoot,10) : [];
+      const streamSyllabus=streamProjectRoot ? await syllabus.read(streamProjectRoot) : null;
+      const streamEvidence=session ? (await store.read('evidence',[])).filter(item=>item.contextId===session.id).slice(-8) : [];
+      const streamAgentId=String(input.agent ?? input.persona ?? 'code-guru');
+      const streamGoal=String(input.goal ?? 'execution stream');
+      const streamAgent=await agentRunner.prepare({agentId:streamAgentId,personaId:streamAgentId,goal:streamGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
+      const streamRoute=await smartRouter.route(input);
+      const streamCompiledContext=compileContext({goal:streamGoal,userInput:input.messages?.filter?.(m=>m?.role==='user').at(-1)?.content ?? streamGoal,recent:input.messages ?? [],memory:streamMemory ?? [],ssot:streamProject,syllabus:streamSyllabus,projectRoot:streamProjectRoot,workingDirectory:input.workingDirectory ?? streamProjectRoot,sessionId:currentSession?.id ?? input.sessionId ?? null,taskPolicy,evidence:streamEvidence,maxBytes:config.compiledContextBytes,recentLimit:config.contextRecentMessages});
+      const streamSystem=buildSystemMessage({constitution:CORE_CONSTITUTION,agent:streamAgent.agent,persona:streamAgent.persona,goal:streamGoal,expectedOutcome:input.expectedOutcome,projectRoot:streamProjectRoot,ssot:streamProject,syllabus:streamSyllabus,memory:streamMemory,session:currentSession,route:streamRoute,tools:input.toolIds,toolCatalog:registeredNativeTools});
+      const streamArchive=session ? await sessionState.archive(session.id,app.id) : [];
+      const boundedStream=boundedConversation(input.messages,[...(streamMemory ?? [])],streamArchive,streamGoal);
+      const streamMessages=boundedStream.messages.length ? boundedStream.messages : [{role:'user',content:streamGoal}];
+      input={...input,messages:[streamSystem,...streamMessages],sessionId:currentSession?.id ?? input.sessionId};
+      const prepared=await execution.prepare(input);
+      if (!prepared.consent.allowed) return send(res,409,{error:'execution_consent_required',prepared});
+      res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache','connection':'keep-alive'});
+      const streamExecutionContext=createExecutionContext({...input,applicationId:app.id,sessionId:session?.id ?? input.sessionId,requestId,projectRoot:streamProjectRoot,workingDirectory:input.workingDirectory ?? streamProjectRoot,agentId:streamAgentId,goal:streamGoal,expectedOutcome:input.expectedOutcome,transport:'http-stream'},runtimeIdentity);
+      const streamInput={...input,sessionId:session?.id ?? input.sessionId,executionContext:streamExecutionContext};
+      if (input.autoToolLoop === true && config.executionMode !== 'tools-enabled') {
+        res.write(`event: error\ndata: ${JSON.stringify({error:'tool_execution_not_verified',executionMode:config.executionMode,requestId})}\n\n`); res.end(); return;
+      }
+      if (input.autoToolLoop === true) {
+        const result=await toolLoop.stream({prepared,input:streamInput,applicationId:app.id,onChunk:chunk=>res.write(`data: ${JSON.stringify(chunk)}\n\n`),onEvent:event=>res.write(`event: runtime\ndata: ${JSON.stringify(event)}\n\n`)});
+        res.write(`event: runtime\ndata: ${JSON.stringify({type:'complete',status:result.status,stoppedReason:result.stoppedReason,verified:result.verified})}\n\n`);
+      } else {
+        await providerExecution.stream({prepared,input:streamInput,onChunk:chunk=>res.write(`data: ${JSON.stringify(chunk)}\n\n`)});
+      }
+      res.write('data: [DONE]\n\n'); res.end(); return;
+    }
+    if (req.method==='POST' && url.pathname==='/v1/chat/completions') {
+      let input=await body(req, config.maxBodyBytes);
+      if (input.autoToolLoop === true && config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled'});
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      input=await applyAgentModelMapping(input);
+      const requestedChatTools=Array.isArray(input.toolIds)?input.toolIds.map(String):(Array.isArray(input.tools)?input.tools.map(t=>String(t?.function?.name??t?.name??'')).filter(Boolean):[]);
+      const chatGoal=String(input.goal??input.messages?.filter?.(m=>m?.role==='user').at(-1)?.content??'chat request');
+      const taskPolicy=buildTaskPolicy({...input,goal:chatGoal,toolIds:requestedChatTools});
+      input={...input,goal:chatGoal,toolIds:taskPolicy.effectiveToolIds,allowedToolIds:taskPolicy.effectiveToolIds};
+      if (input.autoToolLoop === true) {
+        if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled'});
+        const registeredNativeTools=(await toolsRegistry.list()).filter(t=>input.toolIds.includes(t.id)&&t.entry&&['ENABLED','VERIFIED'].includes(t.status));
+        if (!registeredNativeTools.length) return send(res,400,{error:'no_registered_tool_allowed_for_task',taskProfile:taskPolicy.profileId,requestedToolIds:requestedChatTools});
+        const toolDefinitions=registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}}));
+        const toolBindings={...(input.toolBindings??{}),...Object.fromEntries(registeredNativeTools.map(t=>[t.id,{toolId:t.id}]))};
+        const projectRoot=input.projectRoot?projectContext.root(input.projectRoot):null;
+        const agentId=String(input.agent??input.persona??'code-guru');
+        const agentPrepared=await agentRunner.prepare({agentId,personaId:agentId,goal:chatGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
+        const route=await smartRouter.route({...input,tools:toolDefinitions,allowJsonToolFallback:true});
+        const systemMessage=buildSystemMessage({constitution:CORE_CONSTITUTION,agent:agentPrepared.agent,persona:agentPrepared.persona,goal:chatGoal,expectedOutcome:input.expectedOutcome,projectRoot,route,tools:input.toolIds,toolCatalog:registeredNativeTools});
+        const prepared=await execution.prepare({...input,goal:chatGoal,toolIds:input.toolIds,allowedToolIds:input.allowedToolIds,consent:input.consent===true});
+        if (!prepared.consent.allowed) return send(res,409,{error:'execution_consent_required',prepared});
+        const executionContext=createExecutionContext({...input,applicationId:app.id,sessionId:input.sessionId ?? null,requestId,projectRoot,workingDirectory:input.workingDirectory??projectRoot,agentId,goal:chatGoal,expectedOutcome:input.expectedOutcome,transport:'http-chat'},runtimeIdentity);
+        const loopInput={...input,tools:toolDefinitions,toolBindings,allowJsonToolFallback:true,executionContext,messages:[systemMessage,...(Array.isArray(input.messages)?input.messages:[])],stream:input.stream===true};
+        if (input.stream===true) {
+          res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'});
+          // The status line is already on the wire, so a failure here cannot become an
+          // HTTP error status: it has to be delivered as a stream event and the response
+          // must always end, otherwise the client stays blocked on an open connection
+          // until its own timeout fires (the provider detail stays in the logs).
+          try {
+            const result=await toolLoop.stream({prepared,input:loopInput,applicationId:app.id,onChunk:chunk=>res.write(`data: ${JSON.stringify(chunk)}\n\n`),onEvent:event=>res.write(`event: runtime\ndata: ${JSON.stringify(event)}\n\n`)});
+            res.write(`event: runtime\ndata: ${JSON.stringify({type:'complete',status:result.status,stoppedReason:result.stoppedReason,roundCount:result.rounds.length,evidenceCount:result.evidence.length,agentId,model:result.response?.model ?? route.publicModel ?? null,providerId:'masked',verified:result.verified})}\n\n`);
+            res.write('data: [DONE]\n\n');
+          } catch (error) {
+            await requestLog.warn('tool_loop.stream_failed',{agentId,error:String(error?.message ?? error),...providerErrorDetail(error)});
+            res.write(`event: error\ndata: ${JSON.stringify({error:'stream_failed',requestId})}\n\n`);
+          } finally { res.end(); }
+          return;
+        }
+        const result=await toolLoop.execute({prepared,input:loopInput,applicationId:app.id});
+        requestState.outcome=result.status==='completed'?'observed_unverified':'incomplete';
+        // The tool loop must expose the same provenance as the plain chat path, so a
+        // client can tell which agent answered and what evidence was observed. The
+        // public surface stays masked (providerId/provider.id = 'masked'); the real
+        // provider and upstream model live only in the runtime log (tool_loop.started,
+        // tool.execution.*).
+        const toolLoopPublicModel=result.response?.model ?? route.publicModel ?? null;
+        const toolLoopRoute={routeId:route.routeId,providerId:'masked',model:route.publicModel || toolLoopPublicModel,publicModel:route.publicModel || toolLoopPublicModel,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status};
+        return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy}});
+      }
+      if (input.stream === true) {
+        const streamContext = await contexts.resolve(input);
+        const streamProjectRoot = input.projectRoot ? projectContext.root(input.projectRoot) : null;
+        if (streamProjectRoot) await autoSetup.ensure(streamProjectRoot);
+        const streamProject = streamProjectRoot ? await ssot.read(streamProjectRoot) : null;
+        const streamMemory = streamProjectRoot ? await memory.recent(streamProjectRoot,10) : null;
+        const streamSyllabus = streamProjectRoot ? await syllabus.read(streamProjectRoot) : null;
+        const streamAgentId = String(input.agent ?? input.persona ?? 'code-guru');
+        const streamGoal = String(input.goal ?? input.messages?.filter?.(m=>m?.role==='user').at(-1)?.content ?? 'chat request');
+        const streamAgent = await agentRunner.prepare({agentId:streamAgentId,personaId:streamAgentId,goal:streamGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
+        const streamSession = input.sessionId ? await sessionClient.resolve({sessionId:input.sessionId,applicationId:app.id}) : (input.createSession ? await sessionClient.resolve({applicationId:app.id,createIfMissing:true,userId:input.userId}) : null);
+        const streamMetadata = {sessionSource:input.sessionSource ?? req.headers['x-session-source'] ?? 'api-stream',clientId:input.clientId ?? req.headers['x-client-id'] ?? null,editor:input.editor ?? req.headers['x-editor'] ?? null,editorVersion:input.editorVersion ?? req.headers['x-editor-version'] ?? null,clientVersion:input.clientVersion ?? req.headers['x-client-version'] ?? null,osPlatform:input.osPlatform ?? req.headers['x-os-platform'] ?? null,deviceInfo:input.deviceInfo ?? req.headers['x-device-info'] ?? null};
+        if (streamSession) await sessions.updateMetadata(streamSession.id,app.id,Object.fromEntries(Object.entries(streamMetadata).filter(([,v])=>v != null && String(v).trim())));
+        const currentStreamSession = streamSession ? await sessions.get(streamSession.id,app.id) : null;
+        const route = await smartRouter.route(input);
+        let providerId = route.providerId;
+        let provider = await providers.resolve(providerId);
+        let model = await providers.resolveModel(providerId, route.model || input.model);
+        const streamArchiveForChat=streamSession ? await sessionState.archive(streamSession.id,app.id) : [];
+        const streamEvidence=streamSession ? (await store.read('evidence',[])).filter(item=>item.contextId===streamSession.id).slice(-8) : [];
+        const boundedChatStream=boundedConversation(input.messages,streamArchiveForChat,streamArchiveForChat,streamGoal);
+        const streamUserMessage=latestUserMessage(input.messages,streamGoal);
+        const userMessages = boundedChatStream.messages.length ? boundedChatStream.messages : [streamUserMessage];
+        const streamCompiledContext=compileContext({goal:streamGoal,userInput:streamUserMessage.content,recent:userMessages,memory:streamMemory ?? [],ssot:streamProject,syllabus:streamSyllabus,projectRoot:streamProjectRoot,workingDirectory:input.workingDirectory ?? streamProjectRoot,sessionId:currentStreamSession?.id ?? input.sessionId ?? null,taskPolicy,evidence:streamEvidence,maxBytes:config.compiledContextBytes,recentLimit:config.contextRecentMessages});
+        const systemMessage = buildSystemMessage({constitution:CORE_CONSTITUTION,agent:streamAgent.agent,persona:streamAgent.persona,goal:streamGoal,expectedOutcome:input.expectedOutcome,projectRoot:streamProjectRoot,ssot:streamProject,syllabus:streamSyllabus,memory:streamMemory,session:currentStreamSession,route,tools:input.toolIds,compiledContext:streamCompiledContext});
+        input = {...input,provider:undefined,model,messages:[systemMessage,...userMessages],stream:true,sessionId:currentStreamSession?.id ?? input.sessionId};
+        res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'});
+        let streamText='';
+        let streamToolCalls=[];
+        let streamChunkCount=0;
+        try {
+          let streamSucceeded = false;
+          let streamLastError = null;
+          for (const candidate of route.candidates) {
+            const beforeCandidateChunks = streamChunkCount;
+            try {
+              providerId = candidate.providerId;
+              provider = await providers.resolve(providerId);
+              model = await providers.resolveModel(providerId, route.publicModel ? candidate.model : (input.model || candidate.model));
+              if (typeof provider.streamChat !== 'function') throw new Error('provider_streaming_not_supported');
+              await provider.streamChat({...input, model, stream:true}, raw => {
+                if (raw?.done === true && !raw?.choices) return;
+                const canonicalInput = typeof provider.streamChunk === 'function' ? provider.streamChunk(raw) : raw;
+                const chunk = canonicalInput?.choices ? normalizer.normalize(canonicalInput,{model,providerId:provider.id}) : null;
+                if (chunk) {
+                  streamChunkCount += 1;
+                  const masked = maskCanonicalResponse(chunk,{agentId:streamAgent.agent?.id ?? streamAgentId,configuredModel:route.publicModel || '',capabilities:Object.keys(provider.capabilities ?? {}).filter(k=>provider.capabilities[k])});
+                  const delta=masked?.choices?.[0]?.delta;
+                  if (typeof delta?.content === 'string') streamText += delta.content;
+                  if (Array.isArray(delta?.tool_calls)) streamToolCalls.push(...delta.tool_calls);
+                  res.write(`data: ${JSON.stringify(masked)}\n\n`);
+                }
+              });
+              if (streamChunkCount === beforeCandidateChunks) {
+                // A 200 response without chunks is not a completed answer: retry via non-streaming.
+                const fallbackRaw = await provider.chatCompletions({...input, model, stream:false});
+                const fallbackInput = typeof provider.toCanonical === 'function' ? provider.toCanonical(fallbackRaw) : fallbackRaw;
+                const fallbackCompletion = normalizer.normalize(fallbackInput,{model,providerId:provider.id});
+                const fallbackChunk = normalizer.normalize(completionToStreamChunk(fallbackCompletion),{model,providerId:provider.id});
+                const maskedFallback = maskCanonicalResponse(fallbackChunk,{agentId:streamAgent.agent?.id ?? streamAgentId,configuredModel:route.publicModel || '',capabilities:Object.keys(provider.capabilities ?? {}).filter(k=>provider.capabilities[k])});
+                const delta = maskedFallback?.choices?.[0]?.delta;
+                if (typeof delta?.content === 'string') streamText += delta.content;
+                if (Array.isArray(delta?.tool_calls)) streamToolCalls.push(...delta.tool_calls);
+                res.write(`data: ${JSON.stringify(maskedFallback)}\n\n`);
+                streamChunkCount += 1;
+              }
+              streamSucceeded = true;
+              break;
+            } catch (error) {
+              streamLastError = error;
+              if (streamChunkCount > beforeCandidateChunks) throw error; // No replay after partial output.
+              await requestLog.warn('provider.stream_candidate_failed',{routeId:route.routeId,providerId:candidate.providerId,model:candidate.model,error:String(error?.message ?? error)});
+            }
+          }
+          if (!streamSucceeded) throw streamLastError ?? new Error('provider_stream_route_failed');
+          if (currentStreamSession) {
+            await evidenceGate.record({contextId:currentStreamSession.id,source:'provider:ZombieCoder',status:'observed',confidence:'direct-response',observedAt:new Date().toISOString(),summary:'Provider returned a streaming response; this is not execution verification'});
+            await sessionState.append(currentStreamSession.id,app.id,streamUserMessage,{kind:'request'});
+            await sessionState.append(currentStreamSession.id,app.id,{role:'assistant',content:streamText,...(streamToolCalls.length ? {tool_calls:streamToolCalls} : {})},{kind:'provider_response'});
+          }
+          res.write('data: [DONE]\n\n');
+        } catch (e) {
+          res.write(`event: error\ndata: ${JSON.stringify({error:'stream_failed',requestId})}\n\n`);
+        } finally { res.end(); }
+        return;
+      }
+      const context = await contexts.resolve(input);
+      const projectRoot = input.projectRoot ? projectContext.root(input.projectRoot) : null;
+      if (projectRoot) await autoSetup.ensure(projectRoot);
+      const project = projectRoot ? await ssot.read(projectRoot) : null;
+      const memoryDoc = projectRoot ? await memory.recent(projectRoot, 10) : null;
+      const syllabusDoc = projectRoot ? await syllabus.read(projectRoot) : null;
+      const entities = entityDoor.resolve(input);
+      const personaId = String(input.agent ?? input.persona ?? 'code-guru');
+      const goal = String(input.goal ?? input.messages?.filter?.(m=>m?.role==='user').at(-1)?.content ?? 'chat request');
+      await requestLog.debug('agent.resolve.request', {applicationId:app.id,agentId:personaId,personaId,goalPresent:Boolean(input.goal),toolCount:Array.isArray(input.toolIds)?input.toolIds.length:0});
+      const agentPrepared = await agentRunner.prepare({agentId:personaId,personaId,goal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
+      const session = input.sessionId ? await sessionClient.resolve({sessionId:input.sessionId,applicationId:app.id}) : (input.createSession ? await sessionClient.resolve({applicationId:app.id,createIfMissing:true,userId:input.userId}) : null);
+      const incomingMetadata = {
+        sessionSource: input.sessionSource ?? req.headers['x-session-source'] ?? 'api',
+        clientId: input.clientId ?? req.headers['x-client-id'] ?? null,
+        editor: input.editor ?? req.headers['x-editor'] ?? null,
+        editorVersion: input.editorVersion ?? req.headers['x-editor-version'] ?? null,
+        clientVersion: input.clientVersion ?? req.headers['x-client-version'] ?? null,
+        osPlatform: input.osPlatform ?? req.headers['x-os-platform'] ?? null,
+        deviceInfo: input.deviceInfo ?? req.headers['x-device-info'] ?? null
+      };
+      if (session) await sessions.updateMetadata(session.id,app.id,Object.fromEntries(Object.entries(incomingMetadata).filter(([,v])=>v != null && String(v).trim())));
+      const currentSession = session ? await sessions.get(session.id,app.id) : null;
+      const route = await smartRouter.route(input);
+      let providerId = route.providerId;
+      let provider = await providers.resolve(providerId);
+      let model = await providers.resolveModel(providerId, route.model || input.model);
+      const chatArchive=session ? await sessionState.archive(session.id,app.id) : [];
+      const chatEvidence=session ? (await store.read('evidence',[])).filter(item=>item.contextId===session.id).slice(-8) : [];
+      const boundedChat=boundedConversation(input.messages,chatArchive,chatArchive,goal);
+      const sessionMessages = boundedChat.messages.length ? boundedChat.messages : [latestUserMessage(input.messages,goal)];
+      const currentUserMessage = latestUserMessage(input.messages,goal);
+      const compiledContext = compileContext({goal,userInput:currentUserMessage.content,recent:sessionMessages,memory:memoryDoc ?? [],ssot:project,syllabus:syllabusDoc,projectRoot,workingDirectory:input.workingDirectory ?? projectRoot,sessionId:currentSession?.id ?? input.sessionId ?? null,taskPolicy,maxBytes:config.compiledContextBytes,recentLimit:config.contextRecentMessages});
+      await requestLog.debug('context.compiled',{applicationId:app.id,sessionId:currentSession?.id ?? null,projectRoot,workingDirectory:input.workingDirectory ?? projectRoot,ssotSections:compiledContext.ssot.sections.length,syllabusEntries:compiledContext.syllabus.length,memoryEntries:compiledContext.memory.length,recentCount:compiledContext.recent.length,sessionCount:sessionMessages.length,archiveSelected:boundedChat.archiveSelected,bytes:Buffer.byteLength(JSON.stringify(compiledContext))});
+      const requestedToolIds = Array.isArray(input.toolIds) ? input.toolIds.map(String) : [];
+      const allToolDefinitions = await toolsRegistry.list();
+      const toolCatalog = allToolDefinitions.filter(tool => requestedToolIds.includes(String(tool.id)));
+      const systemMessage = buildSystemMessage({constitution:CORE_CONSTITUTION,agent:agentPrepared.agent,persona:agentPrepared.persona,goal,expectedOutcome:input.expectedOutcome,projectRoot,ssot:project,syllabus:syllabusDoc,memory:memoryDoc,session:currentSession,route,tools:requestedToolIds,toolCatalog,compiledContext});
+      const userMessages = sessionMessages;
+      const providerMessages = [systemMessage,...userMessages];
+      let result = null;
+      let providerLastError = null;
+      for (const candidate of route.candidates) {
+        try {
+          providerId = candidate.providerId;
+          provider = await providers.resolve(providerId);
+          model = await providers.resolveModel(providerId, route.publicModel ? candidate.model : (input.model || candidate.model));
+          result = await provider.chatCompletions({...input,provider:undefined,model,messages:providerMessages,stream:false});
+          break;
+        } catch (error) {
+          providerLastError = error;
+          await requestLog.warn('provider.chat_candidate_failed',{routeId:route.routeId,providerId:candidate.providerId,model:candidate.model,error:String(error?.message ?? error),...providerErrorDetail(error)});
+        }
+      }
+      if (result === null) throw providerLastError ?? new Error('provider_route_failed');
+      const canonicalInput = typeof provider.toCanonical === 'function' ? provider.toCanonical(result) : result;
+      const canonical = normalizer.normalize(canonicalInput,{model,providerId:provider.id});
+      const masked = maskCanonicalResponse(canonical,{agentId:agentPrepared.agent?.id ?? personaId,configuredModel:route.publicModel || '',capabilities:Object.keys(provider.capabilities ?? {}).filter(k=>provider.capabilities[k])});
+      // Internal provenance keeps the real upstream provider id: the log and the evidence
+      // store are not client-visible. The response payload is masked separately below.
+      const evidence=[{source:`provider:${provider.id}`,status:'observed',confidence:'direct-response',observedAt:new Date().toISOString(),summary:'Provider returned a response; this is not execution verification'}];
+      if (currentSession) await evidenceGate.record({contextId:currentSession.id,...evidence[0]});
+      const verificationRequired=Boolean(input.goal || input.projectRoot || input.toolIds || input.autoToolLoop);
+      if (currentSession) {
+        await sessionState.append(currentSession.id,app.id,currentUserMessage,{kind:'request'});
+        const assistantMessage=masked?.choices?.[0]?.message ?? {role:'assistant',content:''};
+        await sessionState.append(currentSession.id,app.id,{role:'assistant',content:assistantMessage.content ?? '',...(assistantMessage.tool_calls ? {tool_calls:assistantMessage.tool_calls} : {})},{kind:'provider_response'});
+      }
+      requestState.outcome = 'observed_unverified';
+      await requestLog.info('chat.completed',{applicationId:app.id,agentId:agentPrepared.agent?.id,personaId:agentPrepared.persona?.id,providerId:provider.id,model,sessionId:currentSession?.id ?? null,evidenceStatus:'observed',verified:false,routeId:route.routeId,contextInjected:true});
+      return send(res,200,{...masked,applicationId:app.id,meta:{phase:RUNTIME_PHASE,taskPolicy,route:{routeId:route.routeId,providerId:'masked',model:route.publicModel || masked.model,publicModel:route.publicModel || masked.model,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status},provider:{name:'ZombieCoder',id:'masked'},model:masked.model,session:currentSession,context,project,syllabus:syllabusDoc,memory:memoryDoc,entities,agent:agentPrepared.agent,persona:agentPrepared.persona,constitution:CORE_CONSTITUTION,sessionMetadata:currentSession?.metadata ?? incomingMetadata,systemPrompt:{injected:true,visibleToClient:false,contextCompiled:true},receivedMessages:Array.isArray(input.messages)?input.messages.length:0,evidence:maskEvidenceForPublic(evidence),verified:false,verificationRequired}});
+    }
+    if (req.method==='GET' && url.pathname==='/api/syllabus') {
+      const root=url.searchParams.get('projectRoot')||config.dataDir; await autoSetup.ensure(root); const doc=await syllabus.read(root);
+      return send(res,200,{ok:true,syllabus:doc?.content??'',path:path.join(root,'.zombiecoder','syllabus.md')});
+    }
+    if (req.method==='GET' && url.pathname==='/api/memory') {
+      const root=url.searchParams.get('projectRoot')||config.dataDir; await autoSetup.ensure(root); const doc=await memory.read(root);
+      return send(res,200,{ok:true,memory:doc,path:path.join(root,'.zombiecoder','memory.json')});
+    }
+    if (req.method==='POST' && url.pathname==='/api/workspace') {
+      const app=await authenticateRequest(req,requestLog,requestState); if(!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const input=await body(req,config.maxBodyBytes); const root=input.projectRoot||input.path||config.dataDir;
+      return send(res,200,{success:true,applicationId:app.id,working_dir:root,setup:await autoSetup.ensure(root,{refreshSSOT:true}),ssot:await ssot.read(root)});
+    }
+    if (req.method==='POST' && url.pathname==='/api/syllabus') {
+      const app=await authenticateRequest(req,requestLog,requestState); if(!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const input=await body(req,config.maxBodyBytes); const root=input.projectRoot||config.dataDir;
+      return send(res,201,{applicationId:app.id,entry:await syllabus.append(root,input)});
+    }
+    if (req.method==='POST' && url.pathname==='/api/input') {
+      const app=await authenticateRequest(req,requestLog,requestState); if(!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const input=await applyAgentModelMapping(await body(req,config.maxBodyBytes));
+      const goal=String(input.input||input.prompt||input.goal||input.messages?.filter?.(m=>m?.role==='user').at(-1)?.content||'chat request');
+      const callerMessages=Array.isArray(input.messages)?input.messages:[];
+      const messages=callerMessages.length?callerMessages:[{role:'user',content:goal}];
+      // The execution lifecycle requires an explicit system prompt, while this legacy shim
+      // may only receive the caller's input. Bind the runtime identity prompt when the
+      // caller supplied none; otherwise the route always failed with system_prompt_required.
+      const boundMessages=messages.some(m=>m?.role==='system')?messages:[{role:'system',content:'ZombieCoder unified input session.'},...messages];
+      const result=await providerExecution.execute({prepared:{contract:{goal,expectedOutcome:input.expectedOutcome||'legacy chat response'},consent:{allowed:true}},input:{...input,applicationId:app.id,messages:boundMessages,sessionId:input.sessionId||null}});
+      const canonical=result.response;
+      return send(res,200,{status:'ok',response:canonical,content:canonical?.choices?.[0]?.message?.content??null,model:canonical?.model??result.identity?.model??null,session_id:input.sessionId||null,evidence:maskEvidenceForPublic(result.evidence),verified:false,legacyCompatibility:true});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/routes') {
+      if(!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,routeMapReport());
+    }
+    return send(res,404,{error:'not_found'});
+  } catch (e) {
+    const publicErrors = new Set(['runtime_instance_already_locked','uds_path_already_exists','tool_not_permitted','tool_entry_outside_tool_root','tool_entry_symlink_escape','execution_path_outside_project_root','execution_working_directory_outside_project_root','execution_path_symlink_escape','project_root_required','invalid_json_body','request_body_too_large','application_unauthorized_or_expired','admin_unauthorized','provider_not_found_or_disabled','provider_model_required','no_provider_route_available','provider_streaming_not_supported','execution_consent_required','execution_contract_required','qualified_tool_required','mcp_tool_not_permitted','mcp_https_url_required','mcp_endpoint_not_found','mcp_tool_not_found','mcp_tool_arguments_must_be_object','mcp_response_too_large','mcp_invalid_response','mcp_timeout','project_root_not_allowed','project_root_not_found','application_id_required','application_not_found','application_id_and_tool_required','tool_disabled_by_configuration','outbound_circuit_open']);
+    const message = String(e?.message ?? 'request_failed');
+    // The stored audit record keeps its own key, but the log field must not be
+    // called remoteMessage: the logger omits any key containing "message".
+    await requestLog.error('http.error', {error:message,name:e?.name ?? 'Error',statusCode:e?.statusCode ?? null,retryAfterMs:e?.retryAfterMs ?? null,remoteCode:e?.remoteCode ?? null,remoteReason:e?.remoteMessage ?? null});
+    const statusCode = message === 'outbound_circuit_open' ? 503 : (Number(e?.statusCode) || 400);
+    const headers = message === 'outbound_circuit_open' ? {'retry-after': String(Math.max(1, Math.ceil((Number(e?.retryAfterMs) || 0) / 1000)))} : {};
+    // MCP failures are raised per stage (mcp_tools_list_failed, mcp_tool_call_failed,
+    // ...). Those codes are already stable and free of user data, so publish them
+    // instead of collapsing the real cause into a generic request_failed. The
+    // upstream message stays in the logs and audit trail, never in the response,
+    // because it can contain the remote server's filesystem layout.
+    const publicError = publicErrors.has(message) || /^mcp_[a-z0-9_]+$/.test(message) ? message : 'request_failed';
+    return send(res, statusCode, {error: publicError, requestId, ...(message === 'outbound_circuit_open' ? {retryAfterMs:e.retryAfterMs} : {}), ...(e?.mcpCode ? {mcpCode:e.mcpCode} : {}), ...(e?.remoteCode ? {remoteCode:e.remoteCode} : {})}, headers);
+  }
+};
+
+const transportServers = await startTransportServers({handler:requestHandler, config, logger, runtimeIdentity});
+// Server-Sent Events are not a standalone listener in this runtime: streamed
+// events are delivered as HTTP responses. The mode is reported to the registry
+// so a stale VERIFIED status from an older run cannot survive a restart.
+const SSE_DELIVERY_MODE = 'http-response-mode';
+// Reconcile declared transport status with what actually started, so a disabled
+// or failed transport is never reported as VERIFIED.
+await transportsRegistry.syncRuntimeState({servers:transportServers, config, sseMode:SSE_DELIVERY_MODE});
+await logger.info('runtime.started', {version:RUNTIME_VERSION,phase:RUNTIME_PHASE,runtimeId:runtimeIdentity.runtimeId,instanceId:runtimeIdentity.instanceId,transports:Object.fromEntries(Object.entries(transportServers).map(([key,server])=>[key,Boolean(server)])),sse:SSE_DELIVERY_MODE});
+
+process.on('SIGINT', async () => { await stopTransportServers(transportServers); await releaseRuntimeLock(); process.exit(0); });
+process.on('SIGTERM', async () => { await stopTransportServers(transportServers); await releaseRuntimeLock(); process.exit(0); });

@@ -1,0 +1,29 @@
+# ZombieCoder Runtime — systemd unit template (no npm packages; self-contained)
+#
+# Rendered by scripts/setup-os-runtime.sh into:
+#   /etc/systemd/system/zombiecoder-runtime.service
+#
+# Do not install this file verbatim: it contains {{...}} placeholders.
+# See scripts/systemd/README.md for the placeholder list and install steps.
+
+[Unit]
+Description=ZombieCoder Runtime
+After=network.target
+
+[Service]
+Type=simple
+User={{USER}}
+WorkingDirectory={{ROOT}}
+Environment=HOST=127.0.0.1
+Environment=PORT={{PORT}}
+Environment=ZOMBIECODER_EXECUTION_MODE={{MODE}}
+ExecStart={{NODE}} {{ROOT}}/start.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths={{ROOT}}/data {{ROOT}}/logs
+
+[Install]
+WantedBy=multi-user.target

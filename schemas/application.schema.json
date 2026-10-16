@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Application",
+  "type": "object",
+  "required": ["id", "name", "status", "expires_at"],
+  "properties": {
+    "id": {"type": "string"},
+    "name": {"type": "string", "minLength": 1, "maxLength": 120},
+    "slug": {"type": "string", "maxLength": 120},
+    "status": {
+      "type": "string",
+      "enum": ["active", "suspended", "revoked", "expired"]
+    },
+    "key_prefix": {"type": "string", "maxLength": 16},
+    "expires_at": {"type": ["string", "null"], "format": "date-time"},
+    "policy_version": {"type": "string"}
+  },
+  "additionalProperties": false
+}

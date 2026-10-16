@@ -1,0 +1,60 @@
+# ─────────────────────────────────────────────────────────────
+# ZombieCoder runtime — repository hygiene
+# Rule of thumb: never commit secrets, runtime state, or build output.
+# ─────────────────────────────────────────────────────────────
+
+# ── environment files & secrets ──────────────────────────────
+.env
+.env.*
+!.env.example
+
+# key material / credentials (any location)
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+credentials*
+secrets*
+
+# ── TLS material (keep certs/README.md) ──────────────────────
+certs/*.key
+certs/*.crt
+
+# ── runtime state (SQLite, socket, lock, pid, logs) ──────────
+data/
+logs/
+.zombiecoder/
+instances/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.pid
+*.sock
+*.lock
+
+# ── build output & coverage ──────────────────────────────────
+dist/
+build/
+coverage/
+
+# ── dependencies ─────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── editor / OS noise ────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.tsbuildinfo
+.cache/
+
+# ── local scratch ────────────────────────────────────────────
+tmp/
+*.tmp

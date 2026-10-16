@@ -1,0 +1,41 @@
+{
+  "version": "1.0.0",
+  "servers": [
+    {
+      "id": "public-api",
+      "name": "Public API MCP",
+      "transport": "http",
+      "urlEnv": "EXTERNAL_MCP_PUBLIC_API_URL",
+      "legacyEntry": "external mcp/public-api-mcp.js",
+      "enabled": true,
+      "purpose": "Project/ecommerce public API access"
+    },
+    {
+      "id": "tts",
+      "name": "TTS MCP",
+      "transport": "http",
+      "urlEnv": "EXTERNAL_MCP_TTS_URL",
+      "legacyEntry": "external mcp/tts-mcp.js",
+      "enabled": true,
+      "purpose": "Text-to-speech output capability"
+    },
+    {
+      "id": "ocr",
+      "name": "OCR MCP",
+      "transport": "http",
+      "urlEnv": "EXTERNAL_MCP_OCR_URL",
+      "legacyEntry": "external mcp/ocr-mcp.js",
+      "enabled": true,
+      "purpose": "Image/document text extraction"
+    },
+    {
+      "id": "facebook-ads",
+      "name": "Facebook Ads MCP",
+      "transport": "http",
+      "urlEnv": "EXTERNAL_MCP_FACEBOOK_ADS_URL",
+      "legacyEntry": "external mcp/facebook-ads-mcp.js",
+      "enabled": true,
+      "purpose": "Ecommerce advertising/marketing data"
+    }
+  ]
+}

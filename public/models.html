@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>xKiro Model Directory</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50: '#ecfdf5',
+              400: '#34d399',
+              500: '#10b981',
+              600: '#059669',
+              700: '#047857',
+              900: '#064e3b',
+            },
+            dark: {
+              950: '#090b0e',
+              900: '#0d1015',
+              850: '#12161f',
+              800: '#171c26',
+              750: '#1e2430',
+              700: '#262d3d',
+              border: '#1f2533',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background-color: #090b0e;
+      color: #e2e8f0;
+      font-family: 'Inter', sans-serif;
+    }
+    /* Custom scrollbars */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0d1015;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #1f2533;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #2a3245;
+    }
+  </style>
+</head>
+<body class="h-screen flex overflow-hidden bg-[#090b0e] text-slate-200 antialiased selection:bg-brand-500 selection:text-white">
+
+  <!-- Left Sidebar -->
+  <aside class="w-64 flex-shrink-0 bg-[#0d1015] border-r border-[#1a1f2c] flex flex-col justify-between select-none">
+    <div class="flex flex-col">
+      <!-- Brand Header -->
+      <div class="h-14 px-4 flex items-center justify-between border-b border-[#1a1f2c]">
+        <div class="flex items-center gap-2.5">
+          <div class="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-base shadow-sm shadow-emerald-500/10">
+            <svg class="w-4 h-4 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M16.5 7.5l-9 9m0-9l9 9" />
+            </svg>
+          </div>
+          <span class="font-semibold text-sm tracking-tight text-white">xKiro Dashboard</span>
+        </div>
+        <button class="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <rect x="3" y="3" width="18" height="18" rx="2" stroke-width="2"/>
+            <path d="M9 3v18" stroke-width="2"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Navigation Links -->
+      <div class="p-3 space-y-6 overflow-y-auto">
+        <!-- WORKSPACE -->
+        <div>
+          <div class="px-3 text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-2">Workspace</div>
+          <div class="space-y-0.5">
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-[#141924] transition">
+              <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>
+              </svg>
+              <span>Overview</span>
+            </a>
+            <a href="#" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-[#141924] transition">
+              <div class="flex items-center gap-3">
+                <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z"/>
+                </svg>
+                <span>Announcements</span>
+              </div>
+              <span class="px-1.5 py-0.5 text-[10px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded">NEW</span>
+            </a>
+          </div>
+        </div>
+
+        <!-- AI -->
+        <div>
+          <div class="px-3 text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-2">AI</div>
+          <div class="space-y-0.5">
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-[#141924] transition">
+              <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"/>
+              </svg>
+              <span>AI Chat</span>
+            </a>
+            <!-- Active item -->
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium bg-[#13231f] text-emerald-400 border-l-2 border-emerald-500 transition">
+              <svg class="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+              </svg>
+              <span class="font-semibold">Model List</span>
+            </a>
+          </div>
+        </div>
+
+        <!-- API -->
+        <div>
+          <div class="px-3 text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-2">API</div>
+          <div class="space-y-0.5">
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-[#141924] transition">
+              <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+              </svg>
+              <span>API Keys</span>
+            </a>
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-[#141924] transition">
+              <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+              </svg>
+              <span>Usage</span>
+            </a>
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-[#141924] transition">
+              <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+              </svg>
+              <span>Request Logs</span>
+            </a>
+            <a href="#" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-[#141924] transition">
+              <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+              </svg>
+              <span>Webhook & Alerts</span>
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Billing Box -->
+    <div class="p-3">
+      <div class="p-3.5 rounded-xl bg-gradient-to-br from-[#10241b] to-[#0d1612] border border-emerald-500/20">
+        <div class="flex items-center gap-2 mb-1.5">
+          <svg class="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/>
+          </svg>
+          <span class="text-xs font-semibold text-white">Upgrade</span>
+        </div>
+        <p class="text-[11px] text-slate-400 mb-3 leading-tight">Upgrade for higher limits</p>
+        <button class="w-full py-1.5 px-3 rounded-lg border border-emerald-500/40 text-emerald-400 text-xs font-semibold hover:bg-emerald-500/10 transition flex items-center justify-center gap-1.5">
+          <span>View plans</span>
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Right Main Area -->
+  <div class="flex-1 flex flex-col min-w-0 bg-[#090b0e]">
+    <!-- Top Navigation Header -->
+    <header class="h-14 border-b border-[#1a1f2c] bg-[#0d1015]/90 backdrop-blur px-6 flex items-center justify-end gap-3.5 select-none">
+      <!-- Balance Pill -->
+      <div class="flex items-center gap-1.5 px-3 py-1 bg-[#12221c] border border-emerald-500/30 rounded-lg text-xs font-semibold text-emerald-400">
+        <span>$0.00</span>
+        <span class="text-emerald-500/70 font-bold">+</span>
+      </div>
+
+      <!-- Online Status Badge -->
+      <div class="flex items-center gap-2 px-3 py-1 bg-[#12161f] border border-[#1f2533] rounded-lg text-xs text-slate-300">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span class="font-medium">API Online</span>
+      </div>
+
+      <!-- Notification Bell -->
+      <button class="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-[#161a24] transition">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+        </svg>
+      </button>
+
+      <!-- Language Selector -->
+      <button class="flex items-center gap-1.5 px-2.5 py-1 text-xs text-slate-300 rounded-lg hover:bg-[#161a24] transition">
+        <span>🇺🇸</span>
+        <span class="font-medium">EN</span>
+        <svg class="w-3.5 h-3.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </button>
+
+      <!-- Dark Mode Moon -->
+      <button class="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-[#161a24] transition">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+        </svg>
+      </button>
+
+      <!-- Profile Avatar & Details -->
+      <div class="flex items-center gap-2 pl-2 border-l border-[#1a1f2c] cursor-pointer">
+        <div class="w-7 h-7 rounded-full bg-amber-700/60 border border-amber-600/50 flex items-center justify-center text-xs font-semibold text-white">
+          ss
+        </div>
+        <div class="flex flex-col text-left">
+          <span class="text-xs font-semibold text-slate-200 leading-tight">sahon srabon</span>
+          <span class="text-[10px] text-slate-500 leading-tight">sahonsrabon40@gmail...</span>
+        </div>
+        <svg class="w-3.5 h-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </div>
+    </header>
+
+    <!-- Main Workspace Content (Models Page) -->
+    <main class="flex-1 overflow-y-auto p-6 md:p-8">
+      <div class="max-w-6xl mx-auto space-y-5">
+        
+        <!-- Header row with title & stat counters -->
+        <div class="flex items-center justify-between">
+          <h1 class="text-2xl font-bold text-white tracking-tight">Models</h1>
+          <div class="flex items-center gap-6">
+            <div class="flex flex-col items-center">
+              <span class="text-xl font-bold text-white leading-none">126</span>
+              <span class="text-[10px] font-semibold tracking-wider text-slate-500 uppercase mt-1">MODELS</span>
+            </div>
+            <div class="flex flex-col items-center">
+              <span class="text-xl font-bold text-emerald-400 leading-none">52</span>
+              <span class="text-[10px] font-semibold tracking-wider text-emerald-400 uppercase mt-1">FREE</span>
+            </div>
+            <div class="flex flex-col items-center">
+              <span class="text-xl font-bold text-white leading-none">18</span>
+              <span class="text-[10px] font-semibold tracking-wider text-slate-500 uppercase mt-1">PROVIDERS</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Toolbar & Filter Controls -->
+        <div class="flex items-center justify-between gap-3 pt-2">
+          <!-- Left Controls -->
+          <div class="flex items-center gap-2.5 flex-1 max-w-xl">
+            <!-- Search Bar -->
+            <div class="relative flex-1">
+              <svg class="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+              </svg>
+              <input type="text" placeholder="Search models, providers, cap" 
+                class="w-full bg-[#10141d] border border-[#1e2533] rounded-lg pl-9 pr-3.5 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500/60 transition" />
+            </div>
+
+            <!-- Sort selector -->
+            <button class="flex items-center gap-2 px-3 py-2 bg-[#10141d] border border-[#1e2533] rounded-lg text-xs font-medium text-slate-300 hover:border-slate-600 transition">
+              <span>Recommended</span>
+              <svg class="w-3.5 h-3.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+              </svg>
+            </button>
+
+            <!-- Layout View Switcher -->
+            <div class="flex items-center bg-[#10141d] border border-[#1e2533] rounded-lg p-0.5">
+              <button class="p-1.5 rounded text-slate-500 hover:text-slate-300 transition">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>
+                </svg>
+              </button>
+              <button class="p-1.5 rounded bg-[#1b2230] text-emerald-400 shadow-sm transition">
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+                </svg>
+              </button>
+            </div>
+
+            <!-- Filters button -->
+            <button class="flex items-center gap-1.5 px-3 py-2 bg-[#10141d] border border-[#1e2533] rounded-lg text-xs font-medium text-slate-300 hover:border-slate-600 transition">
+              <svg class="w-3.5 h-3.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/>
+              </svg>
+              <span>Filters</span>
+            </button>
+          </div>
+
+          <!-- Total count indicator -->
+          <div class="text-xs font-semibold text-slate-500">
+            126 / 126
+          </div>
+        </div>
+
+        <!-- Special Banner Alert -->
+        <div class="flex items-center justify-between px-4 py-2.5 rounded-lg bg-[#0e1d17] border border-emerald-500/20 text-xs text-slate-300 cursor-pointer hover:bg-[#11241d] transition">
+          <div class="flex items-center gap-2.5">
+            <svg class="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/>
+            </svg>
+            <span class="font-medium text-slate-200">10 offers and notices</span>
+          </div>
+          <svg class="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </div>
+
+        <!-- Models Table List -->
+        <div class="rounded-xl border border-[#1a1f2c] bg-[#0c0e14] overflow-hidden">
+          <!-- Table Header -->
+          <div class="grid grid-cols-12 px-5 py-3 border-b border-[#1a1f2c] text-[11px] font-semibold text-slate-500 uppercase tracking-wider bg-[#0f121a]">
+            <div class="col-span-4">Model</div>
+            <div class="col-span-3">Capabilities</div>
+            <div class="col-span-3">Context</div>
+            <div class="col-span-2 text-right">Pricing</div>
+          </div>
+
+          <!-- Provider Accordion Rows -->
+          <div class="divide-y divide-[#161a24]">
+            
+            <!-- Row 1: OpenAI -->
+            <div class="flex items-center justify-between px-5 py-3.5 hover:bg-[#111520] transition cursor-pointer group">
+              <div class="flex items-center gap-3">
+                <svg class="w-3.5 h-3.5 text-slate-500 group-hover:text-slate-300 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/>
+                </svg>
+                <div class="w-6 h-6 rounded-md bg-[#161b26] border border-[#232b3d] flex items-center justify-center p-1">
+                  <!-- OpenAI Spiral glyph -->
+                  <svg class="w-4 h-4 text-slate-200" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M22.28 10.1a5.97 5.97 0 0 0-.52-4.14 6.04 6.04 0 0 0-6.1-3.08 5.96 5.96 0 0 0-4.42-1.98c-2.8 0-5.2 1.84-5.94 4.54a5.98 5.98 0 0 0-4.04 2.92 6.03 6.03 0 0 0 .76 6.84 5.98 5.98 0 0 0 .52 4.14 6.04 6.04 0 0 0 6.1 3.08 6 6 0 0 0 4.42 1.98c2.8 0 5.2-1.84 5.94-4.54a5.98 5.98 0 0 0 4.04-2.92 6.03 6.03 0 0 0-.76-6.84zm-7.6 10.98a4.5 4.5 0 0 1-2.93-.84l.15-.09 4.88-2.82a.77.77 0 0 0 .39-.67v-6.88l2.07 1.2v5.68a4.52 4.52 0 0 1-4.56 4.42zm-9.35-3.9a4.5 4.5 0 0 1-.58-3.01l.15.09 4.88 2.82c.24.14.39.4.39.67v6.88l-2.07-1.2v-5.68a4.52 4.52 0 0 1-2.77-3.48zm-1.75-9.1a4.5 4.5 0 0 1 2.36-2.17v.18l4.88 2.82c.24.14.54.14.78 0l5.96-3.44-2.07-1.2h-5.68a4.52 4.52 0 0 1-6.23 3.81zm15.15 3.3l-4.88-2.82a.77.77 0 0 0-.78 0l-5.96 3.44 2.07 1.2h5.68a4.52 4.52 0 0 1 6.23-3.81 4.5 4.5 0 0 1-2.36 2.17zm1.18 5.8a4.5 4.5 0 0 1-.58 3.01v-.18l-4.88-2.82a.77.77 0 0 0-.39-.67v-6.88l2.07 1.2v5.68a4.5 4.5 0 0 1 3.78.66zm-7.91-2.77l-2.6-1.5 2.6-1.5 2.6 1.5-2.6 1.5z"/>
+                  </svg>
+                </div>
+                <span class="text-sm font-semibold text-slate-100">OpenAI</span>
+                <span class="text-xs text-slate-500 font-normal">11 models</span>
+              </div>
+            </div>
+
+            <!-- Row 2: Anthropic -->
+            <div class="flex items-center justify-between px-5 py-3.5 hover:bg-[#111520] transition cursor-pointer group">
+              <div class="flex items-center gap-3">
+                <svg class="w-3.5 h-3.5 text-slate-500 group-hover:text-slate-300 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/>
+                </svg>
+                <div class="w-6 h-6 rounded-md bg-[#161b26] border border-[#232b3d] flex items-center justify-center p-1">
+                  <!-- Anthropic A glyph -->
+                  <span class="text-xs font-bold text-amber-500">A\</span>
+                </div>
+                <span class="text-sm font-semibold text-slate-100">Anthropic</span>
+                <span class="text-xs text-slate-500 font-normal">13 models</span>
+              </div>
+            </div>
+
+            <!-- Row 3: Google -->
+            <div class="flex items-center justify-between px-5 py-3.5 hover:bg-[#111520] transition cursor-pointer group">
+              <div class="flex items-center gap-3">
+                <svg class="w-3.5 h-3.5 text-slate-500 group-hover:text-slate-300 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/>
+                </svg>
+                <div class="w-6 h-6 rounded-md bg-[#161b26] border border-[#232b3d] flex items-center justify-center p-1">
+                  <!-- Google Quad Sparkle -->
+                  <svg class="w-4 h-4 text-cyan-400" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2L14.4 9.6L22 12L14.4 14.4L12 22L9.6 14.4L2 12L9.6 9.6L12 2Z"/>
+                  </svg>
+                </div>
+                <span class="text-sm font-semibold text-slate-100">Google</span>
+                <span class="text-xs text-slate-500 font-normal">8 models</span>
+              </div>
+            </div>
+
+            <!-- Row 4: xAI (Grok) -->
+            <div class="flex items-center justify-between px-5 py-3.5 hover:bg-[#111520] transition cursor-pointer group">
+              <div class="flex items-center gap-3">
+                <svg class="w-3.5 h-3.5 text-slate-500 group-hover:text-slate-300 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/>
+                </svg>
+                <div class="w-6 h-6 rounded-md bg-[#161b26] border border-[#232b3d] flex items-center justify-center p-1">
+                  <!-- xAI Logo -->
+                  <span class="text-xs font-bold text-white tracking-tighter">𝕏</span>
+                </div>
+                <span class="text-sm font-semibold text-slate-100">xAI (Grok)</span>
+                <span class="text-xs text-slate-500 font-normal">3 models</span>
+              </div>
+            </div>
+
+            <!-- Row 5: Kimi -->
+            <div class="flex items-center justify-between px-5 py-3.5 hover:bg-[#111520] transition cursor-pointer group">
+              <div class="flex items-center gap-3">
+                <svg class="w-3.5 h-3.5 text-slate-500 group-hover:text-slate-300 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/>
+                </svg>
+                <div class="w-6 h-6 rounded-md bg-[#161b26] border border-[#232b3d] flex items-center justify-center p-1">
+                  <span class="text-xs font-bold text-rose-400">K</span>
+                </div>
+                <span class="text-sm font-semibold text-slate-100">Kimi</span>
+                <span class="text-xs text-slate-500 font-normal">2 models</span>
+              </div>
+            </div>
+
+            <!-- Row 6: Mistral -->
+            <div class="flex items-center justify-between px-5 py-3.5 hover:bg-[#111520] transition cursor-pointer group">
+              <div class="flex items-center gap-3">
+                <svg class="w-3.5 h-3.5 text-slate-500 group-hover:text-slate-300 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/>
+                </svg>
+                <div class="w-6 h-6 rounded-md bg-[#161b26] border border-[#232b3d] flex items-center justify-center p-1">
+                  <!-- Mistral Orange stripes -->
+                  <div class="w-3 h-3 flex flex-col justify-between">
+                    <span class="h-0.5 bg-amber-500 rounded-full w-full"></span>
+                    <span class="h-0.5 bg-amber-500 rounded-full w-3/4"></span>
+                    <span class="h-0.5 bg-amber-500 rounded-full w-full"></span>
+                  </div>
+                </div>
+                <span class="text-sm font-semibold text-slate-100">Mistral</span>
+                <span class="text-xs text-slate-500 font-normal">9 models</span>
+                <span class="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  <span>🎁</span> 9 free
+                </span>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+</body>
+</html>
