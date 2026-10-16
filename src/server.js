@@ -687,6 +687,40 @@ const requestHandler = async (req,res) => {
         return send(res,200,{provider:publicProvider(failed),health:{status:'error',checkedAt,error:code}});
       }
     }
+    // Admin-only live probe. Sends one non-streaming completion straight to a
+    // chosen provider+model so the console can show the real request and the
+    // real response, bypassing the masked agent path (which redacts upstream
+    // identity). Loopback/admin-gated like the rest of /v1/admin.
+    if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/providers\/[^/]+\/test$/)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const providerId=decodeURIComponent(url.pathname.split('/')[4]);
+      const current=(await providers.list()).find(p=>p.id===providerId);
+      if(!current) return send(res,404,{error:'provider_not_found'});
+      const input=await body(req,config.maxBodyBytes);
+      const prompt=String(input.prompt ?? 'Reply with the single word: ok').slice(0,4000);
+      const requestedModel=String(input.model ?? '').trim();
+      const messages=[{role:'user',content:prompt}];
+      const startedAt=Date.now();
+      const checkedAt=new Date().toISOString();
+      try {
+        const provider=await providers.resolve(providerId);
+        const model=await providers.resolveModel(providerId, requestedModel);
+        const raw=await provider.chatCompletions({model,messages,stream:false});
+        const canonicalInput=typeof provider.toCanonical==='function' ? provider.toCanonical(raw) : raw;
+        const canonical=normalizer.normalize(canonicalInput,{model,providerId:provider.id});
+        await providers.register({...current,healthStatus:'healthy',lastHealthCheckAt:checkedAt,lastHealthError:null});
+        return send(res,200,{ok:true,providerId,model,latencyMs:Date.now()-startedAt,request:{model,messages,stream:false},response:canonical,upstream:raw});
+      } catch(error) {
+        const rawMessage=String(error?.message??'provider_test_failed');
+        const code=/^[a-zA-Z0-9_.:-]{1,100}$/.test(rawMessage)?rawMessage:'provider_test_failed';
+        // A disabled provider is a configuration state, not a health failure, so
+        // it must not flip the stored health flag.
+        if (code !== 'provider_not_found_or_disabled') {
+          await providers.register({...current,healthStatus:'error',lastHealthCheckAt:checkedAt,lastHealthError:code}).catch(()=>{});
+        }
+        return send(res,200,{ok:false,providerId,model:requestedModel||null,latencyMs:Date.now()-startedAt,request:{model:requestedModel||null,messages,stream:false},error:code});
+      }
+    }
     if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/providers\/[^/]+\/sync$/)) {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const providerId=url.pathname.split('/')[5];

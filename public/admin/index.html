@@ -115,6 +115,22 @@ pre.blk{margin:0;background:#080a0e;border:1px solid var(--line);border-radius:1
 .mods{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:6px}
 .mod{display:flex;align-items:center;gap:8px;font-size:12px;padding:5px 8px;border-radius:7px;background:var(--panel2);border:1px solid var(--line)}
 .mod .dot{width:7px;height:7px}
+/* ---------- modal (provider test, etc.) ---------- */
+.modal-backdrop{display:none;position:fixed;inset:0;background:rgba(3,5,8,.72);z-index:70;padding:26px;overflow:auto}
+.modal-backdrop.show{display:flex;align-items:flex-start;justify-content:center}
+.modal{width:100%;max-width:820px;background:var(--panel);border:1px solid var(--line2);border-radius:14px;overflow:hidden;margin:auto;box-shadow:0 24px 60px rgba(0,0,0,.65)}
+.modal-h{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--panel2)}
+.modal-h h3{margin:0;font-size:14px;font-weight:600;color:#fff}
+.modal-b{padding:16px;display:grid;gap:14px}
+.modal-f{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:13px 16px;border-top:1px solid var(--line);background:var(--panel2)}
+.x{background:none;border:none;color:var(--muted);cursor:pointer;font-size:19px;line-height:1;padding:2px 7px;border-radius:7px}
+.x:hover{background:#1a2230;color:#fff}
+td.actions{text-align:right;white-space:nowrap}
+td.actions .row{justify-content:flex-end;flex-wrap:nowrap;gap:6px}
+.num{width:62px;padding:5px 6px;font-size:12.5px;text-align:center}
+.sub-btn{margin-top:5px}
+.tsum{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.sect{margin:12px 0 6px;font-size:11px;color:var(--muted2);text-transform:uppercase;letter-spacing:.05em}
 @media(max-width:900px){
   .sidebar{position:fixed;inset:0 auto 0 0;transform:translateX(-100%);transition:transform .2s}
   .sidebar.open{transform:none}
@@ -176,6 +192,7 @@ pre.blk{margin:0;background:#080a0e;border:1px solid var(--line);border-radius:1
     </main>
   </div>
 </div>
+<div class="modal-backdrop" id="modal"></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -217,6 +234,67 @@ const panel = (title, hint, body, actions) =>
 const stat = (label, value, sub) => '<div class="stat"><small>' + esc(label) + '</small><strong>' + esc(dash(value)) + '</strong>' + (sub ? '<div class="sub">' + esc(sub) + '</div>' : '') + '</div>';
 const jsonBlock = o => '<pre class="blk">' + esc(JSON.stringify(o, null, 2)) + '</pre>';
 const kv = o => '<dl class="kv">' + Object.entries(o || {}).map(([k, v]) => '<dt>' + esc(k) + '</dt><dd>' + (v && typeof v === 'object' ? esc(JSON.stringify(v)) : esc(dash(v))) + '</dd>').join('') + '</dl>';
+/* ---------------------------------------------------------------- modal */
+function openModal(html) { const bd = el('modal'); bd.innerHTML = '<div class="modal">' + html + '</div>'; bd.classList.add('show'); }
+function closeModal() { const bd = el('modal'); bd.classList.remove('show'); bd.innerHTML = ''; }
+const modalOpen = () => el('modal').classList.contains('show');
+/* Health is only meaningful once a probe has actually run: a provider that has
+   never been checked must not read as a failure state. */
+const healthTag = p => {
+  const s = String(p.healthStatus || '').toLowerCase();
+  if (s === 'healthy') return '<span class="tag ok">healthy</span>';
+  if (s === 'error') return '<span class="tag off">error</span>';
+  return '<span class="tag mute">not checked</span>';
+};
+const when = ts => { if (!ts) return 'never'; const d = new Date(ts); return isNaN(d) ? String(ts) : d.toLocaleString(); };
+/* Provider test modal: runs a real, non-streaming completion against the chosen
+   provider+model and shows both the request that left the runtime and the raw
+   upstream payload that came back. */
+function openTestModal(p) {
+  const models = Array.isArray(p.models) ? p.models : [];
+  const opts = models.length
+    ? models.map(m => '<option value="' + esc(m) + '"' + (p.defaultModel === m ? ' selected' : '') + '>' + esc(m) + '</option>').join('')
+    : '<option value="">(provider default)</option>';
+  openModal(
+    '<div class="modal-h"><h3>Test provider · ' + esc(p.name || p.id) + ' <span class="mono muted">' + esc(p.id) + '</span></h3><button class="x" data-act="modal-close" title="Close">×</button></div>' +
+    '<div class="modal-b">' +
+      '<div class="row" style="gap:12px;align-items:flex-end">' +
+        '<label class="f" style="flex:1;min-width:220px">Model<select id="t-model">' + opts + '</select></label>' +
+        '<label class="f" style="flex:1;min-width:220px">Or type a model id<input id="t-custom" placeholder="overrides the dropdown"></label>' +
+      '</div>' +
+      '<label class="f">Prompt<textarea id="t-prompt" style="height:74px;background:var(--input);border:1px solid var(--inputline);border-radius:9px;padding:9px 11px;color:var(--text);font:inherit;resize:vertical">Reply with the single word: ok</textarea></label>' +
+      '<div id="t-result" class="muted" style="font-size:12.5px">No request sent yet.</div>' +
+    '</div>' +
+    '<div class="modal-f"><span id="t-status" class="muted" style="margin-right:auto;font-size:12px">idle</span>' +
+      '<button class="btn" data-act="modal-close">Close</button>' +
+      '<button class="btn primary" data-act="prov-test-run" data-id="' + esc(p.id) + '">Run test</button>' +
+    '</div>'
+  );
+}
+async function runProviderTest(providerId) {
+  const sel = el('t-model'), custom = el('t-custom'), prompt = el('t-prompt'), out = el('t-result'), status = el('t-status');
+  if (!out) return;
+  const model = (custom && custom.value.trim()) || (sel ? sel.value : '');
+  out.innerHTML = '<span class="muted">Running request…</span>';
+  status.textContent = 'request in flight…';
+  try {
+    const r = await api('/v1/admin/providers/' + encodeURIComponent(providerId) + '/test', { method: 'POST', body: { model, prompt: prompt ? prompt.value : '' } });
+    status.textContent = (r.ok ? 'completed' : 'failed') + ' · ' + r.latencyMs + ' ms' + (r.model ? ' · ' + r.model : '');
+    out.innerHTML =
+      '<div class="tsum">' + (r.ok ? '<span class="tag ok">success</span>' : '<span class="tag off">failed</span>') +
+      (r.model ? '<span class="tag mute">' + esc(r.model) + '</span>' : '') +
+      '<span class="tag mute">' + esc(r.latencyMs) + ' ms</span>' +
+      (r.error ? '<span class="mono err">' + esc(r.error) + '</span>' : '') + '</div>' +
+      '<div class="sect">Request</div>' + jsonBlock(r.request) +
+      '<div class="sect">Response' + (r.response ? ' (canonical)' : '') + '</div>' + jsonBlock(r.response || { error: r.error }) +
+      (r.upstream ? '<div class="sect">Upstream payload</div>' + jsonBlock(r.upstream) : '');
+    return toast('Test ' + (r.ok ? 'succeeded ✓' : 'failed ✗ ' + (r.error || '')), !r.ok);
+  } catch (e) {
+    status.textContent = 'error';
+    out.innerHTML = '<span class="err">' + esc(e.message) + '</span>';
+    return toast('Test failed: ' + e.message, true);
+  }
+}
 
 /* --------------------------------------------------------------- nav/router */
 const ICON = p => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + p + '</svg>';
@@ -326,27 +404,43 @@ VIEWS.dashboard = { title: 'Dashboard', sub: 'Live runtime snapshot', render: as
 } };
 
 /* providers */
-VIEWS.providers = { title: 'Providers', sub: 'Provider registry and health', actions: '<button class="btn" data-act="sync-catalog">Sync catalog</button>', render: async (v) => {
+VIEWS.providers = { title: 'Providers', sub: 'Registry, health probes and live model tests', actions: '<button class="btn" data-act="sync-catalog">Sync catalog</button>', render: async (v) => {
   const { providers } = await api('/v1/admin/providers');
-  const rows = providers.map(p =>
-    '<tr><td><strong>' + esc(p.name || p.id) + '</strong><div class="sub mono">' + esc(p.id) + '</div></td>' +
-    '<td class="mono">' + esc(p.baseUrl || '') + '<div class="sub">' + esc(p.driver || p.protocol || '') + '</div></td>' +
-    '<td>' + (p.models || []).length + '<div class="sub mono">' + esc(p.defaultModel || 'no default') + '</div></td>' +
-    '<td>' + enabledTag(p.enabled) + '<div class="sub">' + statusTag(p.healthStatus || 'unknown') + '</div></td>' +
-    '<td>' + esc(dash(p.priority)) + '</td>' +
-    '<td><div class="row">' +
-      '<button class="btn tiny" data-act="prov-health" data-id="' + esc(p.id) + '">Health</button>' +
-      '<button class="btn tiny" data-act="prov-refresh" data-id="' + esc(p.id) + '">Models</button>' +
-      '<button class="btn tiny" data-act="prov-toggle" data-id="' + esc(p.id) + '" data-enabled="' + (p.enabled === false) + '">' + (p.enabled === false ? 'Enable' : 'Disable') + '</button>' +
-      '<button class="btn tiny danger" data-act="prov-del" data-id="' + esc(p.id) + '">Delete</button>' +
-    '</div></td></tr>').join('');
-  v.innerHTML = panel('Registered providers', providers.length + ' total', table(['Provider', 'Endpoint', 'Models', 'Status', 'Priority', 'Actions'], rows, 'No providers registered.')) +
+  const enabledCount = providers.filter(p => p.enabled !== false).length;
+  const rows = providers.map(p => {
+    const enabled = p.enabled !== false;
+    return '<tr>' +
+      '<td><strong>' + esc(p.name || p.id) + '</strong><div class="sub mono">' + esc(p.id) + '</div></td>' +
+      '<td class="mono">' + esc(p.baseUrl || '') + '<div class="sub">' + esc(p.driver || p.protocol || '') + '</div></td>' +
+      '<td>' + (enabled ? '<span class="tag ok">enabled</span>' : '<span class="tag off">disabled</span>') +
+        '<div class="sub">' + healthTag(p) + '</div>' +
+        '<div class="sub muted">' + esc(when(p.lastHealthCheckAt)) + (p.lastHealthError ? ' · <span class="mono">' + esc(p.lastHealthError) + '</span>' : '') + '</div></td>' +
+      '<td>' + (p.models || []).length + '<div class="sub mono">' + esc(p.defaultModel || 'no default') + '</div></td>' +
+      '<td><input class="num" type="number" min="1" max="10" step="1" value="' + esc(p.priority ?? 10) + '">' +
+        '<div class="sub-btn"><button class="btn tiny" data-act="prov-priority" data-id="' + esc(p.id) + '">Save</button></div></td>' +
+      '<td class="actions"><div class="row">' +
+        '<button class="btn tiny primary" data-act="prov-test" data-id="' + esc(p.id) + '">Test</button>' +
+        '<button class="btn tiny" data-act="prov-health" data-id="' + esc(p.id) + '">Health</button>' +
+        '<button class="btn tiny" data-act="prov-refresh" data-id="' + esc(p.id) + '">Models</button>' +
+        '<button class="btn tiny" data-act="prov-toggle" data-id="' + esc(p.id) + '" data-enabled="' + (!enabled) + '">' + (enabled ? 'Disable' : 'Enable') + '</button>' +
+        '<button class="btn tiny danger" data-act="prov-del" data-id="' + esc(p.id) + '">Delete</button>' +
+      '</div></td></tr>';
+  }).join('');
+  v.innerHTML =
+    '<div class="grid g4" style="margin-bottom:14px">' +
+      stat('Providers', providers.length, 'registered') +
+      stat('Enabled', enabledCount + ' / ' + providers.length, 'active for routing') +
+      stat('Healthy', providers.filter(p => p.healthStatus === 'healthy').length, 'passed last probe') +
+      stat('Errors', providers.filter(p => p.healthStatus === 'error').length, 'failed last probe') +
+    '</div>' +
+    panel('Registered providers', providers.length + ' total', table(['Provider', 'Endpoint', 'Status', 'Models', 'Priority', 'Actions'], rows, 'No providers registered.')) +
     panel('Add provider', '', '<div class="panel-b"><div class="row">' +
       '<label class="f">id<input id="p-id" placeholder="provider-id"></label>' +
       '<label class="f">name<input id="p-name" placeholder="Display name"></label>' +
-      '<label class="f">baseUrl<input id="p-url" placeholder="https://host/v1" style="width:260px"></label>' +
+      '<label class="f">baseUrl<input id="p-url" placeholder="https://host/v1" style="width:250px"></label>' +
       '<label class="f">driver<select id="p-driver"><option>openai-compatible</option><option>gemini</option><option>ollama</option><option>groq</option><option>cloudflare</option></select></label>' +
       '<label class="f">default model<input id="p-model" placeholder="model-id"></label>' +
+      '<label class="f">priority<input id="p-prio" type="number" min="1" max="10" value="10" style="width:80px"></label>' +
       '<button class="btn primary" data-act="prov-add">Save provider</button>' +
     '</div></div>');
 } };
@@ -607,14 +701,40 @@ VIEWS.settings = { title: 'Settings', sub: 'Runtime config, constitution and app
 document.addEventListener('click', async (ev) => {
   const b = ev.target.closest('[data-act]'); if (!b) return;
   const act = b.dataset.act;
-  const done = (m) => { toast(m); sideStatus(); setTimeout(() => VIEWS[current] && VIEWS[current].render(el('view')).catch(() => {}), 250); };
+  const done = (m, bad) => { toast(m, bad); sideStatus(); setTimeout(() => VIEWS[current] && VIEWS[current].render(el('view')).catch(() => {}), 300); };
   try {
+    if (act === 'modal-close') { closeModal(); return; }
     if (act === 'refresh') { await sideStatus(); await (VIEWS[current] || VIEWS.dashboard).render(el('view')); toast('Refreshed'); return; }
-    if (act === 'prov-health') { const r = await api('/v1/admin/providers/' + encodeURIComponent(b.dataset.id) + '/health', { method: 'POST', body: {} }); return done('Health: ' + (r.health && r.health.status)); }
-    if (act === 'prov-refresh') { await api('/v1/admin/providers/' + encodeURIComponent(b.dataset.id) + '/models/refresh', { method: 'POST', body: {} }); return done('Models refreshed'); }
-    if (act === 'prov-toggle') { await api('/v1/admin/providers/' + encodeURIComponent(b.dataset.id), { method: 'PATCH', body: { enabled: b.dataset.enabled === 'true' } }); return done('Provider updated'); }
-    if (act === 'prov-del') { if (!confirm('Delete provider ' + b.dataset.id + '?')) return; await api('/v1/admin/providers/' + encodeURIComponent(b.dataset.id), { method: 'DELETE' }); return done('Provider deleted'); }
-    if (act === 'prov-add') { const id = el('p-id').value.trim(), baseUrl = el('p-url').value.trim(); if (!id || !baseUrl) return toast('id and baseUrl are required', true); await api('/v1/admin/providers', { method: 'POST', body: { id, name: el('p-name').value.trim() || id, baseUrl, driver: el('p-driver').value, defaultModel: el('p-model').value.trim() } }); return done('Provider saved'); }
+    if (act === 'prov-health') {
+      const r = await api('/v1/admin/providers/' + encodeURIComponent(b.dataset.id) + '/health', { method: 'POST', body: {} });
+      const s = (r.health && r.health.status) || 'unknown';
+      return done(b.dataset.id + ': health ' + (s === 'healthy' ? 'PASSED ✓' : 'FAILED ✗ ' + ((r.health && r.health.error) || '')), s !== 'healthy');
+    }
+    if (act === 'prov-refresh') {
+      const r = await api('/v1/admin/providers/' + encodeURIComponent(b.dataset.id) + '/models/refresh', { method: 'POST', body: {} });
+      return done(b.dataset.id + ': ' + ((r.provider && r.provider.models) || []).length + ' models ✓');
+    }
+    if (act === 'prov-toggle') {
+      const enabled = b.dataset.enabled === 'true';
+      await api('/v1/admin/providers/' + encodeURIComponent(b.dataset.id), { method: 'PATCH', body: { enabled } });
+      return done(b.dataset.id + (enabled ? ' enabled ✓' : ' disabled ✓'));
+    }
+    if (act === 'prov-priority') {
+      const inp = b.closest('td').querySelector('input.num');
+      const priority = Number(inp && inp.value);
+      if (!Number.isFinite(priority) || priority < 1 || priority > 10) return toast('Priority must be a number from 1 to 10', true);
+      await api('/v1/admin/providers/' + encodeURIComponent(b.dataset.id), { method: 'PATCH', body: { priority } });
+      return done(b.dataset.id + ': priority = ' + priority + ' ✓');
+    }
+    if (act === 'prov-test') {
+      const { providers } = await api('/v1/admin/providers');
+      const p = providers.find(x => x.id === b.dataset.id);
+      if (!p) return toast('Provider not found', true);
+      return openTestModal(p);
+    }
+    if (act === 'prov-test-run') return runProviderTest(b.dataset.id);
+    if (act === 'prov-del') { if (!confirm('Delete provider ' + b.dataset.id + '?')) return; await api('/v1/admin/providers/' + encodeURIComponent(b.dataset.id), { method: 'DELETE' }); return done(b.dataset.id + ' deleted ✓'); }
+    if (act === 'prov-add') { const id = el('p-id').value.trim(), baseUrl = el('p-url').value.trim(); if (!id || !baseUrl) return toast('id and baseUrl are required', true); await api('/v1/admin/providers', { method: 'POST', body: { id, name: el('p-name').value.trim() || id, baseUrl, driver: el('p-driver').value, defaultModel: el('p-model').value.trim(), priority: Number(el('p-prio').value) || 10 } }); return done('Provider ' + id + ' saved ✓'); }
     if (act === 'sync-catalog') { await api('/v1/admin/providers/sync', { method: 'POST', body: {} }); return done('Catalog synced'); }
     if (act === 'models-sync-all') { const r = await api('/v1/admin/models/sync-all', { method: 'POST', body: {} }); return done('Synced ' + (r.results || []).length + ' provider(s)'); }
     if (act === 'agent-disable') { if (!confirm('Disable agent ' + b.dataset.id + '?')) return; await api('/v1/admin/registry/agents/' + encodeURIComponent(b.dataset.id), { method: 'DELETE' }); return done('Agent disabled'); }
@@ -637,7 +757,12 @@ document.addEventListener('click', async (ev) => {
 el('token').addEventListener('change', async (e) => { token = e.target.value.trim(); await sideStatus(); if (VIEWS[current]) VIEWS[current].render(el('view')).catch(() => {}); });
 el('burger').addEventListener('click', () => { el('sidebar').classList.toggle('open'); el('backdrop').classList.toggle('show'); });
 el('backdrop').addEventListener('click', () => { el('sidebar').classList.remove('open'); el('backdrop').classList.remove('show'); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { el('sidebar').classList.remove('open'); el('backdrop').classList.remove('show'); } });
+el('modal').addEventListener('click', (e) => { if (e.target === el('modal')) closeModal(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (modalOpen()) { closeModal(); return; }
+  el('sidebar').classList.remove('open'); el('backdrop').classList.remove('show');
+});
 
 buildNav();
 sideStatus();

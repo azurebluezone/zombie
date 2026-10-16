@@ -63,7 +63,13 @@ export class ProviderRegistry {
       priority: Number.isFinite(Number(input.priority)) ? Math.min(10, Math.max(1, Math.trunc(Number(input.priority)))) : 10,
       modelAliases: input.modelAliases && typeof input.modelAliases === 'object' && !Array.isArray(input.modelAliases) ? Object.fromEntries(Object.entries(input.modelAliases).map(([k,v]) => [String(k).toLowerCase(), String(v)])) : {},
       syncUrl: input.syncUrl ? String(input.syncUrl) : undefined,
-      modelsUpdatedAt: input.modelsUpdatedAt ?? null
+      modelsUpdatedAt: input.modelsUpdatedAt ?? null,
+      // Persisted health surface. Without these the admin console could only
+      // ever render "unknown": register() rebuilds the record from a fixed
+      // field list, so anything not listed here was silently dropped.
+      healthStatus: input.healthStatus ?? null,
+      lastHealthCheckAt: input.lastHealthCheckAt ?? null,
+      lastHealthError: input.lastHealthError ?? null
     };
     const list = await this.list();
     const next = list.filter((p) => p.id !== item.id); next.push(item);
