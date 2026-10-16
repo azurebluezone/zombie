@@ -27,7 +27,7 @@ import { AdminService } from './admin/admin-service.js';
 import { CORE_CONSTITUTION } from './policy/constitution.js';
 import { send, body, bearer } from './http/json.js';
 import { applySecurityHeaders, isTlsRequest } from './http/security-headers.js';
-import { providerErrorDetail } from './providers/adapters/request-shape.js';
+import { providerErrorDetail, retryAfterMsFrom } from './providers/adapters/request-shape.js';
 import { ExecutionOrchestrator } from './execution/orchestrator.js';
 import { ToolRegistry } from './tools/registry.js';
 import { SkillRegistry } from './skills/registry.js';
@@ -1303,7 +1303,13 @@ const requestHandler = async (req,res) => {
           } catch (error) {
             await recordAgentRun(agentPrepared.agent?.id ?? agentId, 'failure', {latencyMs:Date.now()-startedAt, providerId:route.providerId ?? null, path:'stream'});
             await requestLog.warn('tool_loop.stream_failed',{agentId,error:String(error?.message ?? error),...providerErrorDetail(error)});
-            res.write(`event: error\ndata: ${JSON.stringify({error:'stream_failed',requestId})}\n\n`);
+            // A mid-stream 429 carries the same instruction as an HTTP 429: wait,
+            // then retry. The status line is already on the wire, so it can only be
+            // delivered as an event — and it must stay distinguishable from a real
+            // stream failure, otherwise the client cannot tell "retry" from "give up".
+            const streamRateLimited = String(error?.message ?? '') === 'provider_http_error' && Number(error?.statusCode) === 429;
+            const streamRetryAfterMs = streamRateLimited ? retryAfterMsFrom(error?.providerHeaders) : null;
+            res.write(`event: error\ndata: ${JSON.stringify({error: streamRateLimited ? 'provider_rate_limited' : 'stream_failed', requestId, ...(streamRateLimited ? {retryable:true, ...(streamRetryAfterMs !== null ? {retryAfterMs:streamRetryAfterMs} : {})} : {})})}\n\n`);
           } finally { res.end(); }
           return;
         }
@@ -1527,21 +1533,30 @@ const requestHandler = async (req,res) => {
   } catch (e) {
     const publicErrors = new Set(['runtime_instance_already_locked','uds_path_already_exists','tool_not_permitted','tool_entry_outside_tool_root','tool_entry_symlink_escape','execution_path_outside_project_root','execution_working_directory_outside_project_root','execution_path_symlink_escape','project_root_required','invalid_json_body','request_body_too_large','application_unauthorized_or_expired','admin_unauthorized','provider_not_found_or_disabled','provider_model_required','no_provider_route_available','provider_streaming_not_supported','execution_consent_required','execution_contract_required','qualified_tool_required','mcp_tool_not_permitted','mcp_https_url_required','mcp_endpoint_not_found','mcp_tool_not_found','mcp_tool_arguments_must_be_object','mcp_response_too_large','mcp_invalid_response','mcp_timeout','project_root_not_allowed','project_root_not_found','application_id_required','application_not_found','application_id_and_tool_required','tool_disabled_by_configuration','outbound_circuit_open']);
     const message = String(e?.message ?? 'request_failed');
+    // A provider that answered 429 is not a generic failure: it is an instruction
+    // to wait and retry, and the upstream `retry-after` is the only honest source
+    // for how long. Collapsing it into `request_failed` (the old behaviour) told
+    // the user nothing and made a transient limit look permanent. The provider
+    // identity still stays masked; only the limit and the wait are published.
+    const rateLimited = message === 'provider_http_error' && Number(e?.statusCode) === 429;
+    const retryAfterMs = rateLimited ? retryAfterMsFrom(e?.providerHeaders) : null;
     // The stored audit record keeps its own key, but the log field must not be
     // called remoteMessage: the logger omits any key containing "message".
     await requestLog.error('http.error', {error:message,name:e?.name ?? 'Error',statusCode:e?.statusCode ?? null,retryAfterMs:e?.retryAfterMs ?? null,remoteCode:e?.remoteCode ?? null,remoteReason:e?.remoteMessage ?? null});
     const statusCode = message === 'outbound_circuit_open' ? 503 : (Number(e?.statusCode) || 400);
-    const headers = message === 'outbound_circuit_open' ? {'retry-after': String(Math.max(1, Math.ceil((Number(e?.retryAfterMs) || 0) / 1000)))} : {};
+    const headers = message === 'outbound_circuit_open'
+      ? {'retry-after': String(Math.max(1, Math.ceil((Number(e?.retryAfterMs) || 0) / 1000)))}
+      : (rateLimited && retryAfterMs !== null ? {'retry-after': String(Math.max(1, Math.ceil(retryAfterMs / 1000)))} : {});
     // MCP failures are raised per stage (mcp_tools_list_failed, mcp_tool_call_failed,
     // ...). Those codes are already stable and free of user data, so publish them
     // instead of collapsing the real cause into a generic request_failed. The
     // upstream message stays in the logs and audit trail, never in the response,
     // because it can contain the remote server's filesystem layout.
-    const publicError = publicErrors.has(message) || /^mcp_[a-z0-9_]+$/.test(message) ? message : 'request_failed';
+    const publicError = rateLimited ? 'provider_rate_limited' : (publicErrors.has(message) || /^mcp_[a-z0-9_]+$/.test(message) ? message : 'request_failed');
     // An agent-scoped request that threw before its completion hook is a failed
     // run for that agent; record it here so the counter cannot silently miss it.
     if (requestState.agentId) await recordAgentRun(requestState.agentId, 'failure', {latencyMs:Date.now()-startedAt, path:requestState.operation});
-    return send(res, statusCode, {error: publicError, requestId, ...(message === 'outbound_circuit_open' ? {retryAfterMs:e.retryAfterMs} : {}), ...(e?.mcpCode ? {mcpCode:e.mcpCode} : {}), ...(e?.remoteCode ? {remoteCode:e.remoteCode} : {})}, headers);
+    return send(res, statusCode, {error: publicError, requestId, ...(message === 'outbound_circuit_open' ? {retryAfterMs:e.retryAfterMs} : {}), ...(rateLimited ? {retryable:true, ...(retryAfterMs !== null ? {retryAfterMs} : {})} : {}), ...(e?.mcpCode ? {mcpCode:e.mcpCode} : {}), ...(e?.remoteCode ? {remoteCode:e.remoteCode} : {})}, headers);
   }
 };
 

@@ -61,3 +61,17 @@ test('runtime health client fails closed on malformed JSON instead of throwing u
   const client=new RuntimeClient({baseUrl:'http://127.0.0.1:1',timeoutMs:50});
   assert.equal(typeof client.health,'function');
 });
+
+import { providerErrorDetail, retryAfterMsFrom } from '../src/providers/adapters/request-shape.js';
+
+test('a rate-limited provider publishes how long to wait instead of an opaque failure', () => {
+  assert.equal(retryAfterMsFrom({'retry-after':'39'}), 39000);
+  assert.equal(retryAfterMsFrom({'Retry-After':'2'}), 2000);
+  assert.equal(retryAfterMsFrom({'retry-after':'Wed, 21 Oct 2026 07:28:00 GMT'}) !== null, true);
+  assert.equal(retryAfterMsFrom({}), null);
+  assert.equal(retryAfterMsFrom({'retry-after':'not-a-date'}), null);
+  const detail=providerErrorDetail({statusCode:429,providerBody:{error:{message:'Limit 7000, Used 5704, Requested 5806'}},providerHeaders:{'retry-after':'39'}});
+  assert.equal(detail.statusCode,429);
+  assert.equal(detail.retryAfterMs,39000);
+  assert.match(detail.upstreamReason,/Limit 7000/);
+});

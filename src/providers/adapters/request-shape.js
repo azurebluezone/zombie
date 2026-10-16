@@ -62,5 +62,21 @@ export function providerErrorDetail(error, { maxLength = 300 } = {}) {
     message = body;
   }
   message = message.replace(/\s+/g, ' ').trim().slice(0, maxLength);
-  return { statusCode: status, upstreamReason: message || null };
+  return { statusCode: status, upstreamReason: message || null, retryAfterMs: retryAfterMsFrom(error?.providerHeaders) };
+}
+
+/**
+ * Reads `retry-after` from an upstream response. A rate-limited provider says how
+ * long the caller must wait; without that number a transient 429 can only be
+ * guessed at, which is how a "wait 39 seconds" answer becomes an opaque
+ * permanent failure. Both forms are accepted: delta-seconds and an HTTP date.
+ */
+export function retryAfterMsFrom(headers = {}) {
+  const raw = headers?.['retry-after'] ?? headers?.['Retry-After'];
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  const text = String(raw).trim();
+  const seconds = Number(text);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  const at = Date.parse(text);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : null;
 }

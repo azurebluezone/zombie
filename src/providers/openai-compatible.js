@@ -21,7 +21,7 @@ function requestJson(urlString, method, payload = undefined, headers = {}, timeo
         let parsed;
         try { parsed = raw ? JSON.parse(raw) : {}; } catch { return reject(new Error('provider_invalid_json')); }
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          const err = new Error('provider_http_error'); err.statusCode = res.statusCode; err.providerBody = parsed; return reject(err);
+          const err = new Error('provider_http_error'); err.statusCode = res.statusCode; err.providerBody = parsed; err.providerHeaders = res.headers; return reject(err);
         }
         resolve(parsed);
       });

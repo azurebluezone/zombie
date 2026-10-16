@@ -45,7 +45,7 @@ export function requestJson(urlString, method, payload = undefined, headers = {}
       res.on('end', () => {
         if (res.statusCode < 200 || res.statusCode >= 300) {
           let body = raw; try { body = raw ? JSON.parse(raw) : {}; } catch {}
-          const err = new Error('provider_http_error'); err.statusCode = res.statusCode; err.providerBody = body; return reject(err);
+          const err = new Error('provider_http_error'); err.statusCode = res.statusCode; err.providerBody = body; err.providerHeaders = res.headers; return reject(err);
         }
         try { resolve(raw ? JSON.parse(raw) : {}); } catch { reject(new Error('provider_invalid_json')); }
       });
@@ -70,7 +70,7 @@ export function requestStream(urlString, payload, headers = {}, { timeoutMs = DE
       if (res.statusCode < 200 || res.statusCode >= 300) {
         let raw = ''; res.setEncoding('utf8');
         res.on('data', c => { bytes += Buffer.byteLength(c); if (bytes <= (networkPolicy.maxResponseBytes ?? 4_000_000)) raw += c; });
-        res.on('end', () => { const e = new Error('provider_http_error'); e.statusCode = res.statusCode; e.providerBody = raw; fail(e); });
+        res.on('end', () => { const e = new Error('provider_http_error'); e.statusCode = res.statusCode; e.providerBody = raw; e.providerHeaders = res.headers; fail(e); });
         return;
       }
       let buffer = '';
@@ -120,7 +120,7 @@ export function requestLineStream(urlString, payload, headers = {}, { timeoutMs 
     let settled=false; const fail=e=>{if(!settled){settled=true;reject(e);}}; const succeed=()=>{if(!settled){settled=true;resolve();}};
     const req = client(url, { method:'POST', timeout:timeoutMs, headers:reqHeaders, lookup }, res => {
       let bytes=0;
-      if(res.statusCode<200||res.statusCode>=300){let raw='';res.setEncoding('utf8');res.on('data',c=>{bytes+=Buffer.byteLength(c);if(bytes<=(networkPolicy.maxResponseBytes??4_000_000))raw+=c;});res.on('end',()=>{const e=new Error('provider_http_error');e.statusCode=res.statusCode;e.providerBody=raw;fail(e);});return;}
+      if(res.statusCode<200||res.statusCode>=300){let raw='';res.setEncoding('utf8');res.on('data',c=>{bytes+=Buffer.byteLength(c);if(bytes<=(networkPolicy.maxResponseBytes??4_000_000))raw+=c;});res.on('end',()=>{const e=new Error('provider_http_error');e.statusCode=res.statusCode;e.providerBody=raw;e.providerHeaders=res.headers;fail(e);});return;}
       let buffer='';res.setEncoding('utf8');
       res.on('data',chunk=>{bytes+=Buffer.byteLength(chunk);if(bytes>(networkPolicy.maxResponseBytes??4_000_000)){req.destroy(new Error('provider_response_too_large'));return;}buffer+=chunk;const lines=buffer.split(/\r?\n/);buffer=lines.pop()??'';for(const line of lines){if(!line.trim())continue;try{onEvent?.(JSON.parse(line));}catch{onEvent?.({data:line});}}});
       res.on('end',()=>{if(settled)return;if(buffer.trim()){try{onEvent?.(JSON.parse(buffer));}catch{onEvent?.({data:buffer});}}succeed();});
