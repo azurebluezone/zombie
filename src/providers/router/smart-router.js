@@ -95,7 +95,7 @@ export class SmartRouter {
       model: selected.model || null,
       publicModel: selected.publicModel || null,
       requiredCapabilities: caps,
-      candidates: candidates.map(c => ({providerId:c.providerId, model:c.model || null, priority:c.priority, nativeFunctionCalling:c.nativeFunctionCalling})),
+      candidates: candidates.map(c => ({providerId:c.providerId, model:c.model || null, priority:c.priority, nativeFunctionCalling:c.nativeFunctionCalling, explicitAlias:c.explicitAlias === true})),
       reason: input.provider ? 'explicit_constraint_then_priority' : (selected.explicitAlias ? 'explicit_model_alias' : (input.model ? 'explicit_constraint_then_priority' : 'capability_then_priority')),
       status: 'selected'
     };

@@ -472,12 +472,52 @@ VIEWS.models = { title: 'Models', sub: 'Aggregated model catalog', actions: '<bu
 } };
 
 /* masking-models */
-VIEWS['masking-models'] = { title: 'Masking Models', sub: 'Public routing aliases exposed to clients', render: async (v) => {
-  const { models } = await api('/v1/admin/masking-models');
-  const rows = models.map(m => '<tr>' + Object.values(m).map(x => '<td>' + (x && typeof x === 'object' ? '<span class="mono">' + esc(JSON.stringify(x)) + '</span>' : esc(dash(x))) + '</td>').join('') + '</tr>');
-  const cols = models[0] ? Object.keys(models[0]) : ['id'];
-  v.innerHTML = panel('Public model aliases', models.length + ' aliases', table(cols, rows, 'No masking models.')) +
-    panel('Raw payload', '', '<div class="panel-b">' + jsonBlock(models) + '</div>');
+VIEWS['masking-models'] = { title: 'Masking Models', sub: 'Public routing aliases and which upstream model each one resolves to', render: async (v) => {
+  const [{ models }, { providers }] = await Promise.all([api('/v1/admin/masking-models'), api('/v1/admin/providers')]);
+  // Ask the real router what each alias resolves to right now (same code path a
+  // client request takes), so the table can never drift from actual behaviour.
+  const routes = {};
+  await Promise.all(models.map(async m => {
+    try { routes[m.id] = (await api('/v1/admin/providers/route', { method: 'POST', body: { model: m.id } })).route; }
+    catch (e) { routes[m.id] = { error: e.message, candidates: [] }; }
+  }));
+
+  const profileRows = models.map(m => {
+    const r = routes[m.id] || {};
+    const winner = r.providerId
+      ? '<span class="mono">' + esc(r.providerId) + '</span> → <span class="mono">' + esc(r.model) + '</span>'
+      : '<span class="tag off">no candidate</span><div class="sub err">' + esc(r.error || '') + '</div>';
+    const explicit = (r.candidates || []).filter(c => c.explicitAlias).length;
+    return '<tr><td><strong>' + esc(m.name || m.id) + '</strong><div class="sub mono">' + esc(m.id) + '</div></td>' +
+      '<td>' + esc(m.description || '') + '</td>' +
+      '<td>' + winner + '<div class="sub muted">' + esc(r.reason || '') + '</div></td>' +
+      '<td>' + (r.candidates || []).length + '<div class="sub">' + explicit + ' explicit</div></td></tr>';
+  }).join('');
+
+  const mappingRows = providers.map(p => {
+    const pm = Array.isArray(p.models) ? p.models : [];
+    const cell = alias => {
+      const cur = (p.modelAliases || {})[alias] || '';
+      let opts = '<option value="">— default (' + esc(p.defaultModel || 'none') + ') —</option>';
+      opts += pm.map(m => '<option value="' + esc(m) + '"' + (cur === m ? ' selected' : '') + '>' + esc(m) + '</option>').join('');
+      if (cur && !pm.includes(cur)) opts += '<option value="' + esc(cur) + '" selected>' + esc(cur) + ' (not in catalog)</option>';
+      return '<td><select data-alias="' + esc(alias) + '" style="max-width:190px">' + opts + '</select></td>';
+    };
+    return '<tr><td><strong>' + esc(p.name || p.id) + '</strong><div class="sub mono">' + esc(p.id) + '</div>' +
+      (p.enabled === false ? '<div class="sub"><span class="tag off">disabled</span></div>' : '') + '</td>' +
+      models.map(m => cell(m.id)).join('') +
+      '<td class="actions"><button class="btn tiny primary" data-act="alias-save" data-id="' + esc(p.id) + '">Save</button></td></tr>';
+  }).join('');
+
+  v.innerHTML =
+    panel('Masking models', models.length + ' public alias(es)', table(['Alias', 'Purpose', 'Resolves to right now', 'Candidates'], profileRows, 'No masking models.')) +
+    panel('Model mapping', 'pin an alias to a concrete model, per provider', table(['Provider'].concat(models.map(m => m.id)).concat(['']), mappingRows, 'No providers registered.')) +
+    panel('Simulate a route', 'runs the real router, no request is sent upstream', '<div class="panel-b"><div class="row" style="align-items:flex-end">' +
+      '<label class="f">Alias<select id="sim-alias">' + models.map(m => '<option>' + esc(m.id) + '</option>').join('') + '</select></label>' +
+      '<label class="f">Provider<select id="sim-provider"><option value="">any enabled</option>' + providers.map(p => '<option value="' + esc(p.id) + '">' + esc(p.id) + '</option>').join('') + '</select></label>' +
+      '<button class="btn primary" data-act="alias-simulate">Simulate route</button></div>' +
+      '<div id="sim-out" style="margin-top:12px"><span class="muted">Pick an alias and simulate to see the candidate order.</span></div></div>') +
+    panel('How this works', '', '<div class="panel-b"><p class="muted" style="font-size:12.5px;margin:0">A client sends <span class="mono">model: "zombie-mini"</span>. The router looks for a provider that <b>explicitly maps</b> that alias (the table above); explicit mappings outrank providers that merely fall back to their default model. Among equals, lower <span class="mono">priority</span> wins, and the next candidate becomes the failover target. Clients only ever see the alias — the real provider and model stay server-side.</p></div>');
 } };
 
 /* agents */
@@ -735,7 +775,24 @@ document.addEventListener('click', async (ev) => {
     if (act === 'prov-test-run') return runProviderTest(b.dataset.id);
     if (act === 'prov-del') { if (!confirm('Delete provider ' + b.dataset.id + '?')) return; await api('/v1/admin/providers/' + encodeURIComponent(b.dataset.id), { method: 'DELETE' }); return done(b.dataset.id + ' deleted ✓'); }
     if (act === 'prov-add') { const id = el('p-id').value.trim(), baseUrl = el('p-url').value.trim(); if (!id || !baseUrl) return toast('id and baseUrl are required', true); await api('/v1/admin/providers', { method: 'POST', body: { id, name: el('p-name').value.trim() || id, baseUrl, driver: el('p-driver').value, defaultModel: el('p-model').value.trim(), priority: Number(el('p-prio').value) || 10 } }); return done('Provider ' + id + ' saved ✓'); }
-    if (act === 'sync-catalog') { await api('/v1/admin/providers/sync', { method: 'POST', body: {} }); return done('Catalog synced'); }
+    if (act === 'sync-catalog') { await api('/v1/admin/providers/sync', { method: 'POST', body: {} }); return done('Catalog synced ✓'); }
+    if (act === 'alias-save') {
+      const tr = b.closest('tr'); const map = {};
+      tr.querySelectorAll('select[data-alias]').forEach(s => { if (s.value) map[s.dataset.alias] = s.value; });
+      await api('/v1/admin/providers/' + encodeURIComponent(b.dataset.id), { method: 'PATCH', body: { modelAliases: map } });
+      return done(b.dataset.id + ': ' + Object.keys(map).length + ' alias mapping(s) saved ✓');
+    }
+    if (act === 'alias-simulate') {
+      const out = el('sim-out'); out.innerHTML = '<span class="muted">Simulating…</span>';
+      const reqBody = { model: el('sim-alias').value };
+      const pv = el('sim-provider').value; if (pv) reqBody.provider = pv;
+      const r = (await api('/v1/admin/providers/route', { method: 'POST', body: reqBody })).route;
+      out.innerHTML = '<div class="tsum"><span class="tag ' + (r.status === 'selected' ? 'ok' : 'off') + '">' + esc(r.status) + '</span>' +
+        (r.providerId ? '<span class="tag mute">' + esc(r.providerId) + ' → ' + esc(r.model) + '</span>' : '') +
+        '<span class="tag mute">' + esc(r.reason || '') + '</span></div>' +
+        '<div class="sect">Candidate order</div>' + jsonBlock((r.candidates || []).map(c => ({ providerId: c.providerId, model: c.model, explicitAlias: c.explicitAlias === true, priority: c.priority })));
+      return;
+    }
     if (act === 'models-sync-all') { const r = await api('/v1/admin/models/sync-all', { method: 'POST', body: {} }); return done('Synced ' + (r.results || []).length + ' provider(s)'); }
     if (act === 'agent-disable') { if (!confirm('Disable agent ' + b.dataset.id + '?')) return; await api('/v1/admin/registry/agents/' + encodeURIComponent(b.dataset.id), { method: 'DELETE' }); return done('Agent disabled'); }
     if (act === 'agent-add') { const id = el('a-id').value.trim(); if (!id) return toast('id required', true); await api('/v1/admin/registry/agents', { method: 'POST', body: { id, name: el('a-name').value.trim() || id, role: el('a-role').value.trim() } }); return done('Agent created'); }
