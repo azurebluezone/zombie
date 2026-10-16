@@ -2,10 +2,13 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { realpath } from 'node:fs/promises';
 import { validateToolArguments } from '../mcp/schema.js';
-import { resolveExecutionPath } from './path-boundary.js';
+import { resolveAnyPath, resolveExecutionPath } from './path-boundary.js';
 function executionStatusAllowed(status){return status==='ENABLED'||status==='VERIFIED'}
 async function loadTool(entry,toolRoot){const root=await realpath(path.resolve(toolRoot));const file=path.resolve(root,String(entry??''));if(file!==root&&!file.startsWith(`${root}${path.sep}`))throw new Error('tool_entry_outside_tool_root');const actual=await realpath(file);if(actual!==root&&!actual.startsWith(`${root}${path.sep}`))throw new Error('tool_entry_symlink_escape');const module=await import(pathToFileURL(actual).href);const execute=module.execute??module.default;if(typeof execute!=='function')throw new Error('tool_execute_export_required');return execute}
-async function resolveDeclaredPaths(args,tool,context){const fields=Array.isArray(tool?.metadata?.pathArguments)?tool.metadata.pathArguments.map(String):[];if(!fields.length)return args;const next=structuredClone(args);for(const field of fields){if(typeof next[field]!=='string')continue;next[field]=await resolveExecutionPath(next[field],{projectRoot:context?.projectRoot,workingDirectory:context?.workingDirectory,mustExist:tool.metadata?.pathMustExist===true})}return next}
+// A declared path is resolved against the project root by default. An agent whose
+// persisted scope is `global` has been granted any-folder reach, so its declared
+// paths resolve without the project-root sandbox (symlink escape still applies).
+async function resolveDeclaredPaths(args,tool,context){const fields=Array.isArray(tool?.metadata?.pathArguments)?tool.metadata.pathArguments.map(String):[];if(!fields.length)return args;const next=structuredClone(args);for(const field of fields){if(typeof next[field]!=='string')continue;const mustExist=tool.metadata?.pathMustExist===true;next[field]=context?.allowAnyPath===true?await resolveAnyPath(next[field],{workingDirectory:context?.workingDirectory,mustExist}):await resolveExecutionPath(next[field],{projectRoot:context?.projectRoot,workingDirectory:context?.workingDirectory,mustExist})}return next}
 export class ToolExecutionAdapter {
   constructor({registry,toolRoot='./tools',logger=null,policy=null}={}){this.registry=registry;this.toolRoot=toolRoot;this.logger=logger;this.policy=policy}
   async execute({prepared,input={},applicationId,context}={}){

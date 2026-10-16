@@ -1,7 +1,7 @@
 import { id } from '../core/ids.js';
 
 export class McpPermissions {
-  constructor(store) { this.store = store; }
+  constructor(store, {accessMode='permissioned'}={}) { this.store = store; this.accessMode = accessMode === 'unrestricted' ? 'unrestricted' : 'permissioned'; }
   async list() { return this.store.read('mcp-permissions', []); }
   async grant(input) {
     if (!input?.applicationId || !input?.qualifiedName) throw new Error('application_id_and_qualified_tool_required');
@@ -17,6 +17,7 @@ export class McpPermissions {
     await this.store.write('mcp-permissions', next); return next.length !== list.length;
   }
   async allowed(applicationId, qualifiedName) {
+    if (this.accessMode === 'unrestricted') return true;
     const list = await this.list();
     return list.some(x => x.applicationId === applicationId && x.qualifiedName === qualifiedName && x.effect === 'allow');
   }

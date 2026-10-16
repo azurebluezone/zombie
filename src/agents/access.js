@@ -75,6 +75,9 @@ export function normalizeAgentAccess(input = {}, { fallbackBoundary = DEFAULT_TO
  * `toolSurface` is always 'all': the agent boundary is a path scope, not a tool
  * allowlist. `allowAnyRoot` tells the project context whether the agent may name
  * a root outside the runtime's configured allowed roots.
+ *
+ * A global agent keeps the caller's root, which may be absent: it must not
+ * silently acquire the runtime's data directory as its project.
  */
 export function resolveAgentAccess(agent, { requestedRoot = null, requestedWorkingDirectory = null, defaultRoot = null } = {}) {
   const { toolBoundary, workingDirectory } = normalizeAgentAccess(agent ?? {});
@@ -89,13 +92,12 @@ export function resolveAgentAccess(agent, { requestedRoot = null, requestedWorki
       reason: workingDirectory ? 'agent_working_directory' : 'agent_working_directory_unset'
     };
   }
-  const root = requestedRoot ?? defaultRoot ?? null;
   return {
     toolBoundary,
     toolSurface: 'all',
     allowAnyRoot: true,
-    projectRoot: root,
-    workingDirectory: requestedWorkingDirectory ?? root,
+    projectRoot: requestedRoot ?? null,
+    workingDirectory: requestedWorkingDirectory ?? requestedRoot ?? null,
     reason: 'agent_global'
   };
 }

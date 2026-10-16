@@ -121,6 +121,13 @@ export const config = {
   // sessions, tool permissions and audit entries still have a real owner. An
   // admin override can change this at runtime without editing .env or restarting.
   mcpRequireAuth: mcpAuthRequiredEnv(),
+  // Tool access mode. `permissioned` (default) keeps the application-scoped
+  // grant store as the authority: an application may only call a tool an operator
+  // has explicitly granted. `unrestricted` drops that per-application gate so
+  // every agent can call every runnable tool; a tool that is disabled by
+  // configuration is still refused, and the agent's own path scope still bounds
+  // where those tools may operate.
+  toolAccessMode: env('TOOL_ACCESS_MODE', 'permissioned') === 'unrestricted' ? 'unrestricted' : 'permissioned',
   // Explicit browser CORS allowlist. Empty means same-origin only (no CORS headers).
   corsAllowOrigins: env('CORS_ALLOW_ORIGINS', '').split(',').map(x => x.trim()).filter(Boolean),
   providerNetworkPolicy: {

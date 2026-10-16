@@ -122,7 +122,7 @@ const skillsRegistry = new SkillRegistry(store);
 const agentsRegistry = new AgentRegistry(store);
 const transportsRegistry = new TransportRegistry(store);
 const extensionResolver = new ExtensionResolver({agents: agentsRegistry, skills: skillsRegistry, tools: toolsRegistry, transports: transportsRegistry});
-const permissions = new McpPermissions(store);
+const permissions = new McpPermissions(store, {accessMode:config.toolAccessMode});
 const mcpAudit = new McpAudit(store);
 const connections = new McpConnections(store, {leaseMs:Number(process.env.MCP_CONNECTION_LEASE_MS ?? 300000)});
 // Inbound MCP client sessions (clients talking to this runtime's /mcp server).
@@ -135,7 +135,7 @@ if (process.env.MCP_RECONCILE_ON_START === 'true') await reconciliation.reconcil
 const limits = new AppLimits({maxRequests:Number(process.env.APP_RATE_LIMIT ?? 60), maxConcurrent:Number(process.env.APP_CONCURRENCY ?? 4)});
 const smartRouter = new SmartRouter({providers, logger});
 const capabilityConfig = new CapabilityConfigResolver({store});
-const toolPolicy = new ToolPolicy(store, {configResolver:capabilityConfig});
+const toolPolicy = new ToolPolicy(store, {configResolver:capabilityConfig, accessMode:config.toolAccessMode});
 const toolExecution = new ToolExecutionAdapter({registry:toolsRegistry, toolRoot:config.toolRoot, logger, policy:toolPolicy});
 const mcpExecution = new McpExecutionAdapter({registry:mcp, permissions, audit:mcpAudit, connections, limits, logger});
 const evidenceGate = new EvidenceGate({store, logger});
@@ -155,6 +155,29 @@ function isLoopbackRequest(req) {
 }
 const adminOk = (req) => isAdminAuthorized(bearer(req), config.adminToken) ||
   (config.localAuthBypass && !config.adminToken && isLoopbackRequest(req));
+// The runnable native tool surface. An agent's access scope is "all", so this is
+// the surface every agent sees: registered tools that can actually execute.
+async function runnableToolIds() {
+  return (await toolsRegistry.list())
+    .filter(tool => tool.entry && ['ENABLED','VERIFIED'].includes(tool.status))
+    .map(tool => tool.id);
+}
+// One agent's persisted access scope plus the roots it implies.
+//
+//   projectRoot    where project state (SSOT, memory, context) is read from; may
+//                  be absent for a global agent that named no root.
+//   workspaceRoot  the cwd a tool starts from. Always set, so a tool that needs a
+//                  working directory never has to invent one.
+//
+// Both are resolved with allowAnyRoot: an agent scope is never re-bounded by the
+// runtime's PROJECT_ROOTS.
+async function resolveAgentScope(agentId, { requestedRoot = null, requestedWorkingDirectory = null } = {}) {
+  const agent = (await agentsRegistry.list()).find(item => item.id === String(agentId)) ?? null;
+  const access = resolveAgentAccess(agent, { requestedRoot, requestedWorkingDirectory, defaultRoot: projectContext.defaultRoot });
+  const projectRoot = access.projectRoot ? projectContext.root(access.projectRoot, { allowAnyRoot: true }) : null;
+  const workspaceRoot = projectRoot ?? projectContext.root(process.cwd(), { allowAnyRoot: true });
+  return { agent, access, projectRoot, workspaceRoot };
+}
 // Executes one native tool for an inbound MCP tools/call. Auth, the application
 // tool-permission check and the project-root sandbox are enforced here, exactly
 // as the chat tool loop enforces them: an MCP client gets no more authority than
@@ -164,10 +187,12 @@ async function executeMcpServerTool(applicationId, toolId, args, requestId, meta
   const decision = await toolPolicy.decision(applicationId, toolId);
   if (!decision.allowed) throw new Error(`tool_not_permitted:${decision.reason}`);
   const requestedRoot = String(meta?.projectRoot ?? config.mcpServerProjectRoot ?? '').trim() || null;
-  const projectRoot = projectContext.root(requestedRoot);
+  // In the unrestricted local mode the project-root allowlist is no longer the
+  // boundary, matching what an agent scope already grants the chat path.
+  const projectRoot = projectContext.root(requestedRoot, { allowAnyRoot: config.toolAccessMode === 'unrestricted' });
   const goal = `mcp tools/call ${toolId}`;
   const prepared = await execution.prepare({ goal, consent: true, agentId: 'code-guru', toolIds: [toolId] });
-  const context = createExecutionContext({ applicationId, requestId, projectRoot, workingDirectory: projectRoot, agentId: 'code-guru', goal, toolId, transport: 'mcp' }, runtimeIdentity);
+  const context = createExecutionContext({ applicationId, requestId, projectRoot, workingDirectory: projectRoot, allowAnyPath: config.toolAccessMode === 'unrestricted', allowAnyCommand: config.toolAccessMode === 'unrestricted', agentId: 'code-guru', goal, toolId, transport: 'mcp' }, runtimeIdentity);
   const outcome = await toolExecution.execute({ prepared, input: { toolId, arguments: args }, applicationId, context });
   return outcome.result ?? outcome;
 }
@@ -1128,12 +1153,16 @@ const requestHandler = async (req,res) => {
       if(session) await sessions.updateMetadata(session.id,app.id,Object.fromEntries(Object.entries(executionMetadata).filter(([,v])=>v != null && String(v).trim())));
       const currentSession=session ? await sessions.get(session.id,app.id) : null;
       const executionEvidence=currentSession ? (await store.read('evidence',[])).filter(item=>item.contextId===currentSession.id).slice(-8) : [];
-      const executionProjectRoot=input.projectRoot ? projectContext.root(input.projectRoot) : null;
+      // The agent's persisted access scope supplies both the tool surface and the
+      // project root, so a working-directory agent is pinned before anything reads
+      // project state and a global agent may name any existing root.
+      const executionAgentId=String(input.agent ?? input.persona ?? 'code-guru');
+      const executionScope=await resolveAgentScope(executionAgentId,{requestedRoot:input.projectRoot,requestedWorkingDirectory:input.workingDirectory});
+      const executionProjectRoot=executionScope.projectRoot;
       if(executionProjectRoot) await autoSetup.ensure(executionProjectRoot);
       const executionProject=executionProjectRoot ? await ssot.read(executionProjectRoot) : null;
       const executionMemory=executionProjectRoot ? await memory.recent(executionProjectRoot,10) : [];
       const executionSyllabus=executionProjectRoot ? await syllabus.read(executionProjectRoot) : null;
-      const executionAgentId=String(input.agent ?? input.persona ?? 'code-guru');
       const executionGoal=String(input.goal ?? 'execution');
       const executionAgent=await agentRunner.prepare({agentId:executionAgentId,personaId:executionAgentId,goal:executionGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
       const executionRoute=await smartRouter.route(input);
@@ -1144,7 +1173,7 @@ const requestHandler = async (req,res) => {
       const incomingMessages=boundedExecution.messages.length ? boundedExecution.messages : [{role:'user',content:executionGoal}];
       input={...input,messages:[executionSystem,...incomingMessages],sessionId:currentSession?.id ?? input.sessionId};
       const prepared=await execution.prepare(input);
-      const executionContext=createExecutionContext({...input,applicationId:app.id,sessionId:session?.id ?? input.sessionId,requestId,projectRoot:executionProjectRoot,workingDirectory:input.workingDirectory ?? executionProjectRoot,agentId:executionAgentId,goal:executionGoal,expectedOutcome:input.expectedOutcome,transport:'http'},runtimeIdentity);
+      const executionContext=createExecutionContext({...input,applicationId:app.id,sessionId:session?.id ?? input.sessionId,requestId,projectRoot:executionScope.workspaceRoot,workingDirectory:input.workingDirectory ?? executionScope.workspaceRoot,allowAnyPath:executionScope.access.allowAnyRoot,allowAnyCommand:executionScope.access.allowAnyRoot,agentId:executionAgentId,goal:executionGoal,expectedOutcome:input.expectedOutcome,transport:'http'},runtimeIdentity);
       const result=await execution.execute(prepared,{...input,sessionId:session?.id ?? input.sessionId,requestId,workingDirectory:executionContext.workingDirectory,applicationId:app.id},app.id,executionContext);
       requestState.outcome = result?.status === 'completed' && result?.verified === true ? 'verified' : (result?.status ?? 'completed');
       requestState.agentId=executionAgent.agent?.id ?? executionAgentId;
@@ -1186,13 +1215,14 @@ const requestHandler = async (req,res) => {
       const streamMetadata={sessionSource:input.sessionSource ?? req.headers['x-session-source'] ?? 'execution-stream',clientId:input.clientId ?? req.headers['x-client-id'] ?? null,editor:input.editor ?? req.headers['x-editor'] ?? null,editorVersion:input.editorVersion ?? req.headers['x-editor-version'] ?? null,clientVersion:input.clientVersion ?? req.headers['x-client-version'] ?? null,osPlatform:input.osPlatform ?? req.headers['x-os-platform'] ?? null,deviceInfo:input.deviceInfo ?? req.headers['x-device-info'] ?? null};
       if(session) await sessions.updateMetadata(session.id,app.id,Object.fromEntries(Object.entries(streamMetadata).filter(([,v])=>v != null && String(v).trim())));
       const currentSession=session ? await sessions.get(session.id,app.id) : null;
-      const streamProjectRoot=input.projectRoot ? projectContext.root(input.projectRoot) : null;
+      const streamAgentId=String(input.agent ?? input.persona ?? 'code-guru');
+      const executionStreamScope=await resolveAgentScope(streamAgentId,{requestedRoot:input.projectRoot,requestedWorkingDirectory:input.workingDirectory});
+      const streamProjectRoot=executionStreamScope.projectRoot;
       if(streamProjectRoot) await autoSetup.ensure(streamProjectRoot);
       const streamProject=streamProjectRoot ? await ssot.read(streamProjectRoot) : null;
       const streamMemory=streamProjectRoot ? await memory.recent(streamProjectRoot,10) : [];
       const streamSyllabus=streamProjectRoot ? await syllabus.read(streamProjectRoot) : null;
       const streamEvidence=session ? (await store.read('evidence',[])).filter(item=>item.contextId===session.id).slice(-8) : [];
-      const streamAgentId=String(input.agent ?? input.persona ?? 'code-guru');
       const streamGoal=String(input.goal ?? 'execution stream');
       const streamAgent=await agentRunner.prepare({agentId:streamAgentId,personaId:streamAgentId,goal:streamGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
       const streamRoute=await smartRouter.route(input);
@@ -1205,7 +1235,7 @@ const requestHandler = async (req,res) => {
       const prepared=await execution.prepare(input);
       if (!prepared.consent.allowed) return send(res,409,{error:'execution_consent_required',prepared});
       res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache','connection':'keep-alive'});
-      const streamExecutionContext=createExecutionContext({...input,applicationId:app.id,sessionId:session?.id ?? input.sessionId,requestId,projectRoot:streamProjectRoot,workingDirectory:input.workingDirectory ?? streamProjectRoot,agentId:streamAgentId,goal:streamGoal,expectedOutcome:input.expectedOutcome,transport:'http-stream'},runtimeIdentity);
+      const streamExecutionContext=createExecutionContext({...input,applicationId:app.id,sessionId:session?.id ?? input.sessionId,requestId,projectRoot:executionStreamScope.workspaceRoot,workingDirectory:input.workingDirectory ?? executionStreamScope.workspaceRoot,allowAnyPath:executionStreamScope.access.allowAnyRoot,allowAnyCommand:executionStreamScope.access.allowAnyRoot,agentId:streamAgentId,goal:streamGoal,expectedOutcome:input.expectedOutcome,transport:'http-stream'},runtimeIdentity);
       const streamInput={...input,sessionId:session?.id ?? input.sessionId,executionContext:streamExecutionContext};
       if (input.autoToolLoop === true && config.executionMode !== 'tools-enabled') {
         res.write(`event: error\ndata: ${JSON.stringify({error:'tool_execution_not_verified',executionMode:config.executionMode,requestId})}\n\n`); res.end(); return;
@@ -1230,20 +1260,26 @@ const requestHandler = async (req,res) => {
       input={...input,goal:chatGoal,toolIds:taskPolicy.effectiveToolIds,allowedToolIds:taskPolicy.effectiveToolIds};
       if (input.autoToolLoop === true) {
         if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled'});
+        // An agent's persisted access scope decides both the tool surface and the
+        // project root. The scope is "all" tools, so the surface is the whole
+        // runnable registry rather than the task-policy intersection.
+        const agentId=String(input.agent??input.persona??'code-guru');
+        requestState.agentId=agentId;
+        const agentScope=await resolveAgentScope(agentId,{requestedRoot:input.projectRoot,requestedWorkingDirectory:input.workingDirectory});
+        const agentToolIds=agentScope.access.toolSurface==='all'?await runnableToolIds():input.toolIds;
+        input={...input,toolIds:agentToolIds,allowedToolIds:agentToolIds};
         const registeredNativeTools=(await toolsRegistry.list()).filter(t=>input.toolIds.includes(t.id)&&t.entry&&['ENABLED','VERIFIED'].includes(t.status));
         if (!registeredNativeTools.length) return send(res,400,{error:'no_registered_tool_allowed_for_task',taskProfile:taskPolicy.profileId,requestedToolIds:requestedChatTools});
         const toolDefinitions=registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}}));
         const toolBindings={...(input.toolBindings??{}),...Object.fromEntries(registeredNativeTools.map(t=>[t.id,{toolId:t.id}]))};
-        const projectRoot=input.projectRoot?projectContext.root(input.projectRoot):null;
-        const agentId=String(input.agent??input.persona??'code-guru');
-        requestState.agentId=agentId;
+        const projectRoot=agentScope.projectRoot;
         const agentPrepared=await agentRunner.prepare({agentId,personaId:agentId,goal:chatGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
         requestState.agentId=agentPrepared.agent?.id ?? agentId;
         const route=await smartRouter.route({...input,tools:toolDefinitions,allowJsonToolFallback:true});
         const systemMessage=buildSystemMessage({constitution:CORE_CONSTITUTION,agent:agentPrepared.agent,persona:agentPrepared.persona,goal:chatGoal,expectedOutcome:input.expectedOutcome,projectRoot,route,tools:input.toolIds,toolCatalog:registeredNativeTools});
         const prepared=await execution.prepare({...input,goal:chatGoal,toolIds:input.toolIds,allowedToolIds:input.allowedToolIds,consent:input.consent===true});
         if (!prepared.consent.allowed) return send(res,409,{error:'execution_consent_required',prepared});
-        const executionContext=createExecutionContext({...input,applicationId:app.id,sessionId:input.sessionId ?? null,requestId,projectRoot,workingDirectory:input.workingDirectory??projectRoot,agentId,goal:chatGoal,expectedOutcome:input.expectedOutcome,transport:'http-chat'},runtimeIdentity);
+        const executionContext=createExecutionContext({...input,applicationId:app.id,sessionId:input.sessionId ?? null,requestId,projectRoot:agentScope.workspaceRoot,workingDirectory:input.workingDirectory??agentScope.workspaceRoot,allowAnyPath:agentScope.access.allowAnyRoot,allowAnyCommand:agentScope.access.allowAnyRoot,agentId,goal:chatGoal,expectedOutcome:input.expectedOutcome,transport:'http-chat'},runtimeIdentity);
         const loopInput={...input,tools:toolDefinitions,toolBindings,allowJsonToolFallback:true,executionContext,messages:[systemMessage,...(Array.isArray(input.messages)?input.messages:[])],stream:input.stream===true};
         if (input.stream===true) {
           res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'});
@@ -1273,16 +1309,17 @@ const requestHandler = async (req,res) => {
         // tool.execution.*).
         const toolLoopPublicModel=result.response?.model ?? route.publicModel ?? null;
         const toolLoopRoute={routeId:route.routeId,providerId:'masked',model:route.publicModel || toolLoopPublicModel,publicModel:route.publicModel || toolLoopPublicModel,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status};
-        return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy}});
+        return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,agentAccess:agentScope.access,toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id)},evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy}});
       }
       if (input.stream === true) {
         const streamContext = await contexts.resolve(input);
-        const streamProjectRoot = input.projectRoot ? projectContext.root(input.projectRoot) : null;
+        const streamAgentId = String(input.agent ?? input.persona ?? 'code-guru');
+        const chatStreamScope=await resolveAgentScope(streamAgentId,{requestedRoot:input.projectRoot,requestedWorkingDirectory:input.workingDirectory});
+        const streamProjectRoot = chatStreamScope.projectRoot;
         if (streamProjectRoot) await autoSetup.ensure(streamProjectRoot);
         const streamProject = streamProjectRoot ? await ssot.read(streamProjectRoot) : null;
         const streamMemory = streamProjectRoot ? await memory.recent(streamProjectRoot,10) : null;
         const streamSyllabus = streamProjectRoot ? await syllabus.read(streamProjectRoot) : null;
-        const streamAgentId = String(input.agent ?? input.persona ?? 'code-guru');
         const streamGoal = String(input.goal ?? input.messages?.filter?.(m=>m?.role==='user').at(-1)?.content ?? 'chat request');
         const streamAgent = await agentRunner.prepare({agentId:streamAgentId,personaId:streamAgentId,goal:streamGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
         requestState.agentId=streamAgent.agent?.id ?? streamAgentId;
@@ -1365,7 +1402,9 @@ const requestHandler = async (req,res) => {
         return;
       }
       const context = await contexts.resolve(input);
-      const projectRoot = input.projectRoot ? projectContext.root(input.projectRoot) : null;
+      const plainAgentId = String(input.agent ?? input.persona ?? 'code-guru');
+      const plainScope=await resolveAgentScope(plainAgentId,{requestedRoot:input.projectRoot,requestedWorkingDirectory:input.workingDirectory});
+      const projectRoot = plainScope.projectRoot;
       if (projectRoot) await autoSetup.ensure(projectRoot);
       const project = projectRoot ? await ssot.read(projectRoot) : null;
       const memoryDoc = projectRoot ? await memory.recent(projectRoot, 10) : null;
@@ -1438,7 +1477,7 @@ const requestHandler = async (req,res) => {
       requestState.agentId=agentPrepared.agent?.id ?? null;
       await recordAgentRun(agentPrepared.agent?.id, 'success', {latencyMs:Date.now()-startedAt, model, providerId:provider.id, path:'chat'});
       await requestLog.info('chat.completed',{applicationId:app.id,agentId:agentPrepared.agent?.id,personaId:agentPrepared.persona?.id,providerId:provider.id,model,sessionId:currentSession?.id ?? null,evidenceStatus:'observed',verified:false,routeId:route.routeId,contextInjected:true});
-      return send(res,200,{...masked,applicationId:app.id,meta:{phase:RUNTIME_PHASE,taskPolicy,route:{routeId:route.routeId,providerId:'masked',model:route.publicModel || masked.model,publicModel:route.publicModel || masked.model,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status},provider:{name:'ZombieCoder',id:'masked'},model:masked.model,session:currentSession,context,project,syllabus:syllabusDoc,memory:memoryDoc,entities,agent:agentPrepared.agent,persona:agentPrepared.persona,constitution:CORE_CONSTITUTION,sessionMetadata:currentSession?.metadata ?? incomingMetadata,systemPrompt:{injected:true,visibleToClient:false,contextCompiled:true},receivedMessages:Array.isArray(input.messages)?input.messages.length:0,evidence:maskEvidenceForPublic(evidence),verified:false,verificationRequired}});
+      return send(res,200,{...masked,applicationId:app.id,meta:{phase:RUNTIME_PHASE,taskPolicy,agentAccess:plainScope.access,route:{routeId:route.routeId,providerId:'masked',model:route.publicModel || masked.model,publicModel:route.publicModel || masked.model,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status},provider:{name:'ZombieCoder',id:'masked'},model:masked.model,session:currentSession,context,project,syllabus:syllabusDoc,memory:memoryDoc,entities,agent:agentPrepared.agent,persona:agentPrepared.persona,constitution:CORE_CONSTITUTION,sessionMetadata:currentSession?.metadata ?? incomingMetadata,systemPrompt:{injected:true,visibleToClient:false,contextCompiled:true},receivedMessages:Array.isArray(input.messages)?input.messages.length:0,evidence:maskEvidenceForPublic(evidence),verified:false,verificationRequired}});
     }
     if (req.method==='GET' && url.pathname==='/api/syllabus') {
       const root=url.searchParams.get('projectRoot')||config.dataDir; await autoSetup.ensure(root); const doc=await syllabus.read(root);

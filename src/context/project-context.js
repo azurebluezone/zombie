@@ -9,8 +9,19 @@ export class ProjectContextStore {
     this.defaultRoot = path.resolve(defaultRoot);
     this.allowedRoots = Array.isArray(allowedRoots) && allowedRoots.length ? allowedRoots.map(x => path.resolve(String(x))) : null;
   }
-  root(inputRoot) {
+  /**
+   * Resolve a project root.
+   *
+   * `allowAnyRoot` is the agent-scope path: the caller has already been authorized
+   * by an agent's persisted tool-access scope, so the runtime's configured
+   * allowedRoots are not the boundary any more. The path must still exist — a
+   * missing root fails closed rather than silently creating a sandbox.
+   */
+  root(inputRoot, { allowAnyRoot = false } = {}) {
     const r = path.resolve(inputRoot || this.defaultRoot);
+    if (allowAnyRoot) {
+      try { return realpathSync(r); } catch { throw new Error('project_root_not_found'); }
+    }
     if (this.allowedRoots) {
       const allowedLexical = this.allowedRoots.some(base => r === base || r.startsWith(`${base}${path.sep}`));
       if (!allowedLexical) throw new Error('project_root_not_allowed');

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 export class ToolPolicy {
-  constructor(store, {configResolver=null}={}) { this.store=store; this.configResolver=configResolver; }
+  constructor(store, {configResolver=null,accessMode='permissioned'}={}) { this.store=store; this.configResolver=configResolver; this.accessMode=accessMode==='unrestricted'?'unrestricted':'permissioned'; }
   async list(){return this.store.read('tool-permissions',[])}
   async grant({applicationId,toolId}){if(!applicationId||!toolId)throw new Error('application_id_and_tool_required');const list=await this.list();const existing=list.find(x=>x.applicationId===applicationId&&x.toolId===toolId&&x.effect==='allow');if(existing)return existing;const item={id:`toolperm_${randomUUID()}`,applicationId,toolId,effect:'allow',createdAt:new Date().toISOString()};list.push(item);await this.store.write('tool-permissions',list);return item}
   async revoke(applicationId,toolId){const list=await this.list();const next=list.filter(x=>!(x.applicationId===applicationId&&x.toolId===toolId));await this.store.write('tool-permissions',next);return next.length!==list.length}
@@ -10,6 +10,10 @@ export class ToolPolicy {
     const permission = await this.permissionAllowed(applicationId,toolId);
     const setting = this.configResolver ? await this.configResolver.toolSetting(applicationId,toolId) : {enabled:null,source:'unconfigured'};
     if (setting.enabled === false) return {allowed:false,reason:'tool_disabled_by_configuration',permission,setting};
+    // `unrestricted` is the loopback-only local mode: the operator has declared
+    // that every application may reach every runnable tool, so a missing grant is
+    // no longer a refusal. An explicit configuration disable still wins above.
+    if (this.accessMode === 'unrestricted') return {allowed:true,reason:'allowed_by_access_mode',permission,setting};
     if (!permission) return {allowed:false,reason:'tool_not_permitted',permission,setting};
     return {allowed:true,reason:'allowed',permission,setting};
   }
