@@ -1180,7 +1180,15 @@ const requestHandler = async (req,res) => {
       await recordAgentRun(requestState.agentId, result?.status==='completed'?'success':'incomplete', {latencyMs:Date.now()-startedAt, model:result?.model ?? null, providerId:result?.providerId ?? null, path:'execution'});
       await requestLog.info('execution.completed', {applicationId:app.id,agentId:input.agent ?? input.persona ?? 'code-guru',personaId:input.persona ?? input.agent ?? 'code-guru',providerId:result?.providerId ?? null,model:result?.model ?? null,status:result?.status ?? null,stoppedReason:result?.stoppedReason ?? null,verified:result?.verified ?? false});
       const evidence=Array.isArray(result?.evidence)?result.evidence:[];
-      const evidenceState=evidence.length ? evidenceGate.validate(evidence) : [];
+      // Evidence from an adapter must never be able to fail a request whose work
+      // has already executed. A malformed item degrades to "awaiting
+      // verification" and is logged instead of turning a completed tool run into
+      // an opaque 400.
+      const evidenceState=[];
+      for (const item of evidence) {
+        try { evidenceState.push(...evidenceGate.validate([item])); }
+        catch (error) { await requestLog.warn('execution.evidence.invalid',{applicationId:app.id,reason:String(error?.message??error)}); }
+      }
       const verified=evidenceGate.canClaimSuccess(evidenceState);
       const safeResult={...result,verified};
       if (!verified) { safeResult.response=null; safeResult.status='awaiting_verification'; }

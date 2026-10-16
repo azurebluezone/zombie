@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { ToolRegistry } from '../src/tools/registry.js';
 import { ToolExecutionAdapter } from '../src/execution/tool-adapter.js';
 import { McpExecutionAdapter } from '../src/execution/mcp-adapter.js';
 import { ExecutionAdapter } from '../src/execution/execution-adapter.js';
+import { EvidenceGate } from '../src/evidence/gate.js';
 
 class Store {
   constructor(data = {}) { this.data = new Map(Object.entries(data)); }
@@ -71,4 +73,56 @@ test('execution adapter selects tool, MCP, or provider boundary explicitly', asy
   await adapter.execute({ prepared, input: { qualifiedName: 'q' }, applicationId: 'app_1' });
   await adapter.execute({ prepared, input: {}, applicationId: 'app_1' });
   assert.deepEqual(calls, ['tool', 'mcp', 'provider']);
+});
+
+// Regression: /v1/execution/run validates every returned evidence item with
+// EvidenceGate.validate(), which requires source/status/observedAt. Both
+// adapters used to return {type,...} objects, so a completed tool or remote MCP
+// call was turned into an opaque HTTP 400 after the work had already run.
+test('tool and MCP adapters emit evidence the evidence gate can validate', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'zc-phase13-evidence-'));
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', chunk => { raw += chunk; });
+    req.on('end', () => {
+      const message = JSON.parse(raw);
+      res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'sess-test' });
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: 'pong' }], isError: false } }));
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    await writeFile(path.join(dir, 'echo-tool.mjs'), `export async function execute(args) { return { echo: args.value }; }\n`);
+    const registry = new ToolRegistry(new Store());
+    await registry.register({ id: 'echo-tool', status: 'ENABLED', entry: './echo-tool.mjs' });
+    const toolResult = await new ToolExecutionAdapter({ registry, toolRoot: dir })
+      .execute({ prepared, input: { toolId: 'echo-tool', arguments: { value: 'x' } }, applicationId: 'app_1' });
+
+    const port = server.address().port;
+    const mcpResult = await new McpExecutionAdapter({
+      registry: {
+        resolveTool: async () => ({
+          endpoint: { id: 'ep', url: `http://127.0.0.1:${port}/mcp`, allowHosts: ['127.0.0.1'], networkPolicy: { allowHttp: true, allowPrivateNetwork: true } },
+          tool: { name: 'ping' }
+        })
+      },
+      permissions: { allowed: async () => true },
+      audit: { append: async () => {} },
+      connections: { resolve: async () => null, touch: async () => {} },
+      limits: { acquire: () => () => {} }
+    }).execute({ prepared, input: { qualifiedName: 'ep.ping', arguments: {} }, applicationId: 'app_1' });
+
+    const gate = new EvidenceGate({ store: new Store() });
+    for (const [label, result] of [['tool', toolResult], ['mcp', mcpResult]]) {
+      assert.equal(result.status, 'completed', label);
+      const validated = gate.validate(result.evidence);
+      assert.equal(validated.length, 1, label);
+      assert.ok(validated[0].source, `${label} evidence needs a source`);
+      assert.ok(validated[0].observedAt, `${label} evidence needs observedAt`);
+      assert.equal(validated[0].status, 'observed', label);
+    }
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  }
 });

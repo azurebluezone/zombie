@@ -47,7 +47,11 @@ export class McpExecutionAdapter {
         if (connection) await this.connections.touch(connection.connectionId, { sessionId });
         await this.audit.append({ requestId, applicationId, endpointId: endpoint.id, qualifiedName, action: 'tool_call', stage: 'result', outcome: 'success', connectionId: connection?.connectionId ?? null, sessionId });
         await this.logger?.info?.('mcp.execution.completed', {requestId,applicationId,qualifiedName,endpointId:resolved.endpoint.id});
-        return { status: 'completed', target: 'mcp', result, endpointId: endpoint.id, qualifiedName, requestId, connectionId: connection?.connectionId ?? null, sessionId, evidence: [{ type: 'mcp_tool_execution', qualifiedName, outcome: 'success' }] };
+        // Canonical evidence shape. /v1/execution/run validates source/status/
+        // observedAt, so the previous {type,outcome} object failed the request
+        // after the remote tool had already run.
+        const evidence = { source: `mcp:${qualifiedName}`, status: 'observed', confidence: 'direct-execution-return', observedAt: new Date().toISOString(), summary: `External MCP tool ${qualifiedName} returned a result; independent verification is still required` };
+        return { status: 'completed', target: 'mcp', result, endpointId: endpoint.id, qualifiedName, requestId, connectionId: connection?.connectionId ?? null, sessionId, evidence: [evidence] };
       } catch (error) {
         await this.audit.append({ requestId, applicationId, endpointId: endpoint.id, qualifiedName, action: 'tool_call', stage: 'result', outcome: 'error', connectionId: connection?.connectionId ?? null, sessionId, error: error.message });
         await this.logger?.error?.('mcp.execution.failed', {requestId,applicationId,qualifiedName,error:String(error?.message ?? error)});

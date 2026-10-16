@@ -24,6 +24,10 @@ export class ToolExecutionAdapter {
     // applicationId/requestId are part of the started event too: without them a
     // completion cannot be correlated to the caller that triggered it.
     await this.logger?.info?.('tool.execution.completed',{toolId:tool.id,toolVersion:tool.version,status:'completed',applicationId,requestId:context?.requestId??null});
-    return {status:'completed',target:'tool',toolId:tool.id,toolVersion:tool.version,result,evidence:[{type:'tool_execution',toolId:tool.id,status:'returned',requestId:context?.requestId??null}]};
+    // Evidence must carry source/status/observedAt: /v1/execution/run validates
+    // every item, and the old {type,status:'returned'} shape made the route fail
+    // with a 400 after the tool had already executed.
+    const evidence={source:`tool:${tool.id}`,status:'observed',confidence:'direct-execution-return',observedAt:new Date().toISOString(),summary:`Tool ${tool.id} returned a result; independent verification is still required`};
+    return {status:'completed',target:'tool',toolId:tool.id,toolVersion:tool.version,result,evidence:[evidence]};
   }
 }
