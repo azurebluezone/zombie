@@ -4,6 +4,16 @@ import path from 'node:path';
 const SKIP = new Set(['.git','.zombiecoder','node_modules','vendor','.venv','venv','dist','build','.cache']);
 const MAX_ENTRIES = 200;
 
+// The header the runtime writes. A file without it was written by something else —
+// an editor plugin, an operator, a template — and the runtime cannot vouch for its
+// claims, so auto-setup replaces it (keeping the original beside it) instead of
+// presenting a stale line such as "HTTP_401" to the model as project state.
+const RUNTIME_MARKER = '# Project SSOT';
+
+export function isRuntimeGeneratedSSOT(content) {
+  return String(content ?? '').trimStart().startsWith(RUNTIME_MARKER);
+}
+
 async function scanDir(root, relative = '', depth = 0, out = []) {
   if (depth > 4 || out.length >= MAX_ENTRIES) return out;
   let entries = [];
@@ -40,7 +50,7 @@ export class SSOTService {
     return {schemaVersion:'1.0', status:'generated', provenance:{source:'runtime-project-scanner', reason, generatedAt:now}, project:{root:r, technologies:tech, fileCount:files.length, structure:files}, boundaries:{ssot:'project state and detected structure', syllabus:'knowledge/reference entries', memory:'conversation/session-derived project notes'}, warnings: files.length >= MAX_ENTRIES ? ['structure_truncated'] : []};
   }
   format(doc) {
-    return `# Project SSOT\n\n- Status: ${doc.status}\n- Schema: ${doc.schemaVersion}\n- Generated: ${doc.provenance.generatedAt}\n- Reason: ${doc.provenance.reason}\n- Root: ${doc.project.root}\n- File count observed: ${doc.project.fileCount}\n\n## Detected Technologies\n${doc.project.technologies.length ? doc.project.technologies.map(x=>`- ${x}`).join('\n') : '- none detected'}\n\n## Project Structure\n${doc.project.structure.map(x=>`- ${x}`).join('\n') || '- empty'}\n\n## Context Boundaries\n- SSOT: ${doc.boundaries.ssot}\n- Syllabus: ${doc.boundaries.syllabus}\n- Memory: ${doc.boundaries.memory}\n\n## Warnings\n${doc.warnings.length ? doc.warnings.map(x=>`- ${x}`).join('\n') : '- none'}\n`;
+    return `# Project SSOT\n\n- Status: ${doc.status}\n- Schema: ${doc.schemaVersion}\n- Source: ${doc.provenance.source}\n- Generated: ${doc.provenance.generatedAt}\n- Reason: ${doc.provenance.reason}\n- Root: ${doc.project.root}\n- File count observed: ${doc.project.fileCount}\n\n## Detected Technologies\n${doc.project.technologies.length ? doc.project.technologies.map(x=>`- ${x}`).join('\n') : '- none detected'}\n\n## Project Structure\n${doc.project.structure.map(x=>`- ${x}`).join('\n') || '- empty'}\n\n## Context Boundaries\n- SSOT: ${doc.boundaries.ssot}\n- Syllabus: ${doc.boundaries.syllabus}\n- Memory: ${doc.boundaries.memory}\n\n## Warnings\n${doc.warnings.length ? doc.warnings.map(x=>`- ${x}`).join('\n') : '- none'}\n`;
   }
   async refresh(root, options={}) {
     const doc = await this.build(root, options);
