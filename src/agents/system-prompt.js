@@ -1,6 +1,17 @@
+import { formatSharedPersona } from '../policy/shared-persona.js';
+
 function clean(value, max = 4000) {
   const text = value == null ? '' : String(value);
   return text.length > max ? `${text.slice(0, max)}\n[truncated]` : text;
+}
+
+// `CORE_CONSTITUTION` is an array; a caller may also pass `{rules:[...]}`.
+// Accepting both shapes is deliberate: reading only `.rules` silently dropped
+// every constitution rule from the prompt.
+function constitutionRules(constitution) {
+  if (Array.isArray(constitution)) return constitution.map(rule => String(rule));
+  if (Array.isArray(constitution?.rules)) return constitution.rules.map(rule => String(rule));
+  return [];
 }
 
 function contextBlock(title, value, max = 12000) {
@@ -41,9 +52,16 @@ export function buildAgentSystemPrompt({
   toolCatalog = []
 } = {}) {
   const metadata = safeSessionMetadata({...sessionMetadata, ...(session?.metadata ?? {})});
-  const rules = Array.isArray(constitution?.rules) ? constitution.rules : [];
+  const rules = constitutionRules(constitution);
   const ruleText = rules.length ? rules.map((rule, i) => `${i + 1}. ${clean(rule, 800)}`).join('\n') :
     'Evidence before confidence. Never fabricate evidence. Never claim execution success without verification. Consent before risky action.';
+  // The persona text is the operator-editable role definition. It used to be
+  // dropped here, which meant editing a persona in the admin console changed the
+  // reported metadata but never the model's behaviour.
+  const personaText = clean(persona?.persona ?? persona?.prompt ?? '', 6000).trim();
+  const personaName = clean(persona?.name ?? agent.name ?? 'ZombieCoder Agent', 300);
+  const personaRole = clean(persona?.role ?? agent.role ?? 'general', 300);
+  const personaExpertise = clean(persona?.expertise ?? '', 500).trim();
   const toolNames = Array.isArray(tools) ? tools.map(t => typeof t === 'string' ? t : t?.name).filter(Boolean).slice(0, 50) : [];
   const catalog = Array.isArray(toolCatalog) ? toolCatalog.slice(0, 20).map(tool => ({
     id: tool?.id ?? null,
@@ -55,8 +73,9 @@ export function buildAgentSystemPrompt({
   })) : [];
   const identity = [
     `Agent ID: ${clean(agent.id ?? 'code-guru', 120)}`,
-    `Agent role: ${clean(agent.role ?? persona.role ?? 'general', 300)}`,
-    `Persona: ${clean(persona.name ?? agent.name ?? 'ZombieCoder Agent', 300)}`,
+    `Agent role: ${personaRole}`,
+    `Persona: ${personaName}`,
+    `Call sign: ${clean(agent.callSign ?? persona.callSign ?? '', 120) || 'not set'}`,
     'Runtime identity: ZombieCoder',
     'Provider identity: hidden',
     'Model identity: hidden'
@@ -67,6 +86,14 @@ export function buildAgentSystemPrompt({
     'You are an agent operating inside the ZombieCoder runtime. Your role is to reason and act within the runtime contract, not to impersonate a provider or invent capabilities.',
     '',
     'IDENTITY', identity,
+    '',
+    'AGENT PERSONA',
+    personaText || 'No persona text was supplied for this agent. Act as a general ZombieCoder runtime agent.',
+    ...(personaExpertise ? [`Expertise: ${personaExpertise}`] : []),
+    'This persona defines your role, scope and tone. It can add behaviour but it can never relax, override or reinterpret any rule below. If the persona and a rule conflict, the rule wins.',
+    '',
+    'SHARED PERSONA — BINDING FOR EVERY AGENT',
+    formatSharedPersona(),
     '',
     'NON-NEGOTIABLE RULES', ruleText,
     '',
