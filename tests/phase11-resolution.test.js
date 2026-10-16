@@ -36,6 +36,22 @@ test('extension resolver refuses disabled tool instead of bypassing registry sta
   await assert.rejects(() => resolver.resolve({toolIds:['example-tool']}), /tool_not_found_or_disabled/);
 });
 
+test('tool definitions refresh from code while an operator disable survives', async () => {
+  const store = new MemStore();
+  const tools = new ToolRegistry(store);
+  const seeded = await tools.list();
+  assert.ok(seeded.find(t => t.id === 'grep_search').metadata.toolSchema.properties.path, 'grep_search should declare path');
+  // Simulate a deployment seeded before `path` existed, where an operator had
+  // also switched the tool off. The definition must refresh; the switch must not.
+  const stale = seeded.map(t => t.id === 'grep_search'
+    ? { ...t, status:'DISABLED', metadata:{ ...t.metadata, toolSchema:{ type:'object', properties:{ pattern:{type:'string'} }, required:['pattern'], additionalProperties:false } } }
+    : t);
+  await store.write('tools', stale);
+  const after = (await tools.list()).find(t => t.id === 'grep_search');
+  assert.equal(after.status, 'DISABLED', 'operator disable must survive a code refresh');
+  assert.ok(after.metadata.toolSchema.properties.path, 'code-owned schema must refresh');
+});
+
 test('execution prepare resolves extensions but remains non-executing', async () => {
   const store = new MemStore();
   const resolver = new ExtensionResolver({
