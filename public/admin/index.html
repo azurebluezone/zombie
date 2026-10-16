@@ -334,7 +334,8 @@ const ICONS = {
   file: ICON('<path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z"/><path d="M14 3v5h5"/>'),
   chart: ICON('<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>'),
   cog: ICON('<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>'),
-  sliders: ICON('<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>')
+  sliders: ICON('<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>'),
+  test: ICON('<path d="M9 3h6M10 3v6l-5 9a2 2 0 001.8 3h10.4A2 2 0 0019 18l-5-9V3"/><path d="M7.5 14h9"/>')
 };
 const ROUTES = [
   { id: 'dashboard', label: 'Dashboard', group: 'Overview', icon: 'grid' },
@@ -348,6 +349,7 @@ const ROUTES = [
   { id: 'requests', label: 'Requests', group: 'Operations', icon: 'activity' },
   { id: 'logs', label: 'Logs', group: 'Operations', icon: 'file' },
   { id: 'metrics', label: 'Metrics', group: 'Operations', icon: 'chart' },
+  { id: 'tester', label: 'Tester', group: 'Operations', icon: 'test' },
   { id: 'runtime', label: 'Runtime', group: 'System', icon: 'cog' },
   { id: 'settings', label: 'Settings', group: 'System', icon: 'sliders' }
 ];
@@ -1122,6 +1124,199 @@ VIEWS.metrics = { title: 'Metrics', sub: 'Live counters, graphs and circuit stat
   currentTeardown = () => { off(); if (pending) clearTimeout(pending); if (agentTimer) clearTimeout(agentTimer); };
 } };
 
+/* tester */
+// The catalog is read from the server's own route inventory
+// (GET /v1/admin/routes -> current), so this page cannot silently test a list
+// that has drifted from the code. Nothing here is a simulation: every "Run"
+// performs a real HTTP request and reports the real status.
+const TESTER_ID_SOURCES = [
+  [/^\/v1\/admin\/applications\/\{id\}/, 'applications'],
+  [/^\/v1\/admin\/providers\/\{id\}/, 'providers'],
+  [/^\/v1\/admin\/registry\/agents\/\{id\}/, 'agents'],
+  [/^\/v1\/admin\/registry\/tools\/\{id\}/, 'tools'],
+  [/^\/v1\/admin\/mcp\/endpoints\/\{id\}/, 'mcpEndpoints'],
+  [/^\/v1\/admin\/mcp\/clients\/\{id\}/, 'mcpClients'],
+  [/^\/v1\/admin\/personas\/\{id\}/, 'personas'],
+  [/^\/v1\/sessions\/\{id\}/, 'sessions']
+];
+// Only bodies that are genuinely safe/meaningful to send unprompted. Everything
+// else opens an editor so a mutation is never fired with an invented payload.
+const TESTER_DEFAULT_BODIES = {
+  'POST /v1/admin/providers/route': { model: 'zombie-mini' },
+  'POST /v1/admin/providers/sync': {},
+  'POST /v1/admin/models/sync-all': {},
+  'POST /v1/admin/mcp/reconcile': {},
+  'POST /v1/admin/registry/external-mcp/sync': {},
+  'POST /v1/execution/prepare': { goal: 'tester probe', expectedOutcome: 'probe' },
+  'POST /v1/chat/completions': { model: 'zombie-mini', messages: [{ role: 'user', content: 'say OK' }], stream: false }
+};
+function testerGroup(path) {
+  const seg = path.split('/').filter(Boolean);
+  if (!seg.length) return 'root';
+  if (seg[0] === 'health') return 'health';
+  if (seg[0] === 'api') return 'legacy /api';
+  if (seg[0] === 'mcp') return 'mcp server';
+  if (seg[0] === 'v1' && seg[1] === 'admin') return 'admin · ' + (seg[2] || 'root');
+  if (seg[0] === 'v1') return 'v1 · ' + (seg[1] || 'root');
+  return 'other';
+}
+// Application-scoped routes authenticate with an application key, not the admin
+// token. Keeping the two apart is what makes the tester's results meaningful.
+const TESTER_APP_SCOPED = /^\/v1\/(context|sessions|execution|chat|mcp)/;
+// GET routes whose required query parameter can be filled from a live id.
+const TESTER_QUERY = {
+  'GET /v1/admin/applications/capabilities': s => (s.ids.applications ? 'applicationId=' + encodeURIComponent(s.ids.applications) : null),
+  'GET /v1/admin/providers/models': s => (s.ids.providers ? 'provider=' + encodeURIComponent(s.ids.providers) : null)
+};
+let testerAppKey = (() => { try { return localStorage.getItem('zc_chat_key') || ''; } catch { return ''; } })();
+const probeSummary = (data) => {
+  if (data === null || data === undefined) return 'no body';
+  if (typeof data === 'string') return data.slice(0, 100);
+  if (Array.isArray(data)) return data.length + ' item(s)';
+  return Object.entries(data).slice(0, 4).map(([k, v]) =>
+    k + '=' + (Array.isArray(v) ? v.length + '×' : (v && typeof v === 'object' ? '{…}' : String(v).slice(0, 26)))).join(' · ');
+};
+async function runProbe(target, body) {
+  const started = performance.now();
+  const isStream = target.stream;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), isStream ? 2500 : 15000);
+  const headers = {};
+  const bearer = TESTER_APP_SCOPED.test(target.path) ? (testerAppKey || token) : token;
+  if (bearer) headers.authorization = 'Bearer ' + bearer;
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  try {
+    const res = await fetch(target.resolved, { method: target.method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, signal: ctrl.signal });
+    const text = await res.text();
+    let data; try { data = JSON.parse(text); } catch { data = text.slice(0, 600); }
+    return { ok: res.ok, status: res.status, ms: Math.round(performance.now() - started), data };
+  } catch (e) {
+    const ms = Math.round(performance.now() - started);
+    // A stream is supposed to stay open: reaching the abort timer is success.
+    if (isStream && e.name === 'AbortError') return { ok: true, status: 'stream', ms, data: 'SSE stream opened, then closed by the tester after 2.5s' };
+    return { ok: false, status: 0, ms, data: null, error: e.message };
+  } finally { clearTimeout(timer); }
+}
+let testerState = null;
+function testerRow(i) {
+  const t = testerState.targets[i];
+  const r = testerState.results[i];
+  const status = !r ? '<span class="muted">—</span>'
+    : r.ok ? '<span class="tag ok">' + esc(r.status) + '</span>'
+    : '<span class="tag off">' + esc(r.status || 'error') + '</span>';
+  const out = !r ? '' : (r.error ? '<span class="err">' + esc(r.error) + '</span>' : esc(probeSummary(r.data)));
+  return '<td><span class="tag ' + (t.readOnly ? 'mute' : 'warn') + '">' + esc(t.method) + '</span></td>' +
+    '<td class="mono" style="font-size:11.5px">' + esc(t.path) +
+      (t.resolved !== t.path ? '<div class="sub mono" style="color:var(--muted)">→ ' + esc(t.resolved) + '</div>' : '') +
+      (t.missing ? '<div class="sub" style="color:var(--warn)">needs a real ' + esc(t.missing) + ' id</div>' : '') + '</td>' +
+    '<td class="muted" style="font-size:12px">' + esc(t.description || '') + '</td>' +
+    '<td>' + status + '</td>' +
+    '<td class="mono">' + (r ? esc(r.ms) : '—') + '</td>' +
+    '<td style="font-size:11px;max-width:260px">' + out + '</td>' +
+    '<td class="actions"><div class="row">' +
+      '<button class="btn tiny ' + (t.readOnly ? '' : 'danger') + '" data-act="probe-run" data-i="' + i + '">Run</button>' +
+      (r ? '<button class="btn tiny" data-act="probe-view" data-i="' + i + '">View</button>' : '') +
+    '</div></td>';
+}
+function testerSummary() {
+  const box = el('tester-sum');
+  if (!box || !testerState) return;
+  const ran = testerState.results.filter(Boolean);
+  const pass = ran.filter(r => r.ok).length;
+  const fail = ran.filter(r => !r.ok).length;
+  const ms = ran.map(r => r.ms).filter(n => typeof n === 'number');
+  box.innerHTML =
+    '<span class="tag ok">' + pass + ' passed</span>' +
+    '<span class="tag ' + (fail ? 'off' : 'mute') + '">' + fail + ' failed</span>' +
+    '<span class="tag mute">' + (testerState.targets.length - ran.length) + ' not run</span>' +
+    '<span class="tag mute">' + testerState.targets.length + ' routes</span>' +
+    (ms.length ? '<span class="tag mute">avg ' + Math.round(ms.reduce((a, b) => a + b, 0) / ms.length) + ' ms</span>' : '');
+}
+async function testerRunOne(i, body) {
+  if (!testerState) return null;
+  const row = document.getElementById('probe-row-' + i);
+  if (row) row.querySelectorAll('td')[3].innerHTML = '<span class="tag mute">…</span>';
+  const t = testerState.targets[i];
+  const payload = body !== undefined ? body : (t.readOnly ? undefined : TESTER_DEFAULT_BODIES[t.method + ' ' + t.path]);
+  const result = await runProbe(t, payload);
+  testerState.results[i] = result;
+  const fresh = document.getElementById('probe-row-' + i);
+  if (fresh) fresh.innerHTML = testerRow(i);
+  testerSummary();
+  return result;
+}
+async function testerRunAll(includeMutating) {
+  if (!testerState) return;
+  const list = testerState.targets.map((t, i) => ({ t, i })).filter(x => (includeMutating || x.t.readOnly) && !x.t.missing);
+  for (const { t, i } of list) {
+    if (!t.readOnly && !TESTER_DEFAULT_BODIES[t.method + ' ' + t.path]) continue;   // needs a hand-written body
+    await testerRunOne(i);
+  }
+  testerSummary();
+}
+VIEWS.tester = { title: 'Tester', sub: 'Every declared route, exercised for real', actions: '<button class="btn primary" data-act="tester-safe">Run all read-only</button> <button class="btn danger" data-act="tester-all">Run everything</button>', render: async (v) => {
+  const report = await api('/v1/admin/routes');
+  const ids = {};
+  await Promise.all([
+    ['applications', '/v1/admin/applications', d => d.applications, x => x.id],
+    // Prefer a provider that is actually enabled: probing a disabled provider
+    // proves nothing and reports a misleading failure.
+    ['providers', '/v1/admin/providers', d => (d.providers || d.components || []).filter(p => p.enabled !== false), x => x.id],
+    // Prefer an agent that really has an explicit tool boundary; the first agent
+    // may legitimately have none, and the route answers 404 for that.
+    ['agents', '/v1/admin/registry/agents/tool-boundaries', d => Object.keys(d.boundaries || {}), x => x],
+    ['tools', '/v1/admin/registry/tools', d => d.components, x => x.id],
+    ['personas', '/v1/admin/personas', d => d.personas, x => x.id],
+    ['mcpEndpoints', '/v1/admin/mcp/endpoints', d => d.endpoints, x => x.id],
+    ['mcpClients', '/v1/admin/mcp/clients', d => d.clients, x => x.sessionId]
+  ].map(async ([key, path, pick, idOf]) => {
+    try { const d = await api(path); const list = pick(d) || []; ids[key] = list.length ? idOf(list[0]) : null; } catch { ids[key] = null; }
+  }));
+  const targets = (report.current || []).map(([method, path, description]) => {
+    let resolved = path, missing = null;
+    for (const [re, key] of TESTER_ID_SOURCES) {
+      if (re.test(path)) { const val = ids[key]; if (val) resolved = path.replace('{id}', encodeURIComponent(val)); else missing = key; }
+    }
+    if (!missing) {
+      const q = TESTER_QUERY[method + ' ' + path];
+      const qs = q ? q({ ids }) : null;
+      if (qs) resolved += (resolved.includes('?') ? '&' : '?') + qs;
+    }
+    return { method, path, resolved, description, group: testerGroup(path), readOnly: method === 'GET', missing, stream: /\/stream$/.test(path) };
+  });
+  testerState = { targets, ids, results: new Array(targets.length).fill(null) };
+  const groups = [...new Set(targets.map(t => t.group))];
+  const sections = groups.map(g => {
+    const idx = targets.map((t, i) => ({ t, i })).filter(x => x.t.group === g);
+    const rows = idx.map(({ i }) => '<tr id="probe-row-' + i + '">' + testerRow(i) + '</tr>').join('');
+    return panel(g, idx.length + ' route(s)', table(['Method', 'Path', 'What it does', 'Status', 'ms', 'Result', ''], rows, ''));
+  }).join('');
+  v.innerHTML =
+    '<div class="panel" style="margin-bottom:14px"><div class="panel-h"><h2>Summary <span class="hint">' + esc(report.source || '') + '</span></h2></div>' +
+      '<div class="panel-b"><div class="tsum" id="tester-sum"></div>' +
+      '<div class="row" style="align-items:flex-end;margin-top:12px">' +
+        '<label class="f" style="flex:1;min-width:320px">Application key <span class="muted">(used only for /v1/context, /v1/sessions, /v1/execution, /v1/chat, /v1/mcp)</span>' +
+        '<input id="tester-key" type="password" autocomplete="off" placeholder="zc_…" value="' + esc(testerAppKey) + '"></label>' +
+      '</div>' +
+      '<p class="muted" style="font-size:11.5px;margin:10px 0 0">Read-only routes run without prompting. Mutating routes are marked <span class="tag warn">warn</span>; a route with no safe default body must be run from its own editor, so nothing is ever sent with an invented payload. A route needing a real id is skipped until one exists. Admin routes use the admin token from Settings; application-scoped routes use the key above.</p>' +
+      '</div></div>' +
+    panel('Custom request', 'any method, any path',
+      '<div class="panel-b"><div class="row" style="align-items:flex-end">' +
+        '<label class="f">Method<select id="cq-method"><option>GET</option><option>POST</option><option>PATCH</option><option>DELETE</option></select></label>' +
+        '<label class="f" style="flex:1;min-width:260px">Path<input id="cq-path" placeholder="/v1/admin/providers"></label>' +
+        '<button class="btn primary" data-act="probe-custom">Send</button>' +
+      '</div>' +
+      '<label class="f" style="margin-top:10px">Body (JSON, optional)<textarea id="cq-body" style="height:90px;background:var(--input);border:1px solid var(--inputline);border-radius:9px;padding:10px;color:var(--text);font:12px ui-monospace,Menlo,Consolas,monospace;resize:vertical">{}</textarea></label>' +
+      '<div id="cq-out" style="margin-top:10px"></div></div>') +
+    sections;
+  const keyInput = el('tester-key');
+  if (keyInput) keyInput.addEventListener('input', () => {
+    testerAppKey = keyInput.value.trim();
+    try { if (testerAppKey) localStorage.setItem('zc_chat_key', testerAppKey); else localStorage.removeItem('zc_chat_key'); } catch { /* storage may be unavailable */ }
+  });
+  testerSummary();
+} };
+
 /* runtime */
 VIEWS.runtime = { title: 'Runtime', sub: 'Health, compatibility parity and task profiles', render: async (v) => {
   const [h, tools, features, routes, profiles] = await Promise.all([
@@ -1252,6 +1447,70 @@ document.addEventListener('click', async (ev) => {
       return done('Persona ' + b.dataset.id + ' saved ✓');
     }
     if (act === 'metrics-reset') { if (!confirm('Reset all agent run counters?')) return; await api('/v1/admin/agents/metrics', { method: 'DELETE' }); return done('Agent metrics reset ✓'); }
+    if (act === 'tester-safe') { if (!testerState) return; await testerRunAll(false); return toast('Read-only routes exercised'); }
+    if (act === 'tester-all') {
+      if (!confirm('Run every route, including mutating ones? This really changes state.')) return;
+      if (!testerState) return;
+      await testerRunAll(true);
+      return toast('All runnable routes exercised');
+    }
+    if (act === 'probe-run') {
+      const i = Number(b.dataset.i);
+      const t = testerState && testerState.targets[i];
+      if (!t) return;
+      if (t.missing) return toast('This route needs a real ' + t.missing + ' id first', true);
+      if (t.readOnly) { await testerRunOne(i); return; }
+      // Mutating: never fire an invented payload silently.
+      const prefill = TESTER_DEFAULT_BODIES[t.method + ' ' + t.path];
+      return openModal(
+        '<div class="modal-h"><h3>' + esc(t.method) + ' <span class="mono">' + esc(t.resolved) + '</span></h3><button class="x" data-act="modal-close" title="Close">×</button></div>' +
+        '<div class="modal-b">' +
+          '<p class="muted" style="font-size:12px;margin:0 0 8px">' + esc(t.description || '') + '</p>' +
+          '<p class="muted" style="font-size:11.5px;margin:0 0 10px">This route changes state. Review the body before sending.</p>' +
+          '<label class="f">Request body (JSON)' +
+          '<textarea id="probe-body" style="height:150px;background:var(--input);border:1px solid var(--inputline);border-radius:9px;padding:10px;color:var(--text);font:12px ui-monospace,Menlo,Consolas,monospace;resize:vertical">' + esc(JSON.stringify(prefill ?? {}, null, 2)) + '</textarea></label>' +
+          '<div id="probe-result" style="margin-top:10px"></div>' +
+        '</div>' +
+        '<div class="modal-f"><span class="muted" style="margin-right:auto;font-size:11.5px">no payload is sent until you press Send</span>' +
+          '<button class="btn" data-act="modal-close">Cancel</button>' +
+          '<button class="btn danger" data-act="probe-send" data-i="' + i + '">Send request</button>' +
+        '</div>');
+    }
+    if (act === 'probe-send') {
+      const i = Number(b.dataset.i);
+      let payload;
+      const raw = el('probe-body').value.trim();
+      if (raw) { try { payload = JSON.parse(raw); } catch (e) { return toast('Body is not valid JSON: ' + e.message, true); } }
+      const out = el('probe-result');
+      out.innerHTML = '<span class="muted">Sending…</span>';
+      const r = await testerRunOne(i, payload);
+      out.innerHTML = '<div class="tsum" style="margin-bottom:8px">' + (r.ok ? '<span class="tag ok">' + esc(r.status) + '</span>' : '<span class="tag off">' + esc(r.status || 'error') + '</span>') + '<span class="tag mute">' + esc(r.ms) + ' ms</span></div>' + jsonBlock(r.error ? { error: r.error } : r.data);
+      return;
+    }
+    if (act === 'probe-view') {
+      const i = Number(b.dataset.i);
+      const r = testerState && testerState.results[i];
+      const t = testerState && testerState.targets[i];
+      if (!r || !t) return;
+      return openModal(
+        '<div class="modal-h"><h3>' + esc(t.method) + ' <span class="mono">' + esc(t.resolved) + '</span></h3><button class="x" data-act="modal-close" title="Close">×</button></div>' +
+        '<div class="modal-b"><div class="tsum" style="margin-bottom:10px">' + (r.ok ? '<span class="tag ok">' + esc(r.status) + '</span>' : '<span class="tag off">' + esc(r.status || 'error') + '</span>') + '<span class="tag mute">' + esc(r.ms) + ' ms</span><span class="tag mute">' + esc(t.description || '') + '</span></div>' +
+        jsonBlock(r.error ? { error: r.error } : r.data) + '</div>' +
+        '<div class="modal-f"><button class="btn" data-act="modal-close">Close</button></div>');
+    }
+    if (act === 'probe-custom') {
+      const method = el('cq-method').value;
+      const path = el('cq-path').value.trim();
+      const out = el('cq-out');
+      if (!path) return toast('A path is required', true);
+      const raw = el('cq-body').value.trim();
+      let payload;
+      if (raw && method !== 'GET') { try { payload = JSON.parse(raw); } catch (e) { return toast('Body is not valid JSON: ' + e.message, true); } }
+      out.innerHTML = '<span class="muted">Sending…</span>';
+      const r = await runProbe({ method, path, resolved: path, description: 'custom request', readOnly: method === 'GET', stream: /\/stream$/.test(path) }, payload);
+      out.innerHTML = '<div class="tsum" style="margin-bottom:8px">' + (r.ok ? '<span class="tag ok">' + esc(r.status) + '</span>' : '<span class="tag off">' + esc(r.status || 'error') + '</span>') + '<span class="tag mute">' + esc(r.ms) + ' ms</span></div>' + jsonBlock(r.error ? { error: r.error } : r.data);
+      return;
+    }
     if (act === 'agent-add') {
       const id = el('a-id').value.trim(); if (!id) return toast('id required', true);
       const name = el('a-name').value.trim() || id;

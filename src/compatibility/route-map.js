@@ -128,6 +128,23 @@ export const CURRENT_ROUTE_MAP = Object.freeze([
   ['POST','/v1/execution/run','execution'],
   ['POST','/v1/execution/stream','execution streaming'],
   ['POST','/v1/chat/completions','OpenAI-compatible chat'],
+  ['GET','/v1/admin/logs','runtime log tail'],
+  ['GET','/v1/admin/logs/stream','runtime log live stream (SSE)'],
+  ['GET','/v1/admin/agents/metrics','agent run metrics'],
+  ['DELETE','/v1/admin/agents/metrics','agent run metrics reset'],
+  ['GET','/v1/admin/metrics','runtime metrics'],
+  ['GET','/v1/admin/models','model catalog'],
+  ['POST','/v1/admin/models/sync-all','model catalog sync (all providers)'],
+  ['GET','/v1/admin/masking-models','masking model catalog'],
+  ['GET','/v1/admin/agent-model-mappings','agent to model mappings'],
+  ['PATCH','/v1/admin/registry/tools/{id}','tool status update'],
+  ['POST','/v1/admin/providers/{id}/test','provider live test'],
+  ['PATCH','/v1/admin/personas/{id}','persona update'],
+  ['DELETE','/v1/admin/personas/{id}','persona deletion'],
+  ['GET','/v1/admin/mcp/server','inbound MCP server status'],
+  ['GET','/v1/admin/mcp/clients','inbound MCP client sessions'],
+  ['DELETE','/v1/admin/mcp/clients/{id}','inbound MCP client disconnect'],
+  ['DELETE','/v1/admin/mcp/endpoints/{id}','MCP endpoint removal'],
 ]);
 
 export const LEGACY_ROUTE_COUNT = LEGACY_ROUTE_MAP.length;
