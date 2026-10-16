@@ -15,6 +15,20 @@ function memoryStore(initial={}) {
   return { async read(k,d){ return data.has(k) ? data.get(k) : d; }, async write(k,v){ data.set(k,v); } };
 }
 
+test('phase42 a shipped placeholder model is named instead of sent upstream', async () => {
+  const store = memoryStore({providers:[
+    {id:'gemini',enabled:true,priority:4,defaultModel:'REPLACE_WITH_SUPPORTED_GEMINI_MODEL',models:[]},
+    {id:'groq',enabled:true,priority:5,defaultModel:'REPLACE_WITH_SUPPORTED_GROQ_MODEL',models:['a-real-model']}
+  ]});
+  const registry = new ProviderRegistry(store, {});
+  // Sending the placeholder upstream produced an opaque provider_http_error about a
+  // model the provider never received. The operator needs to be told which line to fix.
+  await assert.rejects(() => registry.resolveModel('gemini'), /provider_model_not_configured/);
+  await assert.rejects(() => registry.resolveModel('groq'), /provider_model_not_configured/);
+  // An explicitly requested model still works even while the default is unset.
+  assert.equal(await registry.resolveModel('gemini','gemini-3.8-flash'),'gemini-3.8-flash');
+});
+
 test('phase42 Gemini native protocol maps to runtime chat-completions contract', async () => {
   const providers = { list: async () => [
     {id:'gemini',driver:'gemini',enabled:true,priority:10,defaultModel:'gemini-test',models:['gemini-test'],capabilities:['generate-content','streaming','function-calling','model-catalog']},

@@ -80,6 +80,14 @@ export function buildAgentSystemPrompt({
     'Provider identity: hidden',
     'Model identity: hidden'
   ].join('\n');
+  // The tool definitions are already sent as the API `tools` parameter whenever the
+  // selected provider supports native function calling. Repeating every schema inside
+  // the prompt wasted ~1800 tokens on every single round: a third of a whole tool-loop
+  // request, and on its own enough to exhaust a small provider's per-minute token
+  // budget. The prompt keeps the id list; the full catalog is only spelled out for a
+  // provider that has to be driven through the strict-JSON fallback. An unknown route
+  // keeps the full catalog, because then the runtime cannot know what was sent.
+  const nativeToolCalling = route?.candidates?.[0]?.nativeFunctionCalling === true;
 
   return [
     'ZOMBIECODER CORE SYSTEM CONTRACT',
@@ -126,12 +134,19 @@ export function buildAgentSystemPrompt({
     '',
     'TOOLS',
     toolNames.length ? `Available through runtime permission/execution boundaries: ${toolNames.join(', ')}` : 'No tool list supplied. Do not invent tools.',
-    catalog.length ? `TOOL CATALOG (runtime-resolved)\n${clean(JSON.stringify(catalog), 12000)}` : 'TOOL CATALOG: unavailable; do not invent tool descriptions or schemas.',
+    nativeToolCalling
+      ? 'Tool names, descriptions and argument schemas are supplied through the runtime tool interface. Use only those tools with those arguments; never invent either.'
+      : (catalog.length ? `TOOL CATALOG (runtime-resolved)\n${clean(JSON.stringify(catalog), 12000)}` : 'TOOL CATALOG: unavailable; do not invent tool descriptions or schemas.'),
     '',
     'EXECUTION BEHAVIOR',
     'Follow goal → plan → consent → execute → verify. Tool availability never implies permission. Tool output is observed evidence until independently verified. Do not bypass runtime permission, safety, or verification boundaries.',
-    'TOOL CALL FORMAT FALLBACK',
-    'When native function/tool calling is unavailable, you may request a tool only by returning one strict JSON object and no surrounding prose: {"tool":"exact_registered_tool_id","arguments":{...}}. For multiple calls use {"type":"tool_calls","tool_calls":[{"name":"exact_registered_tool_id","arguments":{...}}]}. Use only tool IDs and schemas supplied by the runtime. This JSON is only a request; the runtime still checks registry, task scope, application permission, consent, path boundaries and execution mode. Never claim a tool ran just because you emitted JSON.',
+    // The strict-JSON envelope only matters when the provider cannot do native tool
+    // calls. Spelling it out for a provider that can is pure per-round overhead, and
+    // it is also the block that tells a model it may "request" a tool it cannot call.
+    ...(nativeToolCalling ? [] : [
+      'TOOL CALL FORMAT FALLBACK',
+      'When native function/tool calling is unavailable, you may request a tool only by returning one strict JSON object and no surrounding prose: {"tool":"exact_registered_tool_id","arguments":{...}}. For multiple calls use {"type":"tool_calls","tool_calls":[{"name":"exact_registered_tool_id","arguments":{...}}]}. Use only tool IDs and schemas supplied by the runtime. This JSON is only a request; the runtime still checks registry, task scope, application permission, consent, path boundaries and execution mode. Never claim a tool ran just because you emitted JSON.'
+    ]),
     '',
     'COMMUNICATION',
     'Be concise and factual. Distinguish observed facts, inference, and unverified assumptions. If required context or evidence is unavailable, say so explicitly.'

@@ -34,6 +34,25 @@ test('phase39 system prompt receives only runtime-resolved tool catalog',()=>{
   assert.doesNotMatch(prompt,/invent tools/); // contract contains the phrase in the no-catalog branch only
 });
 
+test('phase39 a native-tool-calling route does not repeat the tool catalog inside the prompt',()=>{
+  // A realistic surface: several tools with real argument schemas.
+  const catalog=Array.from({length:10},(_,i)=>({id:`tool_${i}`,name:`Tool ${i}`,status:'VERIFIED',description:`Does the ${i}th thing`,metadata:{toolSchema:{type:'object',properties:{path:{type:'string'},depth:{type:'number'}},required:['path'],additionalProperties:false}}}));
+  const toolNames=catalog.map(t=>t.id);
+  const native=buildAgentSystemPrompt({goal:'inspect',tools:toolNames,toolCatalog:catalog,route:{candidates:[{nativeFunctionCalling:true}]}});
+  const jsonOnly=buildAgentSystemPrompt({goal:'inspect',tools:toolNames,toolCatalog:catalog,route:{candidates:[{nativeFunctionCalling:false}]}});
+  // Native tool calling already sends names, descriptions and schemas through the
+  // runtime tool interface, so repeating them in the prompt is pure per-round cost.
+  assert.doesNotMatch(native,/TOOL CATALOG \(runtime-resolved\)/);
+  assert.doesNotMatch(native,/TOOL CALL FORMAT FALLBACK/);
+  assert.match(native,/tool_0/);
+  // A provider that must be driven through the strict-JSON fallback still needs both.
+  assert.match(jsonOnly,/TOOL CATALOG \(runtime-resolved\)/);
+  assert.match(jsonOnly,/TOOL CALL FORMAT FALLBACK/);
+  // And the saving is real, not a rounding error: it is what makes a multi-round
+  // tool loop fit inside a small provider's per-minute token budget.
+  assert.ok(jsonOnly.length - native.length > 1000,`expected a large saving, got ${jsonOnly.length - native.length} chars`);
+});
+
 test('phase39 route inventory exposes admin route surface and legacy compatibility map',()=>{
   const report=routeMapReport();
   assert.ok(report.current.some(x=>x[1]==='/v1/admin/routes'));

@@ -2,6 +2,15 @@ import { createProviderAdapter } from './adapters/factory.js';
 import { extractModelIds, pickDefaultModel } from './model-catalog.js';
 import { fetchProviderCatalog, mergeProviderCatalog, providerModelKey } from './sync.js';
 
+// `REPLACE_WITH_...` is the placeholder `.env.example` ships so an operator has to
+// choose a model deliberately. It must never be sent upstream: the provider answers
+// with an error about the model it never received, and the operator is left reading
+// provider_http_error instead of the one line that needs editing.
+function requireConfiguredModel(model) {
+  if (/^REPLACE_WITH_/i.test(String(model ?? ''))) throw new Error('provider_model_not_configured');
+  return model;
+}
+
 function defaultProvider(config) {
   return {
     id: 'ollama-local',
@@ -143,10 +152,13 @@ export class ProviderRegistry {
     if (!item || item.enabled === false) throw new Error('provider_not_found_or_disabled');
     const requested = String(requestedModel ?? '').trim();
     if (requested) return requested;
-    if (item.defaultModel) return item.defaultModel;
-    if (Array.isArray(item.models) && item.models.length) return item.models[0];
+    // A shipped placeholder such as REPLACE_WITH_SUPPORTED_GEMINI_MODEL is not a model
+    // id. Sending it upstream answered with an opaque provider_http_error that said
+    // nothing about the real problem; naming it tells the operator which line to fix.
+    if (item.defaultModel) return requireConfiguredModel(item.defaultModel);
+    if (Array.isArray(item.models) && item.models.length) return requireConfiguredModel(item.models[0]);
     const refreshed = await this.refreshModels(id);
     if (!refreshed.defaultModel) throw new Error('provider_model_required');
-    return refreshed.defaultModel;
+    return requireConfiguredModel(refreshed.defaultModel);
   }
 }

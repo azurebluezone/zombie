@@ -1269,22 +1269,44 @@ const requestHandler = async (req,res) => {
       if (input.autoToolLoop === true) {
         if (config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled'});
         // An agent's persisted access scope decides both the tool surface and the
-        // project root. The scope is "all" tools, so the surface is the whole
-        // runnable registry rather than the task-policy intersection.
+        // project root. The scope is "all" tools, so the default surface is the whole
+        // runnable registry.
         const agentId=String(input.agent??input.persona??'code-guru');
         requestState.agentId=agentId;
         const agentScope=await resolveAgentScope(agentId,{requestedRoot:input.projectRoot,requestedWorkingDirectory:input.workingDirectory});
-        const agentToolIds=agentScope.access.toolSurface==='all'?await runnableToolIds():input.toolIds;
+        // A request that names tools narrows the surface for that request; it does not
+        // restrict the agent. Sending the whole registry for a one-tool task costs
+        // ~2000 tokens on every round, which both distracts the model and, on its own,
+        // can exceed a small provider's per-minute budget (a free tier can be 7000
+        // input tokens per minute). A request that names no tools still gets the full
+        // surface, so "unrestricted by default" is unchanged.
+        const fullSurface=agentScope.access.toolSurface==='all'?await runnableToolIds():input.toolIds;
+        const agentToolIds=requestedChatTools.length?fullSurface.filter(id=>requestedChatTools.includes(id)):fullSurface;
         input={...input,toolIds:agentToolIds,allowedToolIds:agentToolIds};
+        // The persisted scope, not the task-policy profile, decided this surface, so
+        // the reported policy must not claim a tool was denied while the run offers it.
+        const reportedTaskPolicy=agentScope.access.toolSurface==='all'
+          ? {...taskPolicy,toolSurfaceMinimal:false,effectiveToolIds:agentToolIds,deniedRequestedTools:[]}
+          : taskPolicy;
         const registeredNativeTools=(await toolsRegistry.list()).filter(t=>input.toolIds.includes(t.id)&&t.entry&&['ENABLED','VERIFIED'].includes(t.status));
         if (!registeredNativeTools.length) return send(res,400,{error:'no_registered_tool_allowed_for_task',taskProfile:taskPolicy.profileId,requestedToolIds:requestedChatTools});
         const toolDefinitions=registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}}));
         const toolBindings={...(input.toolBindings??{}),...Object.fromEntries(registeredNativeTools.map(t=>[t.id,{toolId:t.id}]))};
         const projectRoot=agentScope.projectRoot;
+        // The tool loop is the path that actually works on a project, so it must carry
+        // the same compiled project context as plain chat. Without this the agent was
+        // told "SSOT: unavailable" even when SSOT.md existed — the one path where the
+        // project facts matter most was the one path that never loaded them.
+        if (projectRoot) await autoSetup.ensure(projectRoot);
+        const toolLoopProject=projectRoot?await ssot.read(projectRoot):null;
+        const toolLoopMemory=projectRoot?await memory.recent(projectRoot,10):null;
+        const toolLoopSyllabus=projectRoot?await syllabus.read(projectRoot):null;
+        const toolLoopUserMessage=String(input.messages?.filter?.(m=>m?.role==='user').at(-1)?.content??chatGoal);
+        const toolLoopCompiledContext=compileContext({goal:chatGoal,userInput:toolLoopUserMessage,recent:Array.isArray(input.messages)?input.messages:[],memory:toolLoopMemory??[],ssot:toolLoopProject,syllabus:toolLoopSyllabus,projectRoot,workingDirectory:input.workingDirectory??projectRoot,sessionId:input.sessionId??null,taskPolicy:reportedTaskPolicy,maxBytes:config.compiledContextBytes,recentLimit:config.contextRecentMessages});
         const agentPrepared=await agentRunner.prepare({agentId,personaId:agentId,goal:chatGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
         requestState.agentId=agentPrepared.agent?.id ?? agentId;
         const route=await smartRouter.route({...input,tools:toolDefinitions,allowJsonToolFallback:true});
-        const systemMessage=buildSystemMessage({constitution:CORE_CONSTITUTION,agent:agentPrepared.agent,persona:agentPrepared.persona,goal:chatGoal,expectedOutcome:input.expectedOutcome,projectRoot,route,tools:input.toolIds,toolCatalog:registeredNativeTools});
+        const systemMessage=buildSystemMessage({constitution:CORE_CONSTITUTION,agent:agentPrepared.agent,persona:agentPrepared.persona,goal:chatGoal,expectedOutcome:input.expectedOutcome,projectRoot,ssot:toolLoopProject,syllabus:toolLoopSyllabus,memory:toolLoopMemory,route,tools:input.toolIds,toolCatalog:registeredNativeTools,compiledContext:toolLoopCompiledContext});
         const prepared=await execution.prepare({...input,goal:chatGoal,toolIds:input.toolIds,allowedToolIds:input.allowedToolIds,consent:input.consent===true});
         if (!prepared.consent.allowed) return send(res,409,{error:'execution_consent_required',prepared});
         const executionContext=createExecutionContext({...input,applicationId:app.id,sessionId:input.sessionId ?? null,requestId,projectRoot:agentScope.workspaceRoot,workingDirectory:input.workingDirectory??agentScope.workspaceRoot,allowAnyPath:agentScope.access.allowAnyRoot,allowAnyCommand:agentScope.access.allowAnyRoot,agentId,goal:chatGoal,expectedOutcome:input.expectedOutcome,transport:'http-chat'},runtimeIdentity);
@@ -1323,7 +1345,7 @@ const requestHandler = async (req,res) => {
         // tool.execution.*).
         const toolLoopPublicModel=result.response?.model ?? route.publicModel ?? null;
         const toolLoopRoute={routeId:route.routeId,providerId:'masked',model:route.publicModel || toolLoopPublicModel,publicModel:route.publicModel || toolLoopPublicModel,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status};
-        return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,agentAccess:agentScope.access,toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id)},evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy}});
+        return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,agentAccess:agentScope.access,toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id)},evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy:reportedTaskPolicy}});
       }
       if (input.stream === true) {
         const streamContext = await contexts.resolve(input);
@@ -1531,7 +1553,7 @@ const requestHandler = async (req,res) => {
     }
     return send(res,404,{error:'not_found'});
   } catch (e) {
-    const publicErrors = new Set(['runtime_instance_already_locked','uds_path_already_exists','tool_not_permitted','tool_entry_outside_tool_root','tool_entry_symlink_escape','execution_path_outside_project_root','execution_working_directory_outside_project_root','execution_path_symlink_escape','project_root_required','invalid_json_body','request_body_too_large','application_unauthorized_or_expired','admin_unauthorized','provider_not_found_or_disabled','provider_model_required','no_provider_route_available','provider_streaming_not_supported','execution_consent_required','execution_contract_required','qualified_tool_required','mcp_tool_not_permitted','mcp_https_url_required','mcp_endpoint_not_found','mcp_tool_not_found','mcp_tool_arguments_must_be_object','mcp_response_too_large','mcp_invalid_response','mcp_timeout','project_root_not_allowed','project_root_not_found','application_id_required','application_not_found','application_id_and_tool_required','tool_disabled_by_configuration','outbound_circuit_open']);
+    const publicErrors = new Set(['runtime_instance_already_locked','uds_path_already_exists','tool_not_permitted','tool_entry_outside_tool_root','tool_entry_symlink_escape','execution_path_outside_project_root','execution_working_directory_outside_project_root','execution_path_symlink_escape','project_root_required','invalid_json_body','request_body_too_large','application_unauthorized_or_expired','admin_unauthorized','provider_not_found_or_disabled','provider_model_required','provider_model_not_configured','no_provider_route_available','provider_streaming_not_supported','execution_consent_required','execution_contract_required','qualified_tool_required','mcp_tool_not_permitted','mcp_https_url_required','mcp_endpoint_not_found','mcp_tool_not_found','mcp_tool_arguments_must_be_object','mcp_response_too_large','mcp_invalid_response','mcp_timeout','project_root_not_allowed','project_root_not_found','application_id_required','application_not_found','application_id_and_tool_required','tool_disabled_by_configuration','outbound_circuit_open']);
     const message = String(e?.message ?? 'request_failed');
     // A provider that answered 429 is not a generic failure: it is an instruction
     // to wait and retry, and the upstream `retry-after` is the only honest source
