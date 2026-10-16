@@ -319,6 +319,33 @@ function openPersonaModal(p, agentId) {
   );
 }
 
+// Tool-access scope editor. Every agent already reaches the whole runnable tool
+// registry; this only decides where those tools may operate.
+function openAgentAccessModal(a) {
+  const id = a.id;
+  const mode = a.toolBoundary === 'working-directory' ? 'working-directory' : 'global';
+  openModal(
+    '<div class="modal-h"><h3>Tool access · ' + esc(a.name || id) + ' <span class="mono muted">' + esc(id) + '</span></h3><button class="x" data-act="modal-close" title="Close">×</button></div>' +
+    '<div class="modal-b">' +
+      '<label class="f">Boundary<select id="aa-mode">' +
+        '<option value="global"' + (mode === 'global' ? ' selected' : '') + '>global — any folder on the host</option>' +
+        '<option value="working-directory"' + (mode === 'working-directory' ? ' selected' : '') + '>working-directory — only the directory below</option>' +
+      '</select></label>' +
+      '<label class="f">Working directory<input id="aa-dir" value="' + esc(a.workingDirectory || '') + '" placeholder="/absolute/path" style="min-width:380px"></label>' +
+      '<p class="muted" style="font-size:11.5px;margin:6px 0 0">' +
+        'All tools are available to every agent. The boundary decides where they may operate: ' +
+        '<span class="mono">global</span> accepts any existing folder and any command cwd, while ' +
+        '<span class="mono">working-directory</span> refuses a file path or a command cwd outside the directory above.' +
+      '</p>' +
+      '<div id="aa-status" class="muted" style="font-size:11.5px;margin-top:8px">stored in the agents table as tool_boundary / working_directory</div>' +
+    '</div>' +
+    '<div class="modal-f">' +
+      '<button class="btn" data-act="modal-close">Cancel</button>' +
+      '<button class="btn primary" data-act="agent-access-save" data-id="' + esc(id) + '">Save access</button>' +
+    '</div>'
+  );
+}
+
 /* --------------------------------------------------------------- nav/router */
 const ICON = p => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + p + '</svg>';
 const ICONS = {
@@ -639,6 +666,16 @@ VIEWS['masking-models'] = { title: 'Masking Models', sub: 'Public routing aliase
 } };
 
 /* agents */
+// The agent tool-access scope. `global` means any folder on the host;
+// `working-directory` pins every tool to the agent's own directory.
+function scopeCell(a, au) {
+  const mode = a.toolBoundary === 'working-directory' ? 'working-directory' : 'global';
+  const badge = mode === 'working-directory'
+    ? '<span class="tag warn">working-directory</span><div class="sub mono">' + esc(a.workingDirectory || 'not set') + '</div>'
+    : '<span class="tag ok">global</span><div class="sub muted">any folder · all tools</div>';
+  const tools = au ? '<div class="sub">' + (au.toolIds || []).length + ' explicit tool(s)</div>' : '';
+  return badge + tools;
+}
 VIEWS.agents = { title: 'Agents', sub: 'Registry, personas, run metrics and runtime audit', actions: '<button class="btn danger" data-act="metrics-reset">Reset metrics</button>', render: async (v) => {
   const [{ components }, { personas }, { metrics }, audit] = await Promise.all([
     api('/v1/admin/registry/agents'),
@@ -667,7 +704,7 @@ VIEWS.agents = { title: 'Agents', sub: 'Registry, personas, run metrics and runt
         (au && au.personaMatch === false ? ' <span class="tag off">persona mismatch</span>' : '') + '</div></td>' +
       '<td>' + (p ? '<strong>' + esc(p.name || p.id) + '</strong><div class="sub">' + esc(p.role || '') + '</div><div class="sub muted">' + esc((p.persona || '').slice(0, 70)) + '…</div>' : '<span class="tag off">no persona</span>') + '</td>' +
       '<td>' + esc((a.capabilities || []).join(', ')) + '</td>' +
-      '<td>' + (au ? '<span class="mono">' + esc(au.toolBoundary || '') + '</span><div class="sub">' + (au.toolIds || []).length + ' tool(s)</div>' : '<span class="muted">—</span>') + '</td>' +
+      '<td>' + scopeCell(a, au) + '</td>' +
       '<td>' + (runs ? '<span class="tag ok">' + (m.success) + '</span> <span class="tag ' + (fail ? 'off' : 'mute') + '">' + fail + '</span>' +
           '<div class="sub">' + runs + ' run(s)' + (okRate === null ? '' : ' · ' + okRate + '% ok') + '</div>' : '<span class="muted">no runs yet</span>') + '</td>' +
       '<td>' + (m && m.averageLatencyMs != null ? esc(m.averageLatencyMs) + ' ms' : '<span class="muted">—</span>') +
@@ -675,6 +712,7 @@ VIEWS.agents = { title: 'Agents', sub: 'Registry, personas, run metrics and runt
       '<td>' + (m ? statusTag(m.lastOutcome) : '<span class="muted">—</span>') + (m && m.lastModel ? '<div class="sub mono">' + esc(m.lastModel) + '</div>' : '') + '</td>' +
       '<td class="actions"><div class="row">' +
         '<button class="btn tiny primary" data-act="persona-edit" data-id="' + esc(a.id) + '">Edit persona</button>' +
+        '<button class="btn tiny" data-act="agent-access" data-id="' + esc(a.id) + '">Access</button>' +
         '<button class="btn tiny ' + (a.enabled === false ? 'primary' : 'danger') + '" data-act="agent-toggle" data-id="' + esc(a.id) + '" data-on="' + (a.enabled !== false) + '">' + (a.enabled === false ? 'Enable' : 'Disable') + '</button>' +
       '</div></td></tr>';
   }).join('');
@@ -690,9 +728,9 @@ VIEWS.agents = { title: 'Agents', sub: 'Registry, personas, run metrics and runt
       stat('Observed runs', totalRuns, totalFail ? totalFail + ' failed' : 'no failures') +
       stat('Audit', audit ? (audit.ready + '/' + audit.total) : '—', audit && audit.failed ? audit.failed + ' failed' : 'all ready') +
     '</div>' +
-    panel('Agents', components.length + ' registered', table(['Agent', 'Persona', 'Capabilities', 'Tool boundary', 'Runs (ok/fail)', 'Avg latency', 'Last outcome', ''], rows, 'No agents.')) +
+    panel('Agents', components.length + ' registered', table(['Agent', 'Persona', 'Capabilities', 'Tool access', 'Runs (ok/fail)', 'Avg latency', 'Last outcome', ''], rows, 'No agents.')) +
     (orphanMetrics.length ? panel('Unregistered run history', orphanMetrics.length + ' id(s) with counters but no registry entry', table(['Agent id', 'Runs', 'Failed', 'Last', ''], orphanRows, '')) : '') +
-    panel('Runtime audit', audit ? audit.ready + ' ready · ' + audit.failed + ' failed' : 'unavailable', '<div class="panel-b">' + (audit ? kv({ status: audit.status, total: audit.total, ready: audit.ready, failed: audit.failed, explicitToolBoundaryAgents: audit.explicitToolBoundaryAgents }) : '<span class="muted">unavailable</span>') + '</div>') +
+    panel('Runtime audit', audit ? audit.ready + ' ready · ' + audit.failed + ' failed' : 'unavailable', '<div class="panel-b">' + (audit ? kv({ status: audit.status, total: audit.total, ready: audit.ready, failed: audit.failed, agentsByAccessScope: audit.agentsByAccessScope, explicitToolBoundaryAgents: audit.explicitToolBoundaryAgents }) : '<span class="muted">unavailable</span>') + '</div>') +
     panel('Create agent', '', '<div class="panel-b"><div class="row" style="align-items:flex-end">' +
       '<label class="f">id<input id="a-id" placeholder="agent-id"></label>' +
       '<label class="f">name<input id="a-name" placeholder="Agent name"></label>' +
@@ -1479,6 +1517,30 @@ document.addEventListener('click', async (ev) => {
       await api('/v1/admin/personas/' + encodeURIComponent(b.dataset.id), { method: 'PATCH', body: persona });
       closeModal();
       return done('Persona ' + b.dataset.id + ' saved ✓');
+    }
+    if (act === 'agent-access') {
+      const { components } = await api('/v1/admin/registry/agents');
+      const current = components.find(a => a.id === b.dataset.id);
+      if (!current) return toast('Agent not found', true);
+      return openAgentAccessModal(current);
+    }
+    if (act === 'agent-access-save') {
+      const id = b.dataset.id;
+      const toolBoundary = el('aa-mode').value;
+      const workingDirectory = el('aa-dir').value.trim();
+      if (toolBoundary === 'working-directory' && !workingDirectory) return toast('A working directory is required for this boundary', true);
+      const status = el('aa-status');
+      status.innerHTML = '<span class="muted">Saving…</span>';
+      try {
+        const r = await api('/v1/admin/registry/agents/' + encodeURIComponent(id) + '/boundary', { method: 'PATCH', body: { toolBoundary, workingDirectory } });
+        status.innerHTML = '<span class="tag ok">saved</span> <span class="mono">' + esc(r.access.toolBoundary) + '</span>' +
+          (r.access.workingDirectory ? ' <span class="mono muted">' + esc(r.access.workingDirectory) + '</span>' : '');
+        closeModal();
+        return done('Access saved for ' + id + ' ✓');
+      } catch (e) {
+        status.innerHTML = '<span class="tag off">' + esc(e.message || 'save failed') + '</span>';
+        return toast('Save failed: ' + (e.message || 'unknown error'), true);
+      }
     }
     if (act === 'metrics-reset') { if (!confirm('Reset all agent run counters?')) return; await api('/v1/admin/agents/metrics', { method: 'DELETE' }); return done('Agent metrics reset ✓'); }
     if (act === 'tester-safe') { if (!testerState) return; await testerRunAll(false); return toast('Read-only routes exercised'); }
