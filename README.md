@@ -1,96 +1,501 @@
-# ZombieCoder Runtime — Evidence-First Foundation
+# ZombieCoder Runtime
 
-**Important: this repository and its documentation do not claim 100% correctness or complete compatibility with every provider/client.** The architecture is intended to provide a provider-neutral OpenAI-compatible interface and a truthful execution lifecycle. Some capabilities may be implemented or locally tested without being live-verified against real third-party providers and clients.
+**An evidence-first, local-first, provider-neutral runtime for AI agents.**
 
-Before deployment, inspect the exact build, `.env.example`, provider adapters, database schema, and verification report. Never treat a planning document, fixture test, model-list entry, or successful `/health` response as proof that authentication, inference, streaming, tool calling, TLS, and end-to-end client integration all work.
+`v0.49.0` · Node.js `>= 22.5.0` · **zero runtime dependencies** · single process, loopback-first
 
-## Native tools (Phase 47)
+ZombieCoder Runtime sits between your client (desktop app, CLI, browser, or MCP client) and
+whichever model provider you point it at. It normalises every provider into one
+OpenAI-compatible surface, gives you a catalog of real agents with real personas, exposes
+a permissioned tool layer that can read and write files and run commands, speaks MCP in
+both directions, and refuses to call anything "verified" unless it has evidence.
 
-Native workspace tools are registered in `src/tools/common-defaults.js` and implemented under `tools/common/`. Tool calling is permissioned by application, task policy, execution consent, and project-root boundaries. Models without advertised native function calling may return one strict JSON tool-request envelope; this is a request only, never permission. Web search, external page fetch, and sub-agent delegation are intentionally marked `NOT_IMPLEMENTED`. See [Add New Tool Contract](docs/ADD-NEW-TOOL.md).
+---
 
-## Documentation
+## এক নজরে (বাংলায় সারসংক্ষেপ)
 
-The documentation tree contains [runtime logging and diagnostics](docs/OBSERVABILITY.md). The planning and verification documents that earlier revisions referenced — the documentation index, execution planning, local agent planning, compatibility records, architecture decisions, the "Add New Tool Contract" note, and the Phase 31/46/48/49 gate notes — are **not present** in this tree, and `IMPLEMENTATION_MANIFEST.md` refers to some of them too. Do not cite a document that is not in the archive. Documentation is not a runtime dependency; for the exact behaviour of this build, read the source, `.env.example`, `IMPLEMENTATION_MANIFEST.md` and the test suite under `tests/`.
+ZombieCoder Runtime হলো একটি **provider-neutral AI runtime** — অর্থাৎ আপনি যেই মডেল
+প্রোভাইডার ব্যবহার করুন (Ollama Cloud, Gemini, Groq, বা নিজের endpoint), ক্লায়েন্টের কাছে
+সব একই রকম OpenAI-compatible API হিসেবে দেখা যায়।
 
-## Verification vocabulary
+- **১২টি এজেন্ট** — প্রত্যেকের আলাদা persona, call sign, mission ও decision rule, ডাটাবেজে
+  সংরক্ষিত (ফাইল ফলব্যাক সহ)।
+- **৩২টি টুল** — এর মধ্যে ২৫টি চালু; ফাইল পড়া/লেখা, ফোল্ডার দেখা, কোড সার্চ, টার্মিনাল কমান্ড,
+  git, todo/task planner ইত্যাদি। প্রতিটি কল permission, consent এবং path boundary দিয়ে যাচাই হয়।
+- **৯১টি HTTP রুট** — OpenAI-compatible chat, streaming, execution, admin API, MCP।
+- **MCP দুই দিকেই** — বাইরের MCP server ব্যবহার করে (client) এবং নিজেও MCP server হিসেবে কাজ করে।
+- **Evidence Gate** — যাচাই ছাড়া কোনো কিছু "সফল" বলা হয় না; প্রতিটি ফলাফল
+  `observed` / `verified` / `unverified` হিসেবে চিহ্নিত থাকে।
+- **Admin console** — `http://127.0.0.1:9999/admin` — Providers, Models, Masking, Agents,
+  Tools, MCP, Requests, Logs, Metrics, Tester, Runtime, Settings।
+- **Chat UI** — `http://127.0.0.1:9999/` — ব্রাউজার থেকে সরাসরি চ্যাট।
 
-- **Intended** — design goal only.
-- **Implemented** — code exists in a named build; correctness is not implied.
-- **Locally tested** — a local test passed; live compatibility is not implied.
-- **Live verified** — an identified real endpoint/client passed a recorded test.
-- **Not verified** — evidence is missing or incomplete.
+শুরু করতে নিচের [Quick start](#11-quick-start) দেখুন। নিরাপত্তার জন্য এটি শুধু
+`127.0.0.1`-এ চলে; কখনো সরাসরি ইন্টারনেটে বা reverse proxy-র পিছনে খুলবেন না।
 
-## Run local tests
+---
+
+## Table of contents
+
+1. [What this is](#1-what-this-is)
+2. [What's in the box](#2-whats-in-the-box)
+3. [How a request works](#3-how-a-request-works)
+4. [Agents and personas](#4-agents-and-personas)
+5. [Tools](#5-tools)
+6. [Providers and model masking](#6-providers-and-model-masking)
+7. [MCP — client and server](#7-mcp--client-and-server)
+8. [Sessions, memory, SSOT and context](#8-sessions-memory-ssot-and-context)
+9. [Evidence and verification](#9-evidence-and-verification)
+10. [Admin console](#10-admin-console)
+11. [Quick start](#11-quick-start)
+12. [Configuration](#12-configuration)
+13. [API surface](#13-api-surface)
+14. [Running several instances](#14-running-several-instances)
+15. [Testing](#15-testing)
+16. [Security model](#16-security-model)
+17. [Known limitations](#17-known-limitations)
+18. [Documentation map](#18-documentation-map)
+
+---
+
+## 1. What this is
+
+ZombieCoder Runtime is a **local runtime**, not a SaaS. One Node.js process gives you:
+
+| Layer | What it does |
+| --- | --- |
+| **Transport** | HTTP, HTTPS and a Unix domain socket, all optional and independently configurable |
+| **Provider layer** | Registers providers, syncs their model catalogs, routes requests by priority, normalises responses, trips a circuit breaker on repeated upstream failure |
+| **Masking layer** | Presents a public "ZombieCoder" model identity so a client never learns the real provider or model |
+| **Agent layer** | 12 agents with DB-backed personas, an access scope, and per-agent metrics |
+| **Execution layer** | A lifecycle of `goal → plan → consent → execute → verify` with four boundaries: provider, native tool, remote MCP tool, and tool loop |
+| **Tool layer** | A registry of 32 tools, application-scoped permissions, path boundaries, and consent |
+| **MCP** | A client that consumes external MCP servers and an optional server that exposes 25 tools to MCP clients |
+| **Context layer** | SSOT, syllabus, memory, entities and a compiled context budget |
+| **Evidence layer** | Records observations, refuses to promote them to "verified" without proof |
+| **Admin layer** | A single-file SPA over an admin JSON API |
+
+**Design principle:** an answer is a claim, and a claim needs evidence. Every response
+carries a verification status, and the runtime will say `unverified` before it will guess.
+
+## 2. What's in the box
+
+```
+src/
+  server.js              # the HTTP surface and every route
+  agents/                # 12 agent definitions, persona registry, metrics, runtime audit
+  execution/             # lifecycle, contract, orchestrator, tool/MCP/provider adapters, tool loop
+  tools/                 # tool registry and policy
+  mcp/                   # MCP client, server, registry, permissions, sessions, audit, schema, security
+  providers/             # provider registry, adapters, router, normalizer, masking, model catalog
+  context/               # compiler, SSOT, evidence validation
+  evidence/              # the evidence gate
+  session/               # session client and metadata sanitising
+  storage/               # JSON store and SQLite store (schema + migrations)
+  config/                # env loading and configuration
+  compatibility/         # legacy/current route maps and feature reconciliation
+  transport/, http/, admin/, auth/, browser/, network/, policy/, registry/, runtime/, skills/
+tools/common/            # the 25 runnable tool implementations
+public/
+  admin/index.html       # the admin SPA (self-contained)
+  chat.html              # the browser chat client (self-contained)
+tests/                   # 233 tests, run with node --test
+docs/OBSERVABILITY.md    # logging, diagnostics, privacy
+scripts/build-runtime.mjs# build a self-contained runtime directory
+```
+
+There are **no dependencies**. `package.json` declares none, and `node_modules` is empty.
+
+## 3. How a request works
+
+```
+Client (desktop / CLI / browser / MCP)
+        │
+        ▼
+  Transport + auth          application key, rate limit, concurrency limit
+        │
+        ▼
+  Route + task policy       what may this request do, with which tools
+        │
+        ▼
+  Agent + persona resolve   agent definition + DB persona (+ shared core rules)
+        │
+        ▼
+  Context compile           SSOT, syllabus, memory, entities, recent messages, budget
+        │
+        ▼
+  System prompt build       identity → agent persona → shared persona → core rules →
+                            provider masking → evidence rules → goal → context → tools
+        │
+        ▼
+  Execution boundary        provider | native tool | remote MCP tool | tool loop
+        │
+        ▼
+  Evidence gate             observation recorded, verification status decided
+        │
+        ▼
+  Response + session + log  masked provider identity, JSONL audit trail
+```
+
+Every stage is observable: the runtime writes structured JSONL with a `requestId` and
+`traceId`, and the admin **Requests** view tails that stream live.
+
+## 4. Agents and personas
+
+Twelve agents ship as file defaults and are seeded into the database on first start:
+
+| Agent | Role | Call sign |
+| --- | --- | --- |
+| `code-guru` | architecture | The Builder |
+| `bug-hunter` | debugging | The Hunter |
+| `security-hero` | security | The Guardian |
+| `perf-wizard` | performance | The Optimizer |
+| `doc-king` | documentation | The Librarian |
+| `qa-tyrant` | quality | The Judge |
+| `planner` | planning | The Cartographer |
+| `researcher` | research | The Scout |
+| `integrator` | integration | The Bridge |
+| `team-heart` | team-coordination | The Conductor |
+| `customer-experience-specialist` | customer-experience | The Listener |
+| `ecommerce-operations-analyst` | ecommerce-operations | The Quartermaster |
+
+Each persona carries a **mission**, a **core persona**, **responsibilities** and a
+**decision rule**. The two commerce-facing agents additionally carry a
+**non-negotiable fairness clause**: a 2-taka order and a 2-lakh-taka order receive the
+same greeting, response-time target, packing quality, fraud-check standard, escalation
+rights and refund consideration — and no bias by order value, district, gender, religion,
+dialect or writing style.
+
+**Ownership rule.** The database is the SSOT for persona text; the `.js` files are the
+fallback:
+
+- a persona saved through the admin API is marked `source: 'admin'` and is **never**
+  overwritten;
+- any other row is *file-owned*: on start, `ensureDefaults()` refreshes it when the file
+  default changes, keeping a three-entry `personaHistory` so an upgrade cannot silently
+  destroy text;
+- if no row exists, `resolve()` reads the file default directly.
+
+**Core rules.** Every prompt also carries the shared persona — ten universal rules,
+hallucination minimisation, learning-first, regression safety, dual validation,
+consensus-before-output, communication policy and the engineering principle. It is placed
+*after* the agent persona and states that on conflict, the rule wins. A persona can add
+behaviour; it cannot talk an agent out of the rules.
+
+## 5. Tools
+
+32 tools are registered; **25 are runnable**.
+
+**Runnable (25):** `runtime_echo`, `read_file`, `write_file`, `list_directory`,
+`create_file`, `edit_file`, `apply_diff`, `delete_file`, `list_dir`, `read_directory`,
+`grep_search`, `regex_search`, `file_search`, `find_files`, `view_symbol`, `code_graph`,
+`run_terminal_command`, `execute_bash`, `kill_process`, `undo`, `revert_file`, `git_diff`,
+`git_status`, `task_planner`, `todo_manager`.
+
+**Deliberately not implemented (7):** `web_search`, `fetch_web_page`, `delegate_subagent`
+(`NOT_IMPLEMENTED`), and `public_api`, `tts`, `ocr`, `facebook_ads` (`UNVERIFIED`).
+They are registered so the surface is honest about what does not exist yet.
+
+A tool call is authorised by, in order: the **task policy**, the **application
+permission** grant, **execution consent**, the **path boundary**, and the **execution
+mode**. Tool availability never implies permission.
+
+**Path boundary.** An agent's persisted scope decides where its declared paths resolve:
+
+- `global` — any existing folder; the agent may name any root it is allowed to reach.
+- `working-directory` — all tools, but confined to that directory.
+
+Symlink-escape and must-exist checks still apply in both modes: "any folder" is not
+"no sandbox". `TOOL_ACCESS_MODE=permissioned` (default) keeps the per-application grant
+gate; `unrestricted` drops that gate so every agent can call every runnable tool. A tool
+disabled by configuration is refused either way.
+
+## 6. Providers and model masking
+
+Providers are declared in `PROVIDER_CONFIG_JSON`; keys are read from
+`PROVIDER_KEY_<PROVIDER_ID>` (with `_` normalised to `-`). Ollama's own convention,
+`OLLAMA_API_KEY`, is honoured as a fallback for every provider whose driver is `ollama`
+when no provider-specific key is set — an explicit `PROVIDER_KEY_*` always wins.
+
+- **Priority routing** — requests walk providers in priority order; the first healthy
+  candidate that can serve the required capabilities wins.
+- **Circuit breaker** — repeated upstream failures open a circuit with a reset timeout and
+  a half-open probe, so one dead provider cannot stall every request.
+- **Model catalog sync** — model lists are fetched from the upstream and stored, so the
+  catalog reflects what the provider actually serves.
+- **Masking** — a client only ever sees a public ZombieCoder model identity. The real
+  provider and model are resolved inside the runtime, kept in the log, and masked in every
+  public projection. Per-provider `modelAliases` let you map a public model name onto a
+  real one; explicit aliases outrank default-model fallbacks.
+
+Secrets never reach the browser: provider keys are absent from every admin payload and
+from `/api/config/mcp`.
+
+## 7. MCP — client and server
+
+**As a client**, the runtime consumes external MCP servers: endpoints are registered with
+their own `headers` (replayed on discover and on call), tools are discovered over
+Streamable HTTP, and each tool gets a qualified name (`<endpoint>.<tool>`) so two servers
+can expose the same tool name safely. Calls are recorded in an MCP audit trail with
+`permission`, `request` and `result` stages, plus the `sessionId`, `connectionId`,
+`runtimeId` and `clientId` that produced them.
+
+**As a server**, when `MCP_SERVER_ENABLED=true` the runtime exposes `POST /mcp` with the
+same 25 runnable tools, negotiates the protocol version, and supports optional
+authentication. For loopback-only local work an admin switch can relax inbound auth while
+still auto-provisioning a local application, so sessions, permissions and audit rows keep
+a real owner.
+
+External MCP tool calls are reachable through `POST /v1/mcp/tools/call` (application
+authenticated) and through the execution boundary (`POST /v1/execution/run` with a
+`qualifiedName`), which returns the remote result plus evidence.
+
+## 8. Sessions, memory, SSOT and context
+
+- **Sessions** hold messages, status and application-owned metadata. Client identity
+  (editor, version, OS, device, session source) is sanitised to an allowlist before it is
+  stored or put in a prompt.
+- **SSOT** is the single source of truth for project state; agents are told to read it
+  before acting.
+- **Syllabus** records what was learned per project; **memory** holds recent entries.
+- **Entities** model domain objects.
+- **Context compiler** assembles the minimum relevant context under a configurable byte
+  budget (`COMPILED_CONTEXT_BYTES`) and a recent-message window.
+
+## 9. Evidence and verification
+
+The evidence gate is the spine of the runtime:
+
+- `EvidenceGate.validate()` requires `source`, `status` and `observedAt` on every record.
+- `canClaimSuccess()` returns true only when some evidence item is `verified`.
+- A provider response is an **observation**, never proof that a requested change happened.
+- When verification is missing the run is reported as `awaiting_verification` and the
+  response body is withheld, rather than being dressed up as success.
+- A malformed evidence item degrades a run to `awaiting_verification` and is logged — it
+  can never fail a request whose work has already executed.
+
+**Verification vocabulary** used throughout the docs and the API:
+
+| Term | Meaning |
+| --- | --- |
+| **Intended** | design goal only |
+| **Implemented** | code exists in a named build; correctness is not implied |
+| **Locally tested** | a local test passed; live compatibility is not implied |
+| **Live verified** | an identified real endpoint/client passed a recorded test |
+| **Not tested** | the check was not run |
+| **Unverified** | evidence is missing or incomplete |
+
+## 10. Admin console
+
+`http://127.0.0.1:9999/admin` — a self-contained SPA (no CDN, no charting library; charts
+are hand-rolled inline SVG). Views:
+
+| Group | Views |
+| --- | --- |
+| Overview | Dashboard |
+| Catalog | Providers, Models, Masking Models |
+| Agents | Agents, Agent Mappings |
+| Tools & MCP | Tools, MCP |
+| Operations | Requests, Logs, Metrics, Tester |
+| System | Runtime, Settings |
+
+Highlights: per-provider **Test** (pick a model, see request → response), provider
+priority editing, masking-model mapping display, per-agent persona editing and access
+scope, tool enable/disable, the MCP page (connected clients, client IDs, which client is
+working now, endpoint auth, new endpoint by URL + discovery), live request/log streaming
+with browser-side filtering, metric cards and graphs, and a **Tester** page whose route
+catalog is read from `GET /v1/admin/routes` so it cannot drift.
+
+The browser chat client lives at `/` (also `/chat`). It streams over SSE using `fetch` +
+`ReadableStream` and keeps its key in `localStorage` under `zc_chat_key`. Both pages share
+one strict Content-Security-Policy.
+
+## 11. Quick start
 
 ```bash
+# 1. install (no dependencies — this only fetches nothing, it is here for clarity)
+node --version          # must be >= 22.5.0
+
+# 2. configure
 cp .env.example .env
+#    then edit .env: set at least one provider key and enable that provider
+#    PROVIDER_KEY_OLLAMA_CLOUD_OPENAI=<your key>
+#    ZOMBIECODER_EXECUTION_MODE=tools-enabled   # only if you want tool execution
+
+# 3. run the tests
 npm test
+
+# 4. start the runtime
 npm start
 ```
 
-Do not commit `.env`, API keys, tunnel tokens, private keys, or other credentials. Keep runtime credentials out of documentation and version control.
+Then open:
 
-## Runtime logging
+- **Chat:** `http://127.0.0.1:9999/`
+- **Admin:** `http://127.0.0.1:9999/admin`
+- **Health:** `http://127.0.0.1:9999/health`
 
-The runtime writes structured JSONL logs with request/trace correlation, severity levels, rotation, and sensitive-data filtering. See [Runtime logs and diagnostics](docs/OBSERVABILITY.md) for configuration, privacy guidance, and troubleshooting commands.
-
-## Build a package and run several instances side by side
-
-The build is zero-dependency and self-contained. It copies runtime sources only, excludes `.env`, `data/`, `logs/`, `tests/` and secrets, and refuses to replace an output directory it does not manage — or one that is currently running an instance.
+Verify the process is alive:
 
 ```bash
-npm run build                                            # ./dist/zombiecoder-runtime
-node scripts/build-runtime.mjs --output dist/zc-10001    # an independent second instance
+curl -s http://127.0.0.1:9999/health | head -c 200
 ```
 
-Every output directory is a complete runtime. Run one build per instance and keep that instance's configuration, certificates, database and logs **outside** the build output, so rebuilding or replacing the code cannot erase them:
+Stop it with `node start.js --stop`.
+
+## 12. Configuration
+
+`.env` is gitignored; `.env.example` documents every key. Sections:
+
+| Section | Covers |
+| --- | --- |
+| Runtime | host, port, HTTPS, UDS, data/log dirs, SQLite path, execution mode, admin token, local auth bypass |
+| Provider routing | provider catalog sync, timeouts, model refresh, API keys |
+| Network policy | plaintext HTTP, private networks, host allowlists, response size caps |
+| MCP | external endpoints, discovery, inbound server, inbound auth, network policy |
+| Tool / execution limits | tool root, tool-loop rounds, per-round call caps, repeat caps |
+| Session / context | message caps, context budget, compiled-context budget, memory entries |
+| Observability | log level, dir, file, rotation, payload logging |
+| Reliability | circuit breaker thresholds and timeouts |
+| Browser/CDP | optional browser automation endpoint |
+| Instance identity | runtime id, instance id |
+
+Two switches worth knowing:
+
+- `ZOMBIECODER_EXECUTION_MODE` — `chat-only` (default) or `tools-enabled`. Tool execution
+  routes answer `503 tool_execution_not_verified` until this is `tools-enabled`.
+- `TOOL_ACCESS_MODE` — `permissioned` (default) or `unrestricted`.
+
+Never commit `.env`, API keys, tunnel tokens or private keys.
+
+## 13. API surface
+
+The route inventory is machine-readable at `GET /v1/admin/routes`
+(`currentConcreteRoutes: 91`, `currentHandlerBlocks: 55`; the legacy inventory is 31
+concrete routes plus 17 compatibility routes). The 91 current routes group as follows:
+
+| Group | Routes | Examples |
+| --- | --- | --- |
+| Health / models | 1 | `GET /health` (`GET /v1/models` is also served) |
+| OpenAI-compatible | 1 | `POST /v1/chat/completions` (stream and non-stream) |
+| Execution | 3 | `POST /v1/execution/prepare`, `POST /v1/execution/run`, `POST /v1/execution/stream` |
+| Context | 6 | `POST /v1/context/setup`, `GET /v1/context`, `POST /v1/context/ssot/refresh`, `/syllabus`, `/memory` |
+| Sessions | 5 | `POST /v1/sessions`, `GET /v1/sessions/{id}`, `PATCH /v1/sessions/{id}/metadata`, `GET …/messages`, `POST …/close` |
+| MCP (public) | 1 | `POST /v1/mcp/tools/call` |
+| Admin — applications | 7 | `POST /v1/admin/applications`, `…/{id}/rotate-key`, `…/revoke`, `…/extend`, `…/capabilities` |
+| Admin — providers | 8 | list, create, `sync`, `{id}/sync`, `route`, `{id}/models/refresh`, `models`, `{id}/test` |
+| Admin — models & masking | 4 | `GET /v1/admin/models`, `POST …/models/sync-all`, `GET /v1/admin/masking-models`, `GET /v1/admin/agent-model-mappings` |
+| Admin — registry | 16 | agents, `agents/{id}/boundary`, `agents/runtime-audit`, tools, skills, transports, external-mcp |
+| Admin — personas | 4 | `GET/POST /v1/admin/personas`, `PATCH/DELETE /v1/admin/personas/{id}` |
+| Admin — tools | 3 | `GET/POST/DELETE /v1/admin/tools/permissions` |
+| Admin — agents | 2 | `GET/DELETE /v1/admin/agents/metrics` |
+| Admin — MCP | 19 | endpoints, `{id}/discover`, permissions, connections, reconcile, incomplete, audit, tools, auth, server, clients |
+| Admin — operations | 11 | routes, logs, `logs/stream`, metrics, evidence, constitution, `compatibility/*`, task-profiles |
+
+`GET /v1/admin/routes` is the authoritative list; treat the table above as a map, not as a
+second source of truth.
+
+Admin API calls work on loopback without a token when `LOCAL_AUTH_BYPASS=true` and
+`ADMIN_TOKEN` is empty — which is the intended local development setup, and the reason
+this runtime must never be exposed beyond `127.0.0.1`.
+
+A tool-loop chat requires explicit consent:
 
 ```bash
-# 1. one build per instance — the output is disposable code
-node scripts/build-runtime.mjs --output dist/zc-10001
+curl -s -X POST http://127.0.0.1:9999/v1/chat/completions \
+  -H "authorization: Bearer <application-key>" \
+  -H 'content-type: application/json' \
+  -d '{"model":"zombie-mini","agent":"code-guru","messages":[{"role":"user","content":"..."}],
+       "autoToolLoop":true,"consent":true,"toolIds":["runtime_echo"],
+       "projectRoot":"/path/to/project"}'
+```
 
-# 2. instance state, outside the build output
-mkdir -p instances/zc-10001/certs instances/zc-10001/data instances/zc-10001/logs
+Without `"consent": true` the runtime answers `409 execution_consent_required`.
+
+## 14. Running several instances
+
+The build copies runtime sources only — no `.env`, `data/`, `logs/`, `tests/` or secrets —
+and refuses to replace an output directory it does not manage, or one that is currently
+running.
+
+```bash
+npm run build                                             # ./dist/zombiecoder-runtime
+node scripts/build-runtime.mjs --output dist/zc-10001      # an independent second instance
+```
+
+Keep each instance's configuration, certificates, database and logs **outside** the build
+output, so rebuilding the code cannot erase them:
+
+```bash
+mkdir -p instances/zc-10001/{certs,data,logs}
 cp .env.example instances/zc-10001/.env
-#   in instances/zc-10001/.env set, for example:
-#     PORT=10001                            HTTPS_PORT=10444
-#     DATA_DIR=/home/me/zombiecoder/instances/zc-10001/data
-#     SQLITE_PATH=/home/me/zombiecoder/instances/zc-10001/data/runtime.sqlite
-#     LOG_DIR=/home/me/zombiecoder/instances/zc-10001/logs
-#     UDS_PATH=/home/me/zombiecoder/instances/zc-10001/data/runtime.sock
-#     HTTPS_KEY=/home/me/zombiecoder/instances/zc-10001/certs/server.key
-#     HTTPS_CERT=/home/me/zombiecoder/instances/zc-10001/certs/server.crt
-openssl req -x509 -newkey rsa:2048 -sha256 -days 825 -nodes \
-  -keyout instances/zc-10001/certs/server.key -out instances/zc-10001/certs/server.crt \
-  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1"
-
-# 3. start it — the launcher and the server read the same file
-cd dist/zc-10001
-ENV_FILE=/home/me/zombiecoder/instances/zc-10001/.env node start.js   # stop: node start.js --stop
+# in instances/zc-10001/.env set PORT, HTTPS_PORT, DATA_DIR, SQLITE_PATH, LOG_DIR, UDS_PATH
 ```
 
-`ENV_FILE` must point at the same file in both roles: `start.js` and `src/server.js` resolve it identically, so the port the launcher binds is the port the server uses. With the configuration left inside the build output instead, plain relative paths (`./data`, `./certs/server.key`) work too — they always resolve against the runtime's own directory and never against the shell's working directory — but then a rebuild replaces `.env`, `certs/`, `data/` and `logs/` along with the code.
+## 15. Testing
 
-Two instances therefore never share a port, a socket, a database, a log file or a PID file, and a process manager can start either one from any working directory. `EXTERNAL_MCP_DISCOVER_ON_START=true` discovers declared MCP endpoint tools during startup (bounded per endpoint, best-effort); without it a fresh install registers endpoints but reports no tools until discovery is triggered by hand. The handover package itself stays clean: running an instance never writes into `src/`, and `dist/zombiecoder-runtime` contains no `.env`, database, log or key material.
+```bash
+npm test           # node --test
+```
 
-## Version note
+Current baseline: **233 tests, 231 passing, 2 failing.** The two failures are known and
+pre-existing:
 
-The release package `package.json` identifies this build as `0.49.0`. For a deployment-specific claim, still confirm `package.json` and startup health output from the exact build being run. See [Phase 46 OS runtime verification gate](docs/75-phase-46-os-runtime-verification-gate.md).
+- `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the
+  runtime now negotiates (stale fixture).
+- `server-side PHP integration` — requires a `php` binary that is not installed here.
 
-## OS service and deployment verification (Linux/systemd)
+Treat a green suite as *locally tested*, never as *live verified*.
 
-The setup helper uses OS-level service management and adds no npm packages. It currently supports Linux/systemd only. Review it before running with `sudo`: `bash scripts/setup-os-runtime.sh`. The helper defaults to chat-only; the optional Nginx path requires explicit package-install consent and an existing trusted TLS certificate.
+## 16. Security model
 
-For a local health/model/TLS report: `node scripts/verify-deployment.mjs`. For real authenticated chat/stream checks, set `ZC_VERIFY_API_KEY` and `ZC_VERIFY_MODEL`, then run with `--chat --stream`. Tool calling requires a separate harmless end-to-end test; the script does not certify it.
+- **Loopback first.** The default host is `127.0.0.1`. Never put this behind a reverse
+  proxy or expose it on a public interface.
+- **Secrets stay server-side.** Provider keys are never returned by any admin payload, and
+  are redacted from the MCP endpoint view.
+- **Provider identity is masked** in every public projection.
+- **Path boundaries** are enforced with symlink-escape and must-exist checks, in both
+  access modes.
+- **Consent** is required before risky or irreversible actions.
+- **Local auth bypass is a development affordance**, not a security control. If you enable
+  remote access, set `ADMIN_TOKEN` and application keys, and terminate TLS properly.
 
-## Scope
+Known, accepted local-only gaps: `DELETE /mcp` terminates a session without authentication
+(loopback only), and `GET /mcp` returns `405` (optional in Streamable HTTP).
 
-This README and the planning documents describe intent, constraints, and verification criteria. They do not create a tunnel, configure DNS/TLS, add credentials, change routes, or enable new runtime capabilities.
+## 17. Known limitations
 
-## Admin control plane (Phase 48)
+This repository does **not** claim complete compatibility with every provider or client.
+Be explicit about the line between "implemented" and "verified".
 
-Open `/admin` on the runtime host. The page reads provider/model/agent data from the actual runtime API. Admin token authentication is the default. `LOCAL_AUTH_BYPASS=true` is only for loopback-only local testing when `ADMIN_TOKEN` is empty; never use it behind a reverse proxy. See [Phase 48 runtime/admin control plane](docs/77-phase-48-runtime-and-admin-control-plane.md).
+- `web_search`, `fetch_web_page` and `delegate_subagent` are **not implemented**;
+  `public_api`, `tts`, `ocr` and `facebook_ads` are registered but **unverified**.
+- Remote MCP endpoints are only useful if something is actually listening at their URL.
+  A declared endpoint that cannot be reached stays in `error` with zero tools and is
+  reported as such rather than being silently dropped.
+- In `global` access mode, `grep_search` / `file_search` / `find_files` still search only
+  the project root, because they take no path argument. "Search anywhere" is therefore not
+  yet implemented for those three tools.
+- External MCP tools are **not** injected into an agent's native tool list. They are
+  invoked explicitly through `/v1/mcp/tools/call` or the execution boundary, so an agent
+  will not spontaneously choose a remote MCP tool.
+- The two failing tests above are left failing rather than silenced.
+- A successful `/health`, a fixture test, or a model appearing in a catalog is **not**
+  proof that authentication, inference, streaming, tool calling and client integration all
+  work.
 
-## External MCP Streamable HTTP lifecycle (Phase 49)
+## 18. Documentation map
 
-The external MCP client implements the POST initialization/notification/tool-list/tool-call sequence, negotiated session/version headers, JSON or SSE JSON-RPC responses, response ID validation, optional GET SSE events, and sanitized discovery error state. See [Phase 49 MCP lifecycle](docs/78-phase-49-mcp-streamable-http-parity.md). Local fixtures do not certify the user's legacy MCP endpoints.
+| Document | Contents |
+| --- | --- |
+| `README.md` | this file |
+| `docs/OBSERVABILITY.md` | runtime logging, diagnostics, privacy guidance, troubleshooting |
+| `IMPLEMENTATION_MANIFEST.md` | per-phase implementation record |
+| `CHANGELOG.md` | release history |
+| `GET /v1/admin/routes` | the authoritative, machine-readable route inventory |
+| `GET /v1/admin/constitution` | the core constitution returned as JSON |
+| `.env.example` | every configuration key, documented |
+| `tests/` | executable specification of current behaviour |
+
+Do not cite a document that is not present in this tree. For the exact behaviour of this
+build, read the source, `.env.example`, `IMPLEMENTATION_MANIFEST.md` and the test suite.
