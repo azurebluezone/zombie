@@ -361,7 +361,11 @@ function buildNav() {
   ).join('');
 }
 let current = 'dashboard';
+// A view that opens a live stream registers its teardown here, so navigating
+// away can never leave an EventSource (and its server-side tail) running.
+let currentTeardown = null;
 function mount(id) {
+  if (currentTeardown) { try { currentTeardown(); } catch (e) { /* teardown must never break navigation */ } currentTeardown = null; }
   const r = ROUTES.find(x => x.id === id) ? id : 'dashboard';
   current = r;
   document.querySelectorAll('.nav-item').forEach(a => a.classList.toggle('active', a.dataset.route === r));
@@ -390,6 +394,40 @@ async function sideStatus() {
     el('side-status').textContent = 'Cannot reach runtime: ' + e.message;
   }
 }
+
+/* --------------------------------------------------------------- live log */
+// One EventSource for the whole page, shared by every view that wants the live
+// feed. The server only tails the file; all filtering happens here so changing
+// a filter never costs a round trip.
+let logStream = null;
+let liveEvents = [];
+const liveSubs = new Set();
+function startLogStream(backfill = 60) {
+  if (logStream) return logStream;
+  const es = new EventSource('/v1/admin/logs/stream?backfill=' + backfill);
+  es.onmessage = (ev) => {
+    let e; try { e = JSON.parse(ev.data); } catch { return; }
+    liveEvents.push(e);
+    if (liveEvents.length > 1000) liveEvents = liveEvents.slice(-1000);
+    liveSubs.forEach(fn => { try { fn(e); } catch (err) { /* a broken subscriber must not kill the feed */ } });
+  };
+  es.onerror = () => { /* EventSource reconnects on its own */ };
+  logStream = es;
+  return es;
+}
+function stopLogStream() { if (logStream) { logStream.close(); logStream = null; } liveSubs.clear(); }
+function onLive(fn) { liveSubs.add(fn); return () => liveSubs.delete(fn); }
+const levelTag = l => '<span class="tag ' + (l === 'error' ? 'off' : l === 'warn' ? 'warn' : 'mute') + '">' + esc(l || 'info') + '</span>';
+const outcomeTag = o => o === 'failure' ? '<span class="tag off">failure</span>' : o === 'success' ? '<span class="tag ok">success</span>' : (o ? '<span class="tag mute">' + esc(o) + '</span>' : '');
+const eventRow = e => '<tr data-level="' + esc(e.level || 'info') + '" data-event="' + esc(e.event || '') + '" data-outcome="' + esc(e.outcome || '') + '">' +
+  '<td class="mono" style="font-size:11.5px;white-space:nowrap">' + esc(String(e.ts || '').slice(11, 23)) + '</td>' +
+  '<td>' + levelTag(e.level) + '</td>' +
+  '<td class="mono">' + esc(e.event || '') + '</td>' +
+  '<td class="mono" style="font-size:11.5px">' + esc([e.method, e.path].filter(Boolean).join(' ')) + '</td>' +
+  '<td>' + esc(dash(e.statusCode)) + '</td>' +
+  '<td>' + esc(dash(e.durationMs)) + '</td>' +
+  '<td>' + outcomeTag(e.outcome) + '</td>' +
+  '<td class="mono" style="font-size:11px">' + esc(String(e.requestId || '').slice(0, 22)) + '</td></tr>';
 
 /* ------------------------------------------------------------------ views */
 const VIEWS = {};
@@ -746,16 +784,91 @@ VIEWS.mcp = { title: 'MCP', sub: 'Inbound server, connected clients and the outb
 } };
 
 /* requests */
-VIEWS.requests = { title: 'Requests', sub: 'Live connections and evidence ledger', render: async (v) => {
+// Live request console. The server only tails logs/runtime.jsonl over SSE; every
+// filter below runs in the browser, so narrowing the view never costs a request
+// and never has to restart the stream.
+VIEWS.requests = { title: 'Requests', sub: 'Live request stream, filtered in the browser', actions: '<button class="btn" data-act="refresh">Reload</button>', render: async (v) => {
   const [{ clients, count }, { evidence }] = await Promise.all([api('/api/clients'), api('/v1/admin/evidence')]);
   const cRows = clients.map(c => '<tr>' + Object.entries(c).slice(0, 6).map(([k, x]) => '<td>' + (x && typeof x === 'object' ? '<span class="mono">' + esc(JSON.stringify(x)) + '</span>' : esc(dash(x))) + '</td>').join('') + '</tr>').join('');
   const cCols = clients[0] ? Object.keys(clients[0]).slice(0, 6) : ['connectionId'];
   const eRows = evidence.slice(-60).reverse().map(e => '<tr><td class="mono">' + esc(e.ts || e.createdAt || '') + '</td><td>' + statusTag(e.status || e.outcome || '') + '</td><td class="mono">' + esc(e.type || e.kind || '') + '</td><td class="mono">' + esc(JSON.stringify(e).slice(0, 140)) + '</td></tr>').join('');
+
   v.innerHTML =
-    '<div class="grid g3">' + stat('Active connections', count, '') + stat('Evidence records', evidence.length, '') + stat('Runtime', 'online', 'loopback') + '</div>' +
+    '<div class="grid g4" style="margin-bottom:14px">' +
+      '<div class="stat"><small>Events</small><strong id="ls-total">0</strong><div class="sub" id="ls-state">connecting…</div></div>' +
+      '<div class="stat"><small>Success</small><strong id="ls-ok">0</strong><div class="sub">outcome ok / http 2xx-3xx</div></div>' +
+      '<div class="stat"><small>Failure</small><strong id="ls-fail">0</strong><div class="sub">outcome failure / 4xx-5xx / error</div></div>' +
+      '<div class="stat"><small>Avg latency</small><strong id="ls-avg">—</strong><div class="sub">over measured requests</div></div>' +
+    '</div>' +
+    panel('Live stream', 'Server-Sent Events · the server only tails the log',
+      '<div class="panel-b" style="border-bottom:1px solid var(--line2)">' +
+        '<div class="row" style="align-items:flex-end">' +
+          '<button class="btn primary" id="ls-toggle">Pause</button>' +
+          '<label class="f">Level<select id="lf-level"><option value="all">all</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select></label>' +
+          '<label class="f">Outcome<select id="lf-outcome"><option value="all">all</option><option value="success">success</option><option value="failure">failure</option></select></label>' +
+          '<label class="f">Event contains<input id="lf-event" placeholder="chat. / http."></label>' +
+          '<label class="f" style="flex:1;min-width:200px">Search<input id="lf-text" placeholder="requestId, path, provider…"></label>' +
+          '<button class="btn" id="ls-clear">Clear</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="tablewrap"><table><thead><tr>' + ['Time', 'Level', 'Event', 'Request', 'Status', 'ms', 'Outcome', 'Request id'].map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody id="ls-feed"></tbody></table></div>' +
+      '<div class="empty" id="ls-empty">Waiting for events…</div>'
+    ) +
     panel('Active connections', count + '', table(cCols, cRows, 'No active connections.')) +
     panel('Evidence ledger', evidence.length + ' record(s)', table(['Timestamp', 'Status', 'Type', 'Detail'], eRows, 'No evidence recorded.')) +
     panel('Raw connections', '', '<div class="panel-b">' + jsonBlock(clients) + '</div>');
+
+  const feed = el('ls-feed');
+  const empty = el('ls-empty');
+  let paused = false;
+  const readFilters = () => ({ level: el('lf-level').value, outcome: el('lf-outcome').value, event: el('lf-event').value.trim().toLowerCase(), text: el('lf-text').value.trim().toLowerCase() });
+  const matches = (e, f) => {
+    if (f.level !== 'all' && String(e.level || 'info') !== f.level) return false;
+    if (f.outcome !== 'all' && String(e.outcome || '') !== f.outcome) return false;
+    if (f.event && !String(e.event || '').toLowerCase().includes(f.event)) return false;
+    if (f.text && !JSON.stringify(e).toLowerCase().includes(f.text)) return false;
+    return true;
+  };
+  const stats = () => {
+    const rows = liveEvents.filter(e => matches(e, readFilters()));
+    const ok = rows.filter(e => e.outcome === 'success' || (e.statusCode >= 200 && e.statusCode < 400)).length;
+    const fail = rows.filter(e => e.outcome === 'failure' || e.level === 'error' || e.statusCode >= 400).length;
+    const lat = rows.map(e => e.durationMs).filter(n => typeof n === 'number');
+    el('ls-total').textContent = rows.length;
+    el('ls-ok').textContent = ok;
+    el('ls-fail').textContent = fail;
+    el('ls-avg').textContent = lat.length ? Math.round(lat.reduce((a, b) => a + b, 0) / lat.length) + ' ms' : '—';
+  };
+  const rebuild = () => {
+    const rows = liveEvents.filter(e => matches(e, readFilters())).slice(-300).reverse();
+    feed.innerHTML = rows.map(eventRow).join('');
+    empty.style.display = rows.length ? 'none' : 'block';
+    stats();
+  };
+  const append = (e) => {
+    if (!paused && matches(e, readFilters())) {
+      feed.insertAdjacentHTML('afterbegin', eventRow(e));
+      while (feed.children.length > 300) feed.removeChild(feed.lastChild);
+      empty.style.display = 'none';
+    }
+    stats();
+  };
+  ['lf-level', 'lf-outcome', 'lf-event', 'lf-text'].forEach(id => el(id).addEventListener('input', rebuild));
+  el('ls-clear').addEventListener('click', () => { liveEvents = []; rebuild(); empty.textContent = 'Cleared — waiting for new events…'; });
+  el('ls-toggle').addEventListener('click', () => {
+    paused = !paused;
+    el('ls-toggle').textContent = paused ? 'Resume' : 'Pause';
+    el('ls-toggle').className = 'btn' + (paused ? '' : ' primary');
+    el('ls-state').textContent = paused ? 'paused' : 'streaming';
+    if (!paused) rebuild();
+  });
+  // Subscriber first, then the stream: an event that lands between the two
+  // would otherwise sit in liveEvents but never reach the DOM.
+  const off = onLive(append);
+  startLogStream(80);
+  el('ls-state').textContent = 'streaming';
+  rebuild();
+  currentTeardown = () => { off(); stopLogStream(); };
 } };
 
 /* logs */
@@ -770,10 +883,44 @@ VIEWS.logs = { title: 'Logs', sub: 'Structured runtime log (newest first)', acti
       '<td class="mono">' + esc(e.outcome || '') + '</td></tr>';
   }).join('');
   const recent = events.slice(-40).reverse();
-  v.innerHTML = panel('Log tail', esc(file || 'no file') + ' · last ' + events.length + ' event(s)', table(['Timestamp', 'Level', 'Event', 'Request', 'Status', 'ms', 'Outcome'], rows, 'No log events.')) +
+  v.innerHTML =
+    panel('Live tail', 'streams as events are written',
+      '<div class="panel-b" style="border-bottom:1px solid var(--line2)"><div class="row" style="align-items:flex-end">' +
+        '<span class="tag ok" id="lg-state">streaming</span>' +
+        '<label class="f">Level<select id="lg-level"><option value="all">all</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select></label>' +
+        '<label class="f" style="flex:1;min-width:220px">Search<input id="lg-text" placeholder="event, path, requestId…"></label>' +
+        '<button class="btn" id="lg-clear">Clear</button>' +
+      '</div></div>' +
+      '<div class="tablewrap"><table><thead><tr>' + ['Time', 'Level', 'Event', 'Request', 'Status', 'ms', 'Outcome', 'Request id'].map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody id="lg-feed"></tbody></table></div>' +
+      '<div class="empty" id="lg-empty">Waiting for events…</div>') +
+    panel('Log tail', esc(file || 'no file') + ' · last ' + events.length + ' event(s)', table(['Timestamp', 'Level', 'Event', 'Request', 'Status', 'ms', 'Outcome'], rows, 'No log events.')) +
     panel('Human timeline', 'latest 40', '<div class="tablewrap"><table><tbody>' + (recent.map(e =>
       '<tr><td class="mono" style="width:180px">' + esc(e.ts || '') + '</td><td><span class="tag ' + (e.level === 'error' ? 'off' : e.level === 'warn' ? 'warn' : 'mute') + '">' + esc(e.level || 'info') + '</span></td><td>' + esc(e.event || '') + ' <span class="mono muted">' + esc([e.method, e.path].filter(Boolean).join(' ')) + '</span></td></tr>'
     ).join('') || '<tr><td class="empty">No events.</td></tr>') + '</tbody></table></div>');
+
+  const feed = el('lg-feed');
+  const empty = el('lg-empty');
+  const match = (e) => {
+    const level = el('lg-level').value;
+    const text = el('lg-text').value.trim().toLowerCase();
+    if (level !== 'all' && String(e.level || 'info') !== level) return false;
+    if (text && !JSON.stringify(e).toLowerCase().includes(text)) return false;
+    return true;
+  };
+  const rebuild = () => {
+    const rows = liveEvents.filter(match).slice(-300).reverse();
+    feed.innerHTML = rows.map(eventRow).join('');
+    empty.style.display = rows.length ? 'none' : 'block';
+  };
+  ['lg-level', 'lg-text'].forEach(id => el(id).addEventListener('input', rebuild));
+  el('lg-clear').addEventListener('click', () => { liveEvents = []; rebuild(); empty.textContent = 'Cleared — waiting for new events…'; });
+  // Subscriber first, then the stream (see the Requests view for why).
+  const off = onLive(e => {
+    if (match(e)) { feed.insertAdjacentHTML('afterbegin', eventRow(e)); while (feed.children.length > 300) feed.removeChild(feed.lastChild); empty.style.display = 'none'; }
+  });
+  startLogStream(80);
+  rebuild();
+  currentTeardown = () => { off(); stopLogStream(); };
 } };
 
 /* metrics */

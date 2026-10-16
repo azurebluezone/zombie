@@ -185,6 +185,70 @@ async function tailJsonLines(limit) {
     return lines.slice(-limit).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
   } finally { await handle.close(); }
 }
+// Server-Sent Events tail of the structured runtime log.
+//
+// The browser owns the filtering, so this stays a thin tail: replay the last
+// `backfill` lines, then push every appended line as it lands. No log shipper,
+// no extra process — just one read offset per open connection, and a heartbeat
+// so an idle stream is not mistaken for a dead one.
+async function streamJsonLines(req, res, { backfill = 40 } = {}) {
+  const file = path.join(config.logDir, config.logFile);
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    'connection': 'keep-alive',
+    'x-accel-buffering': 'no'
+  });
+  let offset = 0;
+  try {
+    const info = await stat(file);
+    const maxBytes = 256 * 1024;
+    const start = Math.max(0, info.size - maxBytes);
+    const handle = await open(file, 'r');
+    try {
+      const length = info.size - start;
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, start);
+      const lines = buffer.toString('utf8').split('\n').filter(Boolean);
+      if (start > 0 && lines.length) lines.shift();
+      for (const line of lines.slice(-backfill)) {
+        try { res.write(`data: ${JSON.stringify(JSON.parse(line))}\n\n`); } catch { /* skip malformed */ }
+      }
+    } finally { await handle.close(); }
+    offset = info.size;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') { try { res.write(`event: stream-error\ndata: ${JSON.stringify({error:'log_read_failed'})}\n\n`); } catch {} }
+    offset = 0;
+  }
+  try { res.write(`event: ready\ndata: ${JSON.stringify({backfill})}\n\n`); } catch {}
+  let pending = '';
+  const poll = setInterval(async () => {
+    try {
+      const info = await stat(file);
+      if (info.size < offset) { offset = 0; pending = ''; }   // rotated or truncated
+      if (info.size <= offset) return;
+      const length = info.size - offset;
+      const handle = await open(file, 'r');
+      try {
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, offset);
+        offset = info.size;
+        pending += buffer.toString('utf8');
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          res.write(`data: ${line}\n\n`);
+        }
+      } finally { await handle.close(); }
+    } catch { /* the file may not exist yet; try again on the next tick */ }
+  }, 700);
+  const heartbeat = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15000);
+  const cleanup = () => { clearInterval(poll); clearInterval(heartbeat); };
+  req.on('close', cleanup);
+  req.on('error', cleanup);
+  res.on('close', cleanup);
+}
 async function applyAgentModelMapping(input) {
   const agentId=String(input?.agent??input?.persona??'code-guru');
   const mapping=(await store.read('agentModelMappings',[])).find(item=>item.agentId===agentId);
@@ -495,6 +559,12 @@ const requestHandler = async (req,res) => {
     if (req.method==='GET' && url.pathname==='/v1/admin/evidence') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{evidence:await store.read('evidence',[])});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/logs/stream') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const backfill=Math.max(0,Math.min(200,Number(url.searchParams.get('backfill')??40)||0));
+      await streamJsonLines(req,res,{backfill});
+      return;
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/logs') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
