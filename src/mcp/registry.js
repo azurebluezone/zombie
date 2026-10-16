@@ -3,6 +3,29 @@ import { discoverMcpTools, LATEST_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSIONS } 
 import { assertSafeMcpUrl } from './security.js';
 import net from 'node:net';
 
+// Outbound endpoints are often authenticated. Values are stored so discovery and
+// tool calls can replay them, but they are never echoed back by the admin API.
+function normalizeAuthHeaders(input = {}) {
+  const headers = {};
+  if (input.headers && typeof input.headers === 'object') {
+    for (const [key, value] of Object.entries(input.headers)) {
+      if (value != null && String(value).trim()) headers[String(key).toLowerCase()] = String(value).trim();
+    }
+  }
+  const key = input.apiKey ?? input.token;
+  if (key && !headers.authorization) {
+    const value = String(key).trim();
+    headers.authorization = /^bearer\s/i.test(value) ? value : `Bearer ${value}`;
+  }
+  return headers;
+}
+
+/** Admin-safe projection: header names are shown, values are not. */
+export function redactEndpoint(endpoint) {
+  if (!endpoint || !endpoint.headers || !Object.keys(endpoint.headers).length) return { ...endpoint, hasAuth: false };
+  return { ...endpoint, hasAuth: true, authHeaderNames: Object.keys(endpoint.headers), headers: Object.fromEntries(Object.keys(endpoint.headers).map(k => [k, '***'])) };
+}
+
 export class McpRegistry {
   constructor(store, {networkPolicy = {}} = {}) { this.store = store; this.networkPolicy = networkPolicy; }
   async validateUrl(url, requestedHosts = []) {
@@ -28,8 +51,18 @@ export class McpRegistry {
     const allowHosts = requestedHosts.length ? requestedHosts : globalHosts;
     const endpoints = await this.list();
     const existing = endpoints.find(item => item.url === input.url);
-    if (existing) return existing;
-    const item = { id: input.id ? String(input.id) : id('mcp'), url: input.url, name: String(input.name ?? input.url).slice(0,120), enabled: input.enabled !== false, allowHosts, networkPolicy: {allowHttp:this.networkPolicy.allowHttp===true,allowPrivateNetwork:this.networkPolicy.allowPrivateNetwork===true}, status: 'registered', tools: [], createdAt: new Date().toISOString() };
+    const headers = normalizeAuthHeaders(input);
+    if (existing) {
+      // Re-registering the same URL with credentials updates them in place; this
+      // is how an operator fixes a rotated token without recreating the endpoint.
+      if (Object.keys(headers).length) {
+        const merged = { ...existing, headers: { ...(existing.headers ?? {}), ...headers } };
+        await this.store.write('mcp-endpoints', endpoints.map(item => item.id === existing.id ? merged : item));
+        return merged;
+      }
+      return existing;
+    }
+    const item = { id: input.id ? String(input.id) : id('mcp'), url: input.url, name: String(input.name ?? input.url).slice(0,120), enabled: input.enabled !== false, allowHosts, networkPolicy: {allowHttp:this.networkPolicy.allowHttp===true,allowPrivateNetwork:this.networkPolicy.allowPrivateNetwork===true}, headers, status: 'registered', tools: [], createdAt: new Date().toISOString() };
     endpoints.push(item); await this.store.write('mcp-endpoints', endpoints); return item;
   }
   async discover(endpointId) {
@@ -48,6 +81,13 @@ export class McpRegistry {
       await this.store.write('mcp-endpoints', endpoints.map(item => item.id === endpointId ? failed : item));
       throw new Error(code);
     }
+  }
+  async remove(endpointId) {
+    const endpoints = await this.list();
+    const target = endpoints.find(item => item.id === endpointId);
+    if (!target) throw new Error('mcp_endpoint_not_found');
+    await this.store.write('mcp-endpoints', endpoints.filter(item => item.id !== endpointId));
+    return target;
   }
   async resolveTool(qualifiedName) {
     const endpoints = await this.list();

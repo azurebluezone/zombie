@@ -124,7 +124,7 @@ export async function discoverMcpTools(endpoint) {
   const safe=await assertSafeMcpUrl(endpoint.url,{...(endpoint.networkPolicy??{}),allowHosts:endpoint.allowHosts??[]});
   const initializeId=`zc-init-${randomUUID()}`;
   const clientDir = String(process.env.MCP_CLIENT_DIR ?? '').trim();
-  const extraHeaders = clientDir ? {'x-mcp-client-dir': clientDir} : {};
+  const extraHeaders = { ...(endpoint.headers ?? {}), ...(clientDir ? {'x-mcp-client-dir': clientDir} : {}) };
   const init=await postJson(endpoint.url,{jsonrpc:'2.0',id:initializeId,method:'initialize',params:{protocolVersion:LATEST_MCP_PROTOCOL_VERSION,capabilities:{roots:{listChanged:false}},clientInfo:{name:'zombiecoder-runtime',version:RUNTIME_VERSION}}},{lookup:safe.lookup,protocolVersion:LATEST_MCP_PROTOCOL_VERSION,extraHeaders});
   const initResult=assertRpcSuccess(init,'initialize');
   const requestedVersion=LATEST_MCP_PROTOCOL_VERSION;
@@ -138,9 +138,9 @@ export async function discoverMcpTools(endpoint) {
     throw error;
   }
   const sessionId=init.sessionId??null;
-  await postJson(endpoint.url,{jsonrpc:'2.0',method:'notifications/initialized',params:{}},{sessionId,lookup:safe.lookup,protocolVersion:negotiatedVersion,notification:true});
+  await postJson(endpoint.url,{jsonrpc:'2.0',method:'notifications/initialized',params:{}},{sessionId,lookup:safe.lookup,protocolVersion:negotiatedVersion,notification:true,extraHeaders});
   const listId=`zc-list-${randomUUID()}`;
-  const listed=await postJson(endpoint.url,{jsonrpc:'2.0',id:listId,method:'tools/list',params:{}},{sessionId,lookup:safe.lookup,protocolVersion:negotiatedVersion});
+  const listed=await postJson(endpoint.url,{jsonrpc:'2.0',id:listId,method:'tools/list',params:{}},{sessionId,lookup:safe.lookup,protocolVersion:negotiatedVersion,extraHeaders});
   const result=assertRpcSuccess(listed,'tools_list');
   const tools=Array.isArray(result.tools)?result.tools:[];
   return {initialize:init.body,sessionId:listed.sessionId??sessionId,protocolVersion:listed.protocolVersion??negotiatedVersion,requestedProtocolVersion:requestedVersion,versionNegotiated:negotiatedVersion!==requestedVersion,tools};
@@ -149,6 +149,6 @@ export async function discoverMcpTools(endpoint) {
 export async function callMcpTool(endpoint,toolName,argumentsValue={}, {sessionId,protocolVersion}={}) {
   const safe=await assertSafeMcpUrl(endpoint.url,{...(endpoint.networkPolicy??{}),allowHosts:endpoint.allowHosts??[]});
   const requestId=`zc-call-${randomUUID()}`;
-  const response=await postJson(endpoint.url,{jsonrpc:'2.0',id:requestId,method:'tools/call',params:{name:toolName,arguments:argumentsValue}},{sessionId:sessionId??endpoint.sessionId,lookup:safe.lookup,protocolVersion:protocolVersion??endpoint.protocolVersion??LATEST_MCP_PROTOCOL_VERSION});
+  const response=await postJson(endpoint.url,{jsonrpc:'2.0',id:requestId,method:'tools/call',params:{name:toolName,arguments:argumentsValue}},{sessionId:sessionId??endpoint.sessionId,lookup:safe.lookup,protocolVersion:protocolVersion??endpoint.protocolVersion??LATEST_MCP_PROTOCOL_VERSION,extraHeaders:endpoint.headers??{}});
   return assertRpcSuccess(response,'tool_call');
 }

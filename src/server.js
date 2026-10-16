@@ -6,16 +6,17 @@ import { createStore } from './storage/storage.js';
 import { createApiKey, hashSecret, authenticateApiKey } from './auth/application-auth.js';
 import { isAdminAuthorized } from './auth/admin-auth.js';
 import { id } from './core/ids.js';
-import { McpRegistry } from './mcp/registry.js';
+import { McpRegistry, redactEndpoint } from './mcp/registry.js';
 import { ProviderRegistry } from './providers/registry.js';
 import { ContextResolver } from './context/resolver.js';
 import { McpPermissions } from './mcp/permissions.js';
 import { McpAudit } from './mcp/audit.js';
 import { callMcpTool, LATEST_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSIONS } from './mcp/client.js';
-import { handleMcpServerMessage, mcpServerToolCatalog } from './mcp/server.js';
+import { handleMcpServerMessage, mcpServerToolCatalog, negotiateProtocolVersion, MCP_SERVER_NAME } from './mcp/server.js';
 import { validateToolArguments } from './mcp/schema.js';
 import { AppLimits } from './mcp/limits.js';
 import { McpConnections } from './mcp/connections.js';
+import { McpClientSessions } from './mcp/sessions.js';
 import { McpReconciliation } from './mcp/reconciliation.js';
 import { ProjectContextStore } from './context/project-context.js';
 import { EntityDoor } from './entities/entity-door.js';
@@ -122,6 +123,8 @@ const extensionResolver = new ExtensionResolver({agents: agentsRegistry, skills:
 const permissions = new McpPermissions(store);
 const mcpAudit = new McpAudit(store);
 const connections = new McpConnections(store, {leaseMs:Number(process.env.MCP_CONNECTION_LEASE_MS ?? 300000)});
+// Inbound MCP client sessions (clients talking to this runtime's /mcp server).
+const mcpClients = new McpClientSessions(store, {idleMs:Number(process.env.MCP_CLIENT_IDLE_MS ?? 120000)});
 const reconciliation = new McpReconciliation(mcpAudit, {graceMs:Number(process.env.MCP_RECONCILIATION_GRACE_MS ?? 30000)});
 await connections.cleanupExpired();
 if (process.env.MCP_RECONCILE_ON_START === 'true') await reconciliation.reconcile();
@@ -361,7 +364,11 @@ const requestHandler = async (req,res) => {
       }
       // Inbound MCP (Streamable HTTP server). POST carries JSON-RPC 2.0;
       // GET/DELETE are the optional session-channel/termination verbs.
-      if (req.method==='DELETE') { res.writeHead(204,{'mcp-session-id':String(req.headers['mcp-session-id']??'')}); return res.end(); }
+      if (req.method==='DELETE') {
+        const ended=req.headers['mcp-session-id'] ? String(req.headers['mcp-session-id']) : '';
+        if (ended) await mcpClients.close(ended).catch(()=>{});
+        res.writeHead(204,{'mcp-session-id':ended}); return res.end();
+      }
       if (req.method!=='POST') { res.writeHead(405,{'allow':'POST, DELETE'}); return res.end(); }
       const mcpApp=authenticateApiKey(bearer(req), await applications());
       if (!mcpApp) {
@@ -381,6 +388,19 @@ const requestHandler = async (req,res) => {
         executeTool: (name,args,meta)=>executeMcpServerTool(mcpApp.id,name,args,mcpRequestId,meta)
       });
       requestState.outcome='accepted';
+      // Record the inbound client session so the console can answer "which
+      // client is connected, what is its id, and what is it doing".
+      const effectiveSession=outcome.sessionId ?? inboundSession;
+      if (effectiveSession) {
+        await mcpClients.touch({
+          sessionId: effectiveSession,
+          clientInfo: mcpMessage?.method === 'initialize' ? (mcpMessage?.params?.clientInfo ?? null) : null,
+          protocolVersion: mcpMessage?.method === 'initialize' ? negotiateProtocolVersion(mcpMessage?.params?.protocolVersion) : null,
+          applicationId: mcpApp.id,
+          method: mcpMessage?.method ?? null,
+          requestId: mcpRequestId
+        }).catch(()=>{});
+      }
       const headers=outcome.sessionId?{'mcp-session-id':outcome.sessionId,'mcp-protocol-version':LATEST_MCP_PROTOCOL_VERSION}:{};
       if (!outcome.body) { res.writeHead(202,headers); return res.end(); }
       return send(res,200,outcome.body,headers);
@@ -808,11 +828,17 @@ const requestHandler = async (req,res) => {
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/mcp/endpoints') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
-      return send(res,201,{endpoint:await mcp.register(await body(req, config.maxBodyBytes))});
+      return send(res,201,{endpoint:redactEndpoint(await mcp.register(await body(req, config.maxBodyBytes)))});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/endpoints') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
-      return send(res,200,{endpoints:await mcp.list()});
+      return send(res,200,{endpoints:(await mcp.list()).map(redactEndpoint)});
+    }
+    if (req.method==='DELETE' && /^\/v1\/admin\/mcp\/endpoints\/[^/]+$/.test(url.pathname)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const endpointId=decodeURIComponent(url.pathname.split('/')[5]);
+      try { const removed=await mcp.remove(endpointId); return send(res,200,{removed:redactEndpoint(removed)}); }
+      catch (error) { return send(res,404,{error:String(error?.message??'mcp_endpoint_not_found')}); }
     }
     if (req.method==='POST' && url.pathname.startsWith('/v1/admin/mcp/endpoints/') && url.pathname.endsWith('/discover')) {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -821,7 +847,7 @@ const requestHandler = async (req,res) => {
       const endpoint = await mcp.discover(endpointId);
       let connection = null;
       if (input.runtimeId || input.clientId) connection = await connections.upsert({ ...input, endpointId, sessionId:endpoint.sessionId });
-      return send(res,200,{endpoint,connection});
+      return send(res,200,{endpoint:redactEndpoint(endpoint),connection});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/mcp/permissions') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -859,6 +885,33 @@ const requestHandler = async (req,res) => {
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/tools') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{tools:await mcp.tools()});
+    }
+    // Inbound MCP server: what it advertises and who is connected to it.
+    if (req.method==='GET' && url.pathname==='/v1/admin/mcp/server') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const enabled=config.mcpServerEnabled===true;
+      const clients=await mcpClients.list();
+      return send(res,200,{
+        enabled,
+        url:enabled?`${req.headers['x-forwarded-proto']||'http'}://${req.headers.host||`localhost:${config.port}`}/mcp`:null,
+        name:MCP_SERVER_NAME,
+        protocolVersion:LATEST_MCP_PROTOCOL_VERSION,
+        supportedProtocolVersions:MCP_PROTOCOL_VERSIONS,
+        tools:enabled?mcpServerToolCatalog(await toolsRegistry.list()).map(t=>({name:t.name,description:t.description})):[],
+        clients:{total:clients.length,active:clients.filter(c=>c.active).length},
+        idleMs:Number(process.env.MCP_CLIENT_IDLE_MS ?? 120000)
+      });
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/mcp/clients') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const clients=await mcpClients.list();
+      return send(res,200,{clients,active:clients.filter(c=>c.active).length,total:clients.length,idleMs:Number(process.env.MCP_CLIENT_IDLE_MS ?? 120000)});
+    }
+    if (req.method==='DELETE' && /^\/v1\/admin\/mcp\/clients\/[^/]+$/.test(url.pathname)) {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const closed=await mcpClients.close(decodeURIComponent(url.pathname.split('/')[5]));
+      if (!closed) return send(res,404,{error:'mcp_client_not_found'});
+      return send(res,200,{client:closed});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/providers/models') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});

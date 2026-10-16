@@ -657,58 +657,92 @@ VIEWS.tools = { title: 'Tools', sub: 'Native tool registry, global on/off switch
 } };
 
 /* mcp */
-VIEWS.mcp = { title: 'MCP', sub: 'Server endpoint + outbound MCP client fabric', actions: '<button class="btn" data-act="mcp-reconcile">Reconcile</button> <button class="btn" data-act="mcp-sync">Sync external</button>', render: async (v) => {
-  const [config, clients, { endpoints }, { tools }, { connections }, { permissions }] = await Promise.all([
-    api('/api/config/mcp'), api('/api/mcp-clients'), api('/v1/admin/mcp/endpoints'),
-    api('/v1/admin/mcp/tools'), api('/v1/admin/mcp/connections'), api('/v1/admin/mcp/permissions')
+// Kept outside the view so a re-render after "Verify & add" can still show what
+// the verification actually discovered instead of a flash message that is gone.
+let lastMcpVerify = null;
+VIEWS.mcp = { title: 'MCP', sub: 'Inbound server, connected clients and the outbound MCP fabric', actions: '<button class="btn" data-act="mcp-reconcile">Reconcile</button> <button class="btn" data-act="mcp-sync">Sync external</button>', render: async (v) => {
+  const [config, server, { clients, active, idleMs }, { endpoints }, { tools }, { connections }, { permissions }, { applications }] = await Promise.all([
+    api('/api/config/mcp'), api('/v1/admin/mcp/server'), api('/v1/admin/mcp/clients'),
+    api('/v1/admin/mcp/endpoints'), api('/v1/admin/mcp/tools'), api('/v1/admin/mcp/connections'),
+    api('/v1/admin/mcp/permissions'), api('/v1/admin/applications')
   ]);
   const audit = await api('/v1/admin/mcp/audit?limit=50').catch(() => ({ events: [] }));
   const incomplete = await api('/v1/admin/mcp/incomplete').catch(() => ({ incomplete: [] }));
   const external = await api('/v1/admin/registry/external-mcp').catch(() => ({ servers: [], endpoints: [] }));
-  const serverReady = config.server && config.server.implemented;
-  const serverCard = panel('Server endpoint', serverReady ? 'this runtime serves MCP' : 'client-only',
-    '<div class="panel-b">' + kv({
-      role: config.role,
-      implemented: serverReady,
-      url: config.transport && config.transport.url,
-      protocol: config.server && config.server.protocol,
-      latestProtocol: config.server && config.server.protocol_version,
-      supported: config.server && config.server.supported_protocol_versions,
-      exposedTools: config.server && Array.isArray(config.server.tools) ? config.server.tools.length : 0
-    }) + (serverReady
-      ? '<p style="margin:12px 0 0;display:flex;gap:8px;align-items:center"><span class="tag ok">no API key needed on loopback</span><span class="muted" style="font-size:11.5px">POST JSON-RPC 2.0 to ' + esc(config.transport.url) + ' · initialize / tools/list / tools/call</span></p>'
-      : '<p class="muted" style="margin:12px 0 0;font-size:11.5px">' + esc(config.server && config.server.note || '') + '</p>') +
+  const appName = id => { const a = applications.find(x => x.id === id); return a ? (a.name || a.id) : (id || '—'); };
+
+  const serverCard = panel('Inbound MCP server', server.enabled ? 'serving' : 'disabled',
+    '<div class="panel-b">' +
+      (server.enabled
+        ? '<div class="tsum" style="margin-bottom:12px"><span class="tag ok">enabled</span><span class="tag mute">' + esc(server.name) + '</span><span class="tag mute">' + esc(server.protocolVersion) + '</span><span class="tag mute">' + server.tools.length + ' tools</span></div>' +
+          '<p class="muted" style="font-size:12.5px;margin:0 0 6px">POST JSON-RPC 2.0 to <span class="mono">' + esc(server.url) + '</span> — initialize → tools/list → tools/call. Loopback callers are trusted; remote callers need an application key.</p>' +
+          '<div class="sect">Advertised tools</div>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:6px">' + server.tools.map(t => '<span class="chip">' + esc(t.name) + '</span>').join('') + '</div>' +
+          '<p class="muted" style="font-size:11.5px;margin:10px 0 0">Supported protocol versions: <span class="mono">' + (server.supportedProtocolVersions || []).join(', ') + '</span></p>'
+        : '<p class="muted" style="font-size:12.5px;margin:0">The runtime is acting as an MCP client only. Set <span class="mono">MCP_SERVER_ENABLED=true</span> to expose POST /mcp.</p>') +
     '</div>');
-  const eRows = endpoints.map(e => '<tr><td><strong>' + esc(e.name || e.id) + '</strong><div class="sub mono">' + esc(e.id) + '</div></td>' +
-    '<td class="mono">' + esc(e.url) + '</td><td>' + enabledTag(e.enabled) + '</td>' +
+
+  const clientRows = clients.map(c => '<tr>' +
+    '<td><strong>' + esc(c.clientName || 'unknown client') + '</strong><div class="sub mono">' + esc(c.clientVersion || '') + '</div></td>' +
+    '<td class="mono" style="font-size:11.5px">' + esc(c.sessionId) + '</td>' +
+    '<td>' + esc(appName(c.applicationId)) + '<div class="sub mono">' + esc(c.applicationId || '') + '</div></td>' +
+    '<td class="mono">' + esc(c.protocolVersion || '') + '</td>' +
+    '<td>' + c.requestCount + '<div class="sub">' + (c.methods || []).length + ' method(s)</div></td>' +
+    '<td class="mono">' + esc(c.lastMethod || '') + '</td>' +
+    '<td>' + (c.active ? '<span class="tag ok">working now</span>' : '<span class="tag mute">idle</span>') +
+      '<div class="sub muted">' + esc(when(c.lastSeenAt)) + (c.idleMs != null ? ' · ' + Math.round(c.idleMs / 1000) + 's ago' : '') + '</div></td>' +
+    '<td class="actions"><div class="row">' +
+      (c.status === 'closed' ? '<span class="tag mute">closed</span>' : '<button class="btn tiny danger" data-act="mcp-client-close" data-id="' + esc(c.sessionId) + '">Disconnect</button>') +
+    '</div></td></tr>').join('');
+
+  const eRows = endpoints.map(e => '<tr>' +
+    '<td><strong>' + esc(e.name || e.id) + '</strong><div class="sub mono">' + esc(e.id) + '</div></td>' +
+    '<td class="mono" style="font-size:11.5px">' + esc(e.url) + '</td>' +
+    '<td>' + (e.hasAuth ? '<span class="tag ok">key set</span>' : '<span class="tag mute">none</span>') + '</td>' +
     '<td>' + statusTag(e.status || 'unknown') + '<div class="sub mono">' + esc(e.lastErrorCode || '') + '</div></td>' +
-    '<td>' + esc(dash(e.protocolVersion)) + ' · ' + (Array.isArray(e.tools) ? e.tools.length : 0) + '</td>' +
-    '<td><button class="btn tiny" data-act="mcp-discover" data-id="' + esc(e.id) + '">Discover</button></td></tr>').join('');
-  const tRows = tools.map(t => '<tr><td class="mono">' + esc(t.qualifiedName || t.name) + '</td><td class="mono">' + esc(t.endpointId || '') + '</td><td>' + esc(t.name || '') + '</td></tr>').join('');
-  const pRows = permissions.map(p => '<tr><td class="mono">' + esc(p.applicationId) + '</td><td class="mono">' + esc(p.qualifiedName) + '</td><td class="muted">' + esc(dash(p.createdAt)) + '</td></tr>').join('');
-  const cRows = connections.map(c => '<tr><td class="mono">' + esc(c.connectionId || '—') + '</td><td class="mono">' + esc(c.endpointId || '') + '</td><td class="mono">' + esc(c.sessionId || '') + '</td><td class="muted">' + esc(dash(c.updatedAt || c.createdAt)) + '</td></tr>').join('');
-  const aRows = (audit.events || []).slice(-40).reverse().map(ev => '<tr><td class="mono">' + esc(ev.ts || ev.createdAt || '') + '</td><td>' + statusTag(ev.outcome || ev.stage) + '</td><td class="mono">' + esc(ev.qualifiedName || '') + '</td><td class="mono">' + esc(ev.applicationId || '') + '</td></tr>').join('');
-  v.innerHTML = serverCard +
-    '<div class="grid g3" style="margin-top:14px">' +
-      stat('Outbound endpoints', endpoints.length, 'registered MCP servers') +
+    '<td>' + esc(e.protocolVersion || '—') + '<div class="sub">' + (Array.isArray(e.tools) ? e.tools.length : 0) + ' tool(s)</div></td>' +
+    '<td class="actions"><div class="row">' +
+      '<button class="btn tiny primary" data-act="mcp-discover" data-id="' + esc(e.id) + '">Verify</button>' +
+      '<button class="btn tiny danger" data-act="mcp-remove" data-id="' + esc(e.id) + '">Remove</button>' +
+    '</div></td></tr>').join('');
+
+  const tRows = tools.map(t => '<tr><td class="mono">' + esc(t.qualifiedName || t.name) + '</td><td class="mono">' + esc(t.endpointId || '') + '</td><td class="muted">' + esc(t.description || t.name || '').slice(0, 90) + '</td></tr>').join('');
+  const pRows = permissions.map(p => '<tr><td>' + esc(appName(p.applicationId)) + '<div class="sub mono">' + esc(p.applicationId) + '</div></td><td class="mono">' + esc(p.qualifiedName) + '</td><td class="muted">' + esc(dash(p.createdAt)) + '</td>' +
+    '<td class="actions"><button class="btn tiny danger" data-act="mcp-perm-revoke" data-app="' + esc(p.applicationId) + '" data-name="' + esc(p.qualifiedName) + '">Revoke</button></td></tr>').join('');
+  const aRows = (audit.events || []).slice(-40).reverse().map(ev => '<tr><td class="mono" style="font-size:11.5px">' + esc(ev.timestamp || ev.ts || '') + '</td><td>' + statusTag(ev.action || ev.stage || '') + '</td><td>' + statusTag(ev.outcome || '') + '</td><td class="mono">' + esc(ev.qualifiedName || '') + '</td><td>' + esc(appName(ev.applicationId)) + '</td></tr>').join('');
+
+  v.innerHTML =
+    '<div class="grid g4" style="margin-bottom:14px">' +
+      stat('Inbound tools', server.tools.length, server.enabled ? 'advertised on /mcp' : 'server disabled') +
+      stat('Connected clients', active + ' / ' + clients.length, 'active within ' + Math.round(idleMs / 1000) + 's') +
+      stat('Outbound servers', endpoints.length, endpoints.filter(e => e.status === 'discovered').length + ' verified') +
       stat('Client tools', tools.length, 'discovered qualified tools') +
-      stat('Connections', connections.length, 'active leases') +
-      stat('Audit events', (audit.events || []).length, 'recent') +
     '</div>' +
-    panel('Outbound MCP servers', endpoints.length + ' endpoint(s)', table(['Endpoint', 'URL', 'Enabled', 'Status', 'Protocol · tools', ''], eRows, 'No MCP endpoints registered.')) +
-    panel('Discovered tools', tools.length + ' tool(s)', table(['Qualified name', 'Endpoint', 'Remote name'], tRows, 'No tools discovered.')) +
-    panel('Access permissions', permissions.length + ' grant(s)', table(['Application', 'Qualified name', 'Created'], pRows, 'No MCP permissions.')) +
-    panel('Connections', connections.length + '', table(['Connection', 'Endpoint', 'Session', 'Updated'], cRows, 'No active connections.')) +
-    panel('Audit trail', 'latest 40', table(['Timestamp', 'Outcome', 'Tool', 'Application'], aRows, 'No audit events.')) +
-    panel('External MCP registry', '', '<div class="panel-b">' + jsonBlock({ servers: external.servers, endpoints: external.endpoints }) + '</div>') +
-    panel('Incomplete', '', '<div class="panel-b">' + (incomplete.incomplete && incomplete.incomplete.length ? jsonBlock(incomplete.incomplete) : '<span class="muted">none</span>') + '</div>') +
-    panel('Register endpoint', '', '<div class="panel-b"><div class="row">' +
-      '<label class="f">id<input id="m-id" placeholder="endpoint-id"></label>' +
-      '<label class="f">name<input id="m-name" placeholder="Display name"></label>' +
-      '<label class="f">url<input id="m-url" placeholder="http://127.0.0.1:5400/mcp" style="width:280px"></label>' +
-      '<label class="f">allowHosts<input id="m-hosts" placeholder="127.0.0.1"></label>' +
-      '<button class="btn primary" data-act="mcp-add-ep">Register</button>' +
-    '</div></div>');
+    serverCard +
+    panel('Connected clients', clients.length + ' session(s)', table(['Client', 'Session id', 'Application', 'Protocol', 'Requests', 'Last method', 'State', ''], clientRows, 'No MCP client has connected to /mcp yet.')) +
+    panel('Add an MCP tool', 'register a base URL, then verify it', '<div class="panel-b"><div class="row" style="align-items:flex-end">' +
+      '<label class="f" style="min-width:300px;flex:1">Base URL<input id="m-url" placeholder="https://host/mcp"></label>' +
+      '<label class="f" style="min-width:220px">API key (optional)<input id="m-apikey" type="password" placeholder="Bearer token" autocomplete="off"></label>' +
+      '<label class="f">id (optional)<input id="m-id" placeholder="auto"></label>' +
+      '<label class="f">allowHosts<input id="m-hosts" placeholder="host.example" style="width:170px"></label>' +
+      '<button class="btn primary" data-act="mcp-verify">Verify &amp; add</button></div>' +
+      '<div id="m-out" style="margin-top:12px">' + (lastMcpVerify
+        ? '<div class="tsum"><span class="tag ok">verified</span><span class="tag mute">' + esc(lastMcpVerify.id) + '</span><span class="tag mute">' + lastMcpVerify.count + ' tools</span></div><div class="sect">Tools added</div>' + jsonBlock(lastMcpVerify.tools)
+        : '<span class="muted" style="font-size:12.5px">The runtime performs a real MCP handshake (initialize → tools/list). Only after that succeeds are the tools added to the client tool list.</span>') + '</div>' +
+      '</div>') +
+    panel('Outbound MCP servers', endpoints.length + ' endpoint(s)', table(['Endpoint', 'URL', 'Auth', 'Status', 'Protocol', ''], eRows, 'No MCP endpoints registered.')) +
+    panel('Client tools', tools.length + ' tool(s)', table(['Qualified name', 'Endpoint', 'Description'], tRows, 'No tools discovered.')) +
+    panel('Access permissions', permissions.length + ' grant(s)', '<div class="panel-b"><div class="row" style="align-items:flex-end;margin-bottom:12px">' +
+      '<label class="f">Application<select id="mp-app">' + applications.map(a => '<option value="' + esc(a.id) + '">' + esc(a.name + ' (' + a.id + ')') + '</option>').join('') + '</select></label>' +
+      '<label class="f">Tool<select id="mp-name">' + tools.map(t => '<option value="' + esc(t.qualifiedName) + '">' + esc(t.qualifiedName) + '</option>').join('') + '</select></label>' +
+      '<button class="btn primary" data-act="mcp-perm-grant">Grant</button></div>' +
+      table(['Application', 'Qualified name', 'Created', ''], pRows, 'No MCP permissions granted.') + '</div>') +
+    panel('Audit trail', 'latest 40', table(['Timestamp', 'Action', 'Outcome', 'Tool', 'Application'], aRows, 'No audit events.')) +
+    panel('Leases & registry', connections.length + ' lease(s)', '<div class="panel-b">' +
+      (connections.length ? table(['Connection', 'Endpoint', 'Session', 'Updated'], connections.map(c => '<tr><td class="mono">' + esc(c.connectionId || '—') + '</td><td class="mono">' + esc(c.endpointId || '') + '</td><td class="mono">' + esc(c.sessionId || '') + '</td><td class="muted">' + esc(dash(c.updatedAt || c.createdAt)) + '</td></tr>').join(''), '') : '<p class="muted" style="font-size:12.5px;margin:0 0 10px">No active client leases.</p>') +
+      (incomplete.incomplete && incomplete.incomplete.length ? '<div class="sect">Incomplete</div>' + jsonBlock(incomplete.incomplete) : '') +
+      '<div class="sect">External MCP registry</div>' + jsonBlock({ servers: external.servers, endpoints: external.endpoints }) +
+      '</div>');
 } };
 
 /* requests */
@@ -908,10 +942,57 @@ document.addEventListener('click', async (ev) => {
     }
     if (act === 'perm-grant') { await api('/v1/admin/tools/permissions', { method: 'POST', body: { applicationId: el('perm-app').value, toolId: el('perm-tool').value } }); return done('Permission granted ✓'); }
     if (act === 'perm-revoke') { await api('/v1/admin/tools/permissions', { method: 'DELETE', body: { applicationId: b.dataset.app, toolId: b.dataset.tool } }); return done('Permission revoked ✓'); }
-    if (act === 'mcp-discover') { await api('/v1/admin/mcp/endpoints/' + encodeURIComponent(b.dataset.id) + '/discover', { method: 'POST', body: {} }); return done('Endpoint discovered'); }
-    if (act === 'mcp-reconcile') { await api('/v1/admin/mcp/reconcile', { method: 'POST', body: {} }); return done('Reconciled'); }
-    if (act === 'mcp-sync') { await api('/v1/admin/registry/external-mcp/sync', { method: 'POST', body: {} }); return done('External MCP synced'); }
-    if (act === 'mcp-add-ep') { const id = el('m-id').value.trim(), url = el('m-url').value.trim(); if (!id || !url) return toast('id and url required', true); const hosts = el('m-hosts').value.trim(); await api('/v1/admin/mcp/endpoints', { method: 'POST', body: { id, name: el('m-name').value.trim() || id, url, allowHosts: hosts ? hosts.split(',').map(s => s.trim()) : [] } }); return done('Endpoint registered'); }
+    if (act === 'mcp-discover') {
+      const r = await api('/v1/admin/mcp/endpoints/' + encodeURIComponent(b.dataset.id) + '/discover', { method: 'POST', body: {} });
+      lastMcpVerify = { id: r.endpoint.id, count: (r.endpoint.tools || []).length, tools: (r.endpoint.tools || []).map(t => t.qualifiedName) };
+      return done('Endpoint ' + r.endpoint.id + ' verified · ' + lastMcpVerify.count + ' tool(s) ✓');
+    }
+    if (act === 'mcp-remove') {
+      if (!confirm('Remove MCP endpoint ' + b.dataset.id + ' and its discovered tools?')) return;
+      await api('/v1/admin/mcp/endpoints/' + encodeURIComponent(b.dataset.id), { method: 'DELETE' });
+      return done('MCP endpoint ' + b.dataset.id + ' removed ✓');
+    }
+    if (act === 'mcp-client-close') {
+      await api('/v1/admin/mcp/clients/' + encodeURIComponent(b.dataset.id), { method: 'DELETE' });
+      return done('Client session disconnected ✓');
+    }
+    if (act === 'mcp-verify') {
+      const url = el('m-url').value.trim();
+      const apiKey = el('m-apikey').value.trim();
+      const id = el('m-id').value.trim();
+      const hosts = el('m-hosts').value.split(',').map(s => s.trim()).filter(Boolean);
+      const out = el('m-out');
+      if (!url) return toast('A base URL is required', true);
+      out.innerHTML = '<span class="muted">Registering endpoint…</span>';
+      let endpoint;
+      try {
+        endpoint = (await api('/v1/admin/mcp/endpoints', { method: 'POST', body: { url, apiKey: apiKey || undefined, id: id || undefined, name: id || undefined, allowHosts: hosts } })).endpoint;
+      } catch (e) {
+        out.innerHTML = '<span class="err">register failed: ' + esc(e.message) + '</span>';
+        return toast('MCP register failed: ' + e.message, true);
+      }
+      out.innerHTML = '<span class="muted">Verifying ' + esc(endpoint.id) + ' — initialize → tools/list…</span>';
+      try {
+        const r = await api('/v1/admin/mcp/endpoints/' + encodeURIComponent(endpoint.id) + '/discover', { method: 'POST', body: {} });
+        lastMcpVerify = { id: r.endpoint.id, count: (r.endpoint.tools || []).length, tools: (r.endpoint.tools || []).map(t => t.qualifiedName) };
+        return done('MCP endpoint ' + r.endpoint.id + ' verified · ' + lastMcpVerify.count + ' tool(s) added ✓');
+      } catch (e) {
+        out.innerHTML = '<span class="err">verification failed: ' + esc(e.message) + '</span><p class="muted" style="font-size:11.5px;margin:8px 0 0">The endpoint is registered but no tools were added. Check the base URL and API key, then press Verify on the endpoint row.</p>';
+        return toast('MCP verification failed: ' + e.message, true);
+      }
+    }
+    if (act === 'mcp-perm-grant') {
+      const qualifiedName = el('mp-name').value;
+      if (!qualifiedName) return toast('No MCP tool to grant yet — add an endpoint first', true);
+      await api('/v1/admin/mcp/permissions', { method: 'POST', body: { applicationId: el('mp-app').value, qualifiedName } });
+      return done('MCP permission granted ✓');
+    }
+    if (act === 'mcp-perm-revoke') {
+      await api('/v1/admin/mcp/permissions', { method: 'DELETE', body: { applicationId: b.dataset.app, qualifiedName: b.dataset.name } });
+      return done('MCP permission revoked ✓');
+    }
+    if (act === 'mcp-reconcile') { await api('/v1/admin/mcp/reconcile', { method: 'POST', body: {} }); return done('Reconciled ✓'); }
+    if (act === 'mcp-sync') { await api('/v1/admin/registry/external-mcp/sync', { method: 'POST', body: {} }); return done('External MCP synced ✓'); }
     if (act === 'app-add') { const name = el('app-name').value.trim() || 'application'; const r = await api('/v1/admin/applications', { method: 'POST', body: { name } }); prompt('Application key (copy now, shown once):', r.apiKey); return done('Application created'); }
     if (act === 'app-rotate') { const r = await api('/v1/admin/applications/' + encodeURIComponent(b.dataset.id) + '/rotate-key', { method: 'POST', body: {} }); prompt('New application key (copy now):', r.apiKey); return done('Key rotated'); }
     if (act === 'app-revoke') { if (!confirm('Revoke ' + b.dataset.id + '?')) return; await api('/v1/admin/applications/' + encodeURIComponent(b.dataset.id) + '/revoke', { method: 'POST', body: {} }); return done('Application revoked'); }
