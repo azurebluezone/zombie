@@ -1,470 +1,262 @@
-<!DOCTYPE html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZombieCoder · Chat</title>
+<style>
+/* Self-contained (served under a strict CSP: no external assets at all).
+   Only the masking model names are ever shown to the browser; real provider
+   selection and routing happen behind the runtime. */
+:root{
+  --bg:#090b0e; --panel:#0c0e14; --panel2:#0f121a; --line:#1a1f2c; --line2:#232b3d;
+  --input:#10141d; --inputline:#1e2533; --text:#e2e8f0; --muted:#94a3b8; --muted2:#64748b;
+  --ok:#34d399; --okline:rgba(16,185,129,.35); --bad:#fb7185; --warn:#fbbf24; --accent:#10b981;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,Inter,sans-serif;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#1f2533;border-radius:4px}
+header{flex:0 0 56px;display:flex;align-items:center;gap:12px;padding:0 18px;border-bottom:1px solid var(--line);background:rgba(13,16,21,.92)}
+.brand{display:flex;align-items:center;gap:9px;font-weight:600;color:#fff;font-size:13.5px}
+.badge{width:26px;height:26px;border-radius:8px;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3);display:grid;place-items:center;color:var(--ok)}
+.spacer{flex:1}
+select,input,textarea,button{font:inherit;color:var(--text)}
+select{background:var(--input);border:1px solid var(--inputline);border-radius:8px;padding:6px 9px;font-size:12.5px}
+.link{color:var(--muted);font-size:12.5px;text-decoration:none;border:1px solid var(--line2);padding:6px 11px;border-radius:8px;background:#141924}
+.link:hover{color:#e2e8f0;background:#1a2230}
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);background:var(--panel2);border:1px solid var(--line2);border-radius:9px;padding:5px 10px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--bad)}
+.dot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(52,211,153,.15)}
+main{flex:1;overflow-y:auto;padding:26px 0 10px}
+.wrap{max-width:820px;margin:0 auto;padding:0 20px}
+.msg{display:flex;gap:12px;margin-bottom:22px;align-items:flex-start}
+.avatar{flex:0 0 30px;width:30px;height:30px;border-radius:9px;display:grid;place-items:center;font-size:12px;font-weight:700;border:1px solid var(--line2);background:var(--panel2);color:var(--muted)}
+.msg.user .avatar{background:rgba(16,185,129,.12);border-color:rgba(16,185,129,.3);color:var(--ok)}
+.body{min-width:0;flex:1}
+.who{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted2);margin-bottom:5px}
+.text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14.5px}
+.msg.user .text{color:#e8eef6}
+.meta{margin-top:8px;font-size:11px;color:var(--muted2);display:flex;gap:10px;flex-wrap:wrap}
+.chip{background:var(--panel2);border:1px solid var(--line);border-radius:99px;padding:1px 8px;font-size:11px;color:var(--muted)}
+.chip.ok{color:var(--ok);border-color:var(--okline)}
+.chip.bad{color:var(--bad);border-color:rgba(251,113,133,.35)}
+.cursor:after{content:"▍";color:var(--ok);animation:blink 1s steps(2,start) infinite}
+@keyframes blink{50%{opacity:0}}
+.err{background:#231016;border:1px solid rgba(251,113,133,.35);color:var(--bad);padding:12px 14px;border-radius:10px;font-size:13px;margin-bottom:22px}
+.empty{max-width:820px;margin:60px auto 0;padding:0 20px;text-align:center;color:var(--muted2)}
+.empty h1{color:#fff;font-size:22px;margin:0 0 8px;letter-spacing:-.02em}
+.empty .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-top:26px;text-align:left}
+.empty .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 14px;cursor:pointer}
+.empty .card:hover{border-color:var(--line2);background:var(--panel2)}
+.empty .card b{display:block;color:#fff;font-size:13px;margin-bottom:3px}
+.empty .card span{font-size:12px;color:var(--muted2)}
+footer{flex:0 0 auto;border-top:1px solid var(--line);background:var(--panel);padding:14px 0 18px}
+.composer{max-width:820px;margin:0 auto;padding:0 20px;display:flex;gap:10px;align-items:flex-end}
+textarea{flex:1;resize:none;height:48px;max-height:200px;background:var(--input);border:1px solid var(--inputline);border-radius:12px;padding:13px 14px;font-size:14px;outline:none}
+textarea:focus{border-color:rgba(16,185,129,.6)}
+button{background:#0f3d2e;border:1px solid var(--okline);color:var(--ok);border-radius:10px;padding:12px 18px;font-weight:600;cursor:pointer;font-size:13px}
+button:hover{background:#12503b}
+button:disabled{opacity:.45;cursor:not-allowed}
+.hint{max-width:820px;margin:8px auto 0;padding:0 20px;font-size:11px;color:var(--muted2)}
+.keybar{display:none;max-width:820px;margin:0 auto 14px;padding:12px 14px;border:1px solid var(--warn);border-radius:11px;background:rgba(251,191,36,.06);color:#fde68a;font-size:12.5px}
+.keybar.show{display:block}
+.keybar .row{display:flex;gap:8px;margin-top:9px}
+.keybar input{flex:1;background:var(--input);border:1px solid var(--inputline);border-radius:8px;padding:8px 10px;font-size:12.5px}
+.keybar button{padding:8px 14px;font-size:12.5px}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="badge">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+    </span>
+    ZombieCoder Chat
+  </div>
+  <span class="pill"><span class="dot" id="status-dot"></span><span id="status-text">connecting</span></span>
+  <div class="spacer"></div>
+  <label class="pill" style="gap:9px">Model
+    <select id="model"><option>loading…</option></select>
+  </label>
+  <button class="link" id="newchat" style="cursor:pointer">New chat</button>
+  <a class="link" href="/admin">Admin</a>
+</header>
 
-<html class="h-full dark" lang="en"><head>
-<meta charset="utf-8"/>
-<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>AI Chat — xKiro Dashboard</title>
-<!-- Tailwind CSS CDN with forms and container queries -->
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<main>
+  <div class="wrap" id="log"></div>
+  <div class="keybar" id="keybar">
+    <b>Application key required.</b> The chat API authenticates with an application key — open <a href="/admin#settings" style="color:#fde68a">Admin → Settings</a> to create one (it is shown once).
+    <div class="row"><input id="keyinput" type="password" placeholder="zc_…" autocomplete="off"><button id="keysave">Save key</button></div>
+  </div>
+  <div id="empty" class="empty">
+    <h1>Talk to the runtime</h1>
+    <p>Requests are routed server-side. You only ever see the masking model names.</p>
+    <div class="cards">
+      <div class="card" data-p="Explain what this runtime does, in three sentences."><b>What is this?</b><span>Explain the runtime</span></div>
+      <div class="card" data-p="List the tool ids you have available, one per line."><b>Available tools</b><span>Ask for the tool list</span></div>
+      <div class="card" data-p="Write a haiku about a zombie coder."><b>Haiku</b><span>Quick creative task</span></div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="composer">
+    <textarea id="input" placeholder="Send a message…  (Enter to send, Shift+Enter for a new line)"></textarea>
+    <button id="send">Send</button>
+  </div>
+  <div class="hint" id="hint">Responses come from the masked routing layer; provider and model ids are redacted.</div>
+</footer>
+
 <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            brand: {
-              50: '#ecfdf5',
-              400: '#34d399',
-              500: '#10b981',
-              600: '#059669',
-              glow: '#10b98126',
-            },
-            dark: {
-              950: '#0a0c10',
-              900: '#0e1117',
-              850: '#131720',
-              800: '#181d28',
-              700: '#222938',
-              border: '#1f2637',
-              muted: '#7a8599'
-            }
-          },
-          fontFamily: {
-            sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'Helvetica Neue', 'sans-serif'],
-          }
+(() => {
+'use strict';
+const el = id => document.getElementById(id);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const KEY_STORE = 'zc_chat_key';
+let key = localStorage.getItem(KEY_STORE) || '';
+let history = [];   // [{role, content}]
+let busy = false;
+let current = null; // {bodyEl, metaEl, textEl}
+
+function setStatus(text, on) { el('status-text').textContent = text; el('status-dot').className = 'dot' + (on ? ' on' : ''); }
+function showKeyBar(show) { el('keybar').classList.toggle('show', !!show); }
+
+async function loadModels() {
+  try {
+    const res = await fetch('/v1/models');
+    const data = await res.json();
+    const ids = (data.data || []).map(m => m.id);
+    if (ids.length) { el('model').innerHTML = ids.map(i => '<option>' + esc(i) + '</option>').join(''); return; }
+  } catch {}
+  el('model').innerHTML = '<option value="">auto</option>';
+}
+async function ping() {
+  try {
+    const r = await fetch('/health');
+    if (!r.ok) throw new Error('http_' + r.status);
+    setStatus('online', true);
+  } catch { setStatus('offline', false); }
+}
+
+function renderEmpty() {
+  el('empty').style.display = history.length ? 'none' : 'block';
+  el('log').innerHTML = history.map(m => msgHtml(m.role, m.content, null)).join('');
+}
+function msgHtml(role, content, meta) {
+  const who = role === 'user' ? 'You' : 'ZombieCoder';
+  return '<div class="msg ' + role + '"><div class="avatar">' + (role === 'user' ? 'Y' : 'ZC') + '</div>' +
+    '<div class="body"><div class="who">' + who + '</div><div class="text">' + esc(content) + '</div>' +
+    (meta ? '<div class="meta">' + meta + '</div>' : '') + '</div></div>';
+}
+function append(html) { el('empty').style.display = 'none'; const d = document.createElement('div'); d.innerHTML = html; const node = d.firstElementChild; el('log').appendChild(node); return node; }
+function scroll() { const m = document.querySelector('main'); m.scrollTop = m.scrollHeight; }
+
+function autoGrow(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 200) + 'px'; }
+
+async function send(text) {
+  if (busy || !text.trim()) return;
+  showKeyBar(!key);
+  if (!key) { setStatus('key required', false); el('keyinput').focus(); return; }
+  busy = true; el('send').disabled = true;
+  el('empty').style.display = 'none';
+  history.push({ role: 'user', content: text });
+  append(msgHtml('user', text, null));
+  scroll();
+
+  const model = el('model').value || '';
+  const node = append('<div class="msg assistant"><div class="avatar">ZC</div><div class="body"><div class="who">ZombieCoder</div><div class="text cursor"></div><div class="meta"></div></div></div>');
+  const textEl = node.querySelector('.text'), metaEl = node.querySelector('.meta');
+  let acc = '', usage = null, rounds = 0, tools = [];
+
+  try {
+    const res = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + key },
+      body: JSON.stringify({ model: model || undefined, messages: history, stream: true })
+    });
+    if (!res.ok) {
+      let msg = 'http_' + res.status;
+      try { const j = await res.json(); msg = j.error || msg; } catch {}
+      if (res.status === 401) { setStatus('unauthorized', false); showKeyBar(true); }
+      throw new Error(msg);
+    }
+    if (!res.body) throw new Error('no_stream_body');
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const frames = buf.split('\n\n');
+      buf = frames.pop();
+      for (const frame of frames) {
+        let event = 'message', data = '';
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += line.slice(5).trim();
         }
+        if (!data) continue;
+        if (data === '[DONE]') continue;
+        let j; try { j = JSON.parse(data); } catch { continue; }
+        if (event === 'error' || j.error) throw new Error(j.error || 'stream_error');
+        if (event === 'runtime') {
+          if (j.type === 'round') rounds = Math.max(rounds, j.round || rounds + 1);
+          if (j.type === 'tool' && j.toolId) tools.push(j.toolId);
+          if (j.type === 'complete' && j.usage) usage = j.usage;
+          continue;
+        }
+        const delta = j.choices && j.choices[0] && j.choices[0].delta;
+        if (delta && typeof delta.content === 'string') { acc += delta.content; textEl.textContent = acc; scroll(); }
+        if (j.usage) usage = j.usage;
       }
     }
-  </script>
-<link href="https://fonts.googleapis.com" rel="preconnect"/>
-<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
-<style data-purpose="scrollbar-and-glow">
-    /* Custom clean scrollbars */
-    ::-webkit-scrollbar {
-      width: 5px;
-      height: 5px;
-    }
-    ::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    ::-webkit-scrollbar-thumb {
-      background: #252d3d;
-      border-radius: 9999px;
-    }
-    ::-webkit-scrollbar-thumb:hover {
-      background: #374151;
-    }
-  </style>
-</head>
-<body class="h-full bg-[#0a0d12] text-[#e1e7ef] font-sans antialiased flex overflow-hidden text-[13px] selection:bg-emerald-500 selection:text-white">
-<!-- BEGIN: PrimaryLeftSidebar -->
-<aside class="w-[200px] shrink-0 border-r border-[#191e2b] bg-[#0c0f16] flex flex-col justify-between select-none" data-purpose="main-navigation">
-<div class="flex flex-col">
-<!-- Logo Branding & Workspace Header -->
-<div class="h-14 px-3 flex items-center justify-between border-b border-[#191e2b]/80">
-<div class="flex items-center gap-2">
-<div class="w-6 h-6 rounded-md bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
-<!-- xKiro Logo Glyph -->
-<svg class="w-3.5 h-3.5 stroke-[2.5]" fill="none" stroke="currentColor" viewbox="0 0 24 24">
-<path d="M4 4l16 16M4 20L20 4" stroke-linecap="round" stroke-linejoin="round"></path>
-</svg>
-</div>
-<span class="font-semibold text-[13.5px] text-white tracking-tight">xKiro Dashboard</span>
-</div>
-<button class="text-[#64748b] hover:text-[#94a3b8] transition-colors p-1" title="Collapse sidebar">
-<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<rect height="18" rx="2" width="18" x="3" y="3"></rect>
-<path d="M9 3v18"></path>
-</svg>
-</button>
-</div>
-<!-- Navigation Menus -->
-<nav class="px-2 pt-3 space-y-4">
-<!-- Section: WORKSPACE -->
-<div>
-<span class="px-2.5 text-[10px] font-bold tracking-wider text-[#525d73] uppercase">Workspace</span>
-<div class="mt-1 space-y-0.5">
-<a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#9ca3af] hover:text-white hover:bg-[#141923] transition-colors" href="#">
-<svg class="w-4 h-4 text-[#64748b]" fill="none" stroke="currentColor" stroke-width="1.8" viewbox="0 0 24 24">
-<rect height="7" rx="1.5" width="7" x="3" y="3"></rect>
-<rect height="7" rx="1.5" width="7" x="14" y="3"></rect>
-<rect height="7" rx="1.5" width="7" x="3" y="14"></rect>
-<rect height="7" rx="1.5" width="7" x="14" y="14"></rect>
-</svg>
-<span>Overview</span>
-</a>
-<a class="flex items-center justify-between px-2.5 py-1.5 rounded-md text-[#9ca3af] hover:text-white hover:bg-[#141923] transition-colors" href="#">
-<div class="flex items-center gap-2.5">
-<svg class="w-4 h-4 text-[#64748b]" fill="none" stroke="currentColor" stroke-width="1.8" viewbox="0 0 24 24">
-<path d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 10a4 4 0 00-4-4H6a2 2 0 00-2 2v4a2 2 0 002 2h8a4 4 0 004-4z"></path>
-</svg>
-<span>Announcements</span>
-</div>
-<span class="bg-emerald-500/15 text-emerald-400 font-semibold text-[9px] px-1.5 py-0.5 rounded border border-emerald-500/30">New</span>
-</a>
-</div>
-</div>
-<!-- Section: AI -->
-<div>
-<span class="px-2.5 text-[10px] font-bold tracking-wider text-[#525d73] uppercase">AI</span>
-<div class="mt-1 space-y-0.5">
-<!-- Active AI Chat Link -->
-<a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md bg-[#13221d] text-emerald-400 font-medium border border-emerald-900/40" href="#">
-<svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-</svg>
-<span>AI Chat</span>
-</a>
-<a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#9ca3af] hover:text-white hover:bg-[#141923] transition-colors" href="#">
-<svg class="w-4 h-4 text-[#64748b]" fill="none" stroke="currentColor" stroke-width="1.8" viewbox="0 0 24 24">
-<line x1="8" x2="21" y1="6" y2="6"></line>
-<line x1="8" x2="21" y1="12" y2="12"></line>
-<line x1="8" x2="21" y1="18" y2="18"></line>
-<line x1="3" x2="3.01" y1="6" y2="6"></line>
-<line x1="3" x2="3.01" y1="12" y2="12"></line>
-<line x1="3" x2="3.01" y1="18" y2="18"></line>
-</svg>
-<span>Model List</span>
-</a>
-</div>
-</div>
-<!-- Section: API -->
-<div>
-<span class="px-2.5 text-[10px] font-bold tracking-wider text-[#525d73] uppercase">API</span>
-<div class="mt-1 space-y-0.5">
-<a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#9ca3af] hover:text-white hover:bg-[#141923] transition-colors" href="#">
-<svg class="w-4 h-4 text-[#64748b]" fill="none" stroke="currentColor" stroke-width="1.8" viewbox="0 0 24 24">
-<path d="M21 2l-2 2m-1.5 1.5L16 7l-2-2m-1 3.5L11.5 7l-2-2m-1 3.5L7 7l-2-2M3 21l8-8m0 0a5 5 0 10-7.07-7.07A5 5 0 0011 13z"></path>
-</svg>
-<span>API Keys</span>
-</a>
-<a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#9ca3af] hover:text-white hover:bg-[#141923] transition-colors" href="#">
-<svg class="w-4 h-4 text-[#64748b]" fill="none" stroke="currentColor" stroke-width="1.8" viewbox="0 0 24 24">
-<line x1="18" x2="18" y1="20" y2="10"></line>
-<line x1="12" x2="12" y1="20" y2="4"></line>
-<line x1="6" x2="6" y1="20" y2="14"></line>
-</svg>
-<span>Usage</span>
-</a>
-<a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#9ca3af] hover:text-white hover:bg-[#141923] transition-colors" href="#">
-<svg class="w-4 h-4 text-[#64748b]" fill="none" stroke="currentColor" stroke-width="1.8" viewbox="0 0 24 24">
-<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-<polyline points="14 2 14 8 20 8"></polyline>
-<line x1="16" x2="8" y1="13" y2="13"></line>
-<line x1="16" x2="8" y1="17" y2="17"></line>
-<polyline points="10 9 9 9 8 9"></polyline>
-</svg>
-<span>Request Logs</span>
-</a>
-<a class="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[#9ca3af] hover:text-white hover:bg-[#141923] transition-colors" href="#">
-<svg class="w-4 h-4 text-[#64748b]" fill="none" stroke="currentColor" stroke-width="1.8" viewbox="0 0 24 24">
-<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
-<path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
-</svg>
-<span>Webhook &amp; Alerts</span>
-</a>
-</div>
-</div>
-</nav>
-</div>
-<!-- Upgrade Card at Sidebar Footer -->
-<div class="p-2.5 mb-2">
-<div class="rounded-lg border border-emerald-900/35 bg-gradient-to-b from-[#11191a] to-[#0d1416] p-3 text-center">
-<div class="flex items-center gap-2 mb-1">
-<div class="w-5 h-5 rounded bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
-<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
-</svg>
-</div>
-<span class="font-semibold text-xs text-white">Upgrade</span>
-</div>
-<p class="text-[11px] text-[#78889b] text-left mb-2.5 leading-tight">Upgrade for higher limits</p>
-<button class="w-full py-1.5 px-3 rounded-md border border-emerald-600/40 bg-emerald-950/20 text-emerald-400 hover:bg-emerald-900/30 text-[11.5px] font-medium flex items-center justify-center gap-1.5 transition">
-          View plans <span>→</span>
-</button>
-</div>
-</div>
-</aside>
-<!-- END: PrimaryLeftSidebar -->
-<!-- BEGIN: MainContentWrapper -->
-<div class="flex-1 flex flex-col min-w-0 bg-[#0b0e14]">
-<!-- BEGIN: TopBar -->
-<header class="h-14 border-b border-[#191e2b] bg-[#0c0f16] flex items-center justify-end px-4 gap-3 select-none shrink-0" data-purpose="top-header">
-<!-- Balance Pill -->
-<div class="flex items-center bg-[#131b20] border border-emerald-900/40 rounded-md px-2.5 py-1 text-emerald-400 font-medium text-xs gap-1.5 shadow-sm">
-<span>$0.00</span>
-<button class="w-4 h-4 flex items-center justify-center rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 font-bold leading-none text-[13px]">+</button>
-</div>
-<!-- API Online Badge -->
-<div class="flex items-center gap-1.5 bg-[#121921] border border-[#21293c] px-2.5 py-1 rounded-md text-xs font-medium text-[#c0cad8]">
-<span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-<span>API Online</span>
-</div>
-<!-- Notification Bell -->
-<button class="p-1.5 text-[#73829c] hover:text-[#cbd5e1] rounded-md transition" title="Notifications">
-<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
-<path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
-</svg>
-</button>
-<!-- Language Switcher -->
-<button class="flex items-center gap-1.5 text-xs text-[#a4b1c7] hover:text-white px-1.5 py-1 rounded transition">
-<span>🇺🇸</span>
-<span class="font-medium">EN</span>
-<svg class="w-3 h-3 text-[#64748b]" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<polyline points="6 9 12 15 18 9"></polyline>
-</svg>
-</button>
-<!-- Theme Mode -->
-<button class="p-1.5 text-[#73829c] hover:text-[#cbd5e1] rounded-md transition" title="Theme">
-<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-</svg>
-</button>
-<!-- User Profile Dropdown Pill -->
-<div class="flex items-center gap-2 pl-2 border-l border-[#1f2637] cursor-pointer">
-<div class="w-7 h-7 rounded-full bg-amber-700/60 overflow-hidden ring-1 ring-amber-500/30 flex items-center justify-center text-[10px] text-amber-200 font-bold">
-          SS
-        </div>
-<div class="flex flex-col text-left leading-tight">
-<span class="text-xs font-medium text-[#e2e8f0]">sahon srabon</span>
-<span class="text-[10px] text-[#6b7992]">sahonsrabon40@gmail...</span>
-</div>
-<svg class="w-3 h-3 text-[#64748b] ml-0.5" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<polyline points="6 9 12 15 18 9"></polyline>
-</svg>
-</div>
-</header>
-<!-- END: TopBar -->
-<!-- BEGIN: BodyColumns -->
-<div class="flex-1 flex overflow-hidden">
-<!-- BEGIN: ConversationsSubSidebar -->
-<aside class="w-[230px] shrink-0 border-r border-[#191e2b] bg-[#0c0f16]/90 flex flex-col p-3 select-none" data-purpose="chat-history-sidebar">
-<!-- Header -->
-<div class="flex items-center justify-between mb-3 text-xs">
-<span class="font-semibold text-[#cbd5e1]">Conversations</span>
-<button class="text-[#64748b] hover:text-[#94a3b8] transition p-0.5" title="Collapse list">
-<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<rect height="18" rx="2" width="18" x="3" y="3"></rect>
-<path d="M9 3v18"></path>
-</svg>
-</button>
-</div>
-<!-- + New chat Button -->
-<button class="w-full py-2 px-3 rounded-lg border border-[#232b3d] hover:border-[#333d54] bg-[#121621] text-xs font-medium text-[#d1d5db] hover:text-white flex items-center gap-2 transition mb-2.5">
-<svg class="w-3.5 h-3.5 text-[#9ca3af]" fill="none" stroke="currentColor" stroke-width="2.5" viewbox="0 0 24 24">
-<line x1="12" x2="12" y1="5" y2="19"></line>
-<line x1="5" x2="19" y1="12" y2="12"></line>
-</svg>
-<span>New chat</span>
-</button>
-<!-- Search Chats Input -->
-<div class="relative mb-6">
-<span class="absolute inset-y-0 left-2.5 flex items-center pointer-events-none text-[#5a677e]">
-<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<circle cx="11" cy="11" r="8"></circle>
-<line x1="21" x2="16.65" y1="21" y2="16.65"></line>
-</svg>
-</span>
-<input class="w-full bg-[#11151f] border border-[#1f2637] rounded-lg pl-8 pr-3 py-1.5 text-xs text-[#d1d5db] placeholder-[#55637a] focus:outline-none focus:border-emerald-500/50" placeholder="Search chats..." type="text"/>
-</div>
-<!-- Empty State Container -->
-<div class="flex-1 flex flex-col items-center justify-center text-center px-2">
-<div class="w-8 h-8 rounded-lg border border-[#232b3d] flex items-center justify-center text-[#55637d] mb-2.5">
-<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<line x1="12" x2="12" y1="5" y2="19"></line>
-<line x1="5" x2="19" y1="12" y2="12"></line>
-</svg>
-</div>
-<p class="text-xs text-[#758299] mb-1 font-normal">No conversations yet</p>
-<button class="text-xs text-emerald-400 font-medium hover:underline">New chat</button>
-</div>
-</aside>
-<!-- END: ConversationsSubSidebar -->
-<!-- BEGIN: MainWorkspaceCanvas -->
-<main class="flex-1 flex flex-col justify-between overflow-y-auto relative bg-[#0a0d14]" data-purpose="chat-viewport">
-<!-- Workspace Canvas Header (Model Selector + Modes) -->
-<div class="p-4 flex items-center justify-between shrink-0">
-<!-- Model Selector Dropdown -->
-<div class="flex items-center gap-1.5 bg-[#121620] border border-[#21293a] hover:border-[#2f3b52] rounded-lg px-2.5 py-1.5 cursor-pointer shadow-sm">
-<span class="text-[10px] tracking-wide font-bold px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-500 border border-amber-500/20 uppercase">Anthropic</span>
-<span class="text-xs font-semibold text-white">Sonnet 5</span>
-<svg class="w-3 h-3 text-[#707e94]" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<polyline points="6 9 12 15 18 9"></polyline>
-</svg>
-</div>
-<!-- Feature Mode Tabs -->
-<div class="flex items-center gap-1 text-xs">
-<!-- Active Tab: Chat -->
-<button class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#192233] text-white border border-[#26344d] font-medium shadow">
-<svg class="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-</svg>
-<span>Chat</span>
-</button>
-<button class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[#8896ad] hover:text-[#d1d5db] transition">
-<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
-<path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-<line x1="12" x2="12" y1="19" y2="22"></line>
-</svg>
-<span>Speech</span>
-</button>
-<button class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[#8896ad] hover:text-[#d1d5db] transition">
-<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<rect height="18" rx="2" ry="2" width="18" x="3" y="3">
-<circle cx="8.5" cy="8.5" r="1.5"></circle>
-<polyline points="21 15 16 10 5 21"></polyline>
-</rect></svg>
-<span>Images</span>
-</button>
-<button class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[#8896ad] hover:text-[#d1d5db] transition">
-<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<circle cx="12" cy="12" r="3"></circle>
-<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-</svg>
-<span>System prompt</span>
-</button>
-</div>
-</div>
-<!-- Center Welcome and Quick Starter Cards -->
-<div class="max-w-[700px] w-full mx-auto px-4 py-2 flex flex-col items-center text-center">
-<!-- Sparkle Emblem -->
-<div class="w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 mb-4 shadow-[0_0_20px_rgba(16,185,129,0.15)]">
-<svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"></path>
-</svg>
-</div>
-<h1 class="text-xl font-bold text-white mb-2 tracking-tight">What can I help you with?</h1>
-<p class="text-xs text-[#8492a6] mb-8 font-normal">Select a model above and start chatting — or pick a suggestion below.</p>
-<!-- Suggestion Cards Container -->
-<div class="w-full text-left">
-<span class="text-[11px] font-semibold text-[#5a677d] block mb-2 px-1">Try asking</span>
-<div class="grid grid-cols-2 gap-2.5">
-<!-- Card 1 -->
-<div class="p-3 rounded-xl bg-[#121622]/90 border border-[#1e2638] hover:border-[#2d3a54] hover:bg-[#151a29] cursor-pointer transition flex items-start gap-3 group">
-<div class="w-8 h-8 rounded-lg bg-teal-500/10 border border-teal-500/25 text-teal-400 flex items-center justify-center shrink-0 mt-0.5">
-<span class="font-mono text-xs font-bold">{ }</span>
-</div>
-<div>
-<h4 class="text-xs font-semibold text-[#e2e8f0] group-hover:text-white">Call the API from Python</h4>
-<p class="text-[11px] text-[#717f96] mt-0.5 line-clamp-1">A streaming script with the OpenAI SDK</p>
-</div>
-</div>
-<!-- Card 2 -->
-<div class="p-3 rounded-xl bg-[#121622]/90 border border-[#1e2638] hover:border-[#2d3a54] hover:bg-[#151a29] cursor-pointer transition flex items-start gap-3 group">
-<div class="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
-<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<path d="M9 18h6"></path>
-<path d="M10 22h4"></path>
-<path d="M12 2a7 7 0 0 0-7 7c0 2.5 1.5 4.5 3 6h8c1.5-1.5 3-3.5 3-6a7 7 0 0 0-7-7z"></path>
-</svg>
-</div>
-<div>
-<h4 class="text-xs font-semibold text-[#e2e8f0] group-hover:text-white">Explain tokens &amp; context</h4>
-<p class="text-[11px] text-[#717f96] mt-0.5 line-clamp-1">How they shape cost and answer quality</p>
-</div>
-</div>
-<!-- Card 3 -->
-<div class="p-3 rounded-xl bg-[#121622]/90 border border-[#1e2638] hover:border-[#2d3a54] hover:bg-[#151a29] cursor-pointer transition flex items-start gap-3 group">
-<div class="w-8 h-8 rounded-lg bg-purple-500/10 border border-purple-500/25 text-purple-400 flex items-center justify-center shrink-0 mt-0.5">
-<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<rect height="14" rx="2" ry="2" width="20" x="2" y="3"></rect>
-<line x1="8" x2="16" y1="21" y2="21"></line>
-<line x1="12" x2="12" y1="17" y2="21"></line>
-</svg>
-</div>
-<div>
-<h4 class="text-xs font-semibold text-[#e2e8f0] group-hover:text-white">Choose the right model</h4>
-<p class="text-[11px] text-[#717f96] mt-0.5 line-clamp-1">Compare speeds, context limits, and pricing</p>
-</div>
-</div>
-<!-- Card 4 -->
-<div class="p-3 rounded-xl bg-[#121622]/90 border border-[#1e2638] hover:border-[#2d3a54] hover:bg-[#151a29] cursor-pointer transition flex items-start gap-3 group">
-<div class="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 flex items-center justify-center shrink-0 mt-0.5">
-<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
-<path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
-<path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
-</svg>
-</div>
-<div>
-<h4 class="text-xs font-semibold text-[#e2e8f0] group-hover:text-white">Design a database schema</h4>
-<p class="text-[11px] text-[#717f96] mt-0.5 line-clamp-1">Entity relationships and indexing patterns</p>
-</div>
-</div>
-</div>
-</div>
-</div>
-<!-- Floating Chat Input Bar and Disclaimers -->
-<div class="w-full max-w-[720px] mx-auto px-4 pb-4 pt-2">
-<!-- Dock Box -->
-<div class="bg-[#121622] border border-[#222c3f] rounded-2xl shadow-2xl p-2.5 focus-within:border-[#384663] transition">
-<!-- Text Input Area -->
-<textarea class="w-full bg-transparent border-0 resize-none text-[13px] text-white placeholder-[#5d6b82] focus:ring-0 focus:outline-none p-1.5" placeholder="Message (Shift+Enter for new line)..." rows="2"></textarea>
-<!-- Bottom Toolbar inside input -->
-<div class="flex items-center justify-between pt-1">
-<!-- Left Toolbar (Attachment + Web Search) -->
-<div class="flex items-center gap-1.5">
-<button class="p-1.5 rounded-lg text-[#748299] hover:text-[#cbd5e1] hover:bg-[#1a2030] transition" title="Attach file">
-<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l7.88-7.88"></path>
-</svg>
-</button>
-<button class="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium text-[#748299] hover:text-[#cbd5e1] hover:bg-[#1a2030] transition">
-<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<circle cx="12" cy="12" r="10"></circle>
-<line x1="2" x2="22" y1="12" y2="12"></line>
-<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
-</svg>
-<span>Search</span>
-</button>
-</div>
-<!-- Right Toolbar (Model config & Send) -->
-<div class="flex items-center gap-2">
-<!-- Mode & Quality Preset -->
-<button class="flex items-center gap-1 text-[11px] text-[#8695ad] hover:text-white px-2 py-1 rounded hover:bg-[#1a2030] transition">
-<span class="font-mono font-bold text-xs">A\</span>
-<span>Sonnet 5</span>
-<span class="text-[#55637a]">High</span>
-<svg class="w-3 h-3 text-[#55637a]" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<polyline points="6 9 12 15 18 9"></polyline>
-</svg>
-</button>
-<!-- Parameter Filters -->
-<button class="p-1.5 text-[#748299] hover:text-white rounded hover:bg-[#1a2030] transition" title="Adjust Parameters">
-<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewbox="0 0 24 24">
-<line x1="4" x2="4" y1="21" y2="14"></line>
-<line x1="4" x2="4" y1="10" y2="3"></line>
-<line x1="12" x2="12" y1="21" y2="12"></line>
-<line x1="12" x2="12" y1="8" y2="3"></line>
-<line x1="20" x2="20" y1="21" y2="16"></line>
-<line x1="20" x2="20" y1="12" y2="3"></line>
-<line x1="1" x2="7" y1="14" y2="14"></line>
-<line x1="9" x2="15" y1="8" y2="8"></line>
-<line x1="17" x2="23" y1="16" y2="16"></line>
-</svg>
-</button>
-<!-- Send Button -->
-<button class="w-7 h-7 rounded-full bg-[#1e2535] text-[#55637a] hover:bg-emerald-600 hover:text-white flex items-center justify-center transition" title="Send message">
-<svg class="w-3.5 h-3.5 stroke-[2.5]" fill="none" stroke="currentColor" viewbox="0 0 24 24">
-<line x1="12" x2="12" y1="19" y2="5"></line>
-<polyline points="5 12 12 5 19 12"></polyline>
-</svg>
-</button>
-</div>
-</div>
-</div>
-<!-- Bottom Micro Notice -->
-<div class="text-center mt-2">
-<span class="text-[10px] text-[#55637a]">Sonnet 5 · AI can make mistakes. Check important information.</span>
-</div>
-</div>
-</main>
-<!-- END: MainWorkspaceCanvas -->
-</div>
-<!-- END: BodyColumns -->
-</div>
-<!-- END: MainContentWrapper -->
-</body></html>
+    textEl.classList.remove('cursor');
+    if (!acc) { acc = '(empty response)'; textEl.textContent = acc; }
+    history.push({ role: 'assistant', content: acc });
+    const chips = [];
+    if (model) chips.push('<span class="chip">' + esc(model) + '</span>');
+    if (rounds) chips.push('<span class="chip">rounds ' + rounds + '</span>');
+    if (tools.length) chips.push('<span class="chip">tools ' + tools.length + '</span>');
+    if (usage) chips.push('<span class="chip">' + (usage.total_tokens ?? '?') + ' tokens</span>');
+    chips.push('<span class="chip ok">ok</span>');
+    metaEl.innerHTML = chips.join('');
+  } catch (e) {
+    textEl.classList.remove('cursor');
+    metaEl.innerHTML = '<span class="chip bad">' + esc(e.message) + '</span>';
+    if (!acc) node.remove();
+    history.pop(); // drop the user turn so a retry does not duplicate it
+  } finally {
+    busy = false; el('send').disabled = false; scroll();
+  }
+}
+
+/* ---------------------------------------------------------------- wiring */
+el('send').addEventListener('click', () => { const t = el('input'); const v = t.value; if (!v.trim()) return; t.value = ''; autoGrow(t); send(v); });
+el('input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); el('send').click(); }
+});
+el('input').addEventListener('input', e => autoGrow(e.target));
+el('keysave').addEventListener('click', () => {
+  key = el('keyinput').value.trim();
+  if (!key) return;
+  localStorage.setItem(KEY_STORE, key);
+  el('keyinput').value = ''; showKeyBar(false); setStatus('ready', true);
+  el('hint').textContent = 'Key saved locally in this browser (localStorage). It is never sent anywhere except this runtime.';
+});
+el('newchat').addEventListener('click', () => { history = []; current = null; el('log').innerHTML = ''; renderEmpty(); });
+document.querySelectorAll('.card').forEach(c => c.addEventListener('click', () => { el('input').value = c.dataset.p; el('send').click(); }));
+
+loadModels(); ping();
+if (!key) showKeyBar(true); else setStatus('ready', true);
+setInterval(ping, 30000);
+el('input').focus();
+})();
+</script>
+</body>
+</html>

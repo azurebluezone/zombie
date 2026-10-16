@@ -288,12 +288,23 @@ const requestHandler = async (req,res) => {
     const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
     // CORS preflight: hardening + allowlisted CORS headers were applied above.
     if (req.method==='OPTIONS') { res.writeHead(204); res.end(); return; }
+    // Both bundled pages are fully self-contained (inline style + inline script,
+    // no external assets), so one strict CSP covers them: inline is allowed for
+    // style/script only, and network access is limited to this origin.
+    const PAGE_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
     if (req.method==='GET' && (url.pathname==='/admin' || url.pathname==='/admin/')) {
       const html = await readFile(fromRoot('public','admin','index.html'), 'utf8');
-      // The page is self-contained (inline style + inline script), so CSP is
-      // scoped to 'unsafe-inline' for those two sources and nothing else.
-      res.writeHead(200, {'content-type':'text/html; charset=utf-8','content-security-policy':"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"});
+      res.writeHead(200, {'content-type':'text/html; charset=utf-8','content-security-policy':PAGE_CSP});
       res.end(html); return;
+    }
+    // Chat UI is the runtime's front door: only the masking model names are ever
+    // visible to it, real provider/model routing stays server-side.
+    if (req.method==='GET' && (url.pathname==='/' || url.pathname==='/chat' || url.pathname==='/chat/')) {
+      try {
+        const html = await readFile(fromRoot('public','chat.html'), 'utf8');
+        res.writeHead(200, {'content-type':'text/html; charset=utf-8','content-security-policy':PAGE_CSP});
+        res.end(html); return;
+      } catch { /* missing bundle: fall through to the standard 404 */ }
     }
     if (req.method==='GET' && url.pathname==='/health') {
       const coreModules = {
