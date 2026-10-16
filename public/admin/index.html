@@ -374,7 +374,6 @@ function mount(id) {
   el('page-sub').textContent = view.sub || '';
   el('page-actions').innerHTML = view.actions || '';
   el('view').innerHTML = '<div class="loading">Loading ' + esc(view.title) + '…</div>';
-  if (r === 'metrics' && stopMetrics == null) startMetricsPoll();
   view.render(el('view')).catch(e => { el('view').innerHTML = panel('Error', '', '<div class="panel-b"><p class="err">' + esc(e.message) + '</p><p class="muted mono">' + esc(e.stack || '') + '</p></div>'); });
 }
 function go() { const id = (location.hash || '#dashboard').slice(1); mount(id); }
@@ -428,6 +427,62 @@ const eventRow = e => '<tr data-level="' + esc(e.level || 'info') + '" data-even
   '<td>' + esc(dash(e.durationMs)) + '</td>' +
   '<td>' + outcomeTag(e.outcome) + '</td>' +
   '<td class="mono" style="font-size:11px">' + esc(String(e.requestId || '').slice(0, 22)) + '</td></tr>';
+
+/* ------------------------------------------------------------- mini charts */
+// Inline SVG only: the page must stay self-contained (no CDN, strict CSP), so
+// every graph here is a few SVG primitives rather than a charting dependency.
+const CHART = { ok: '#34d399', bad: '#fb7185', warn: '#fbbf24', accent: '#10b981', muted: '#64748b', grid: '#1a1f2c' };
+function sparkline(values, { w = 320, h = 60, color = CHART.accent } = {}) {
+  const vals = (values || []).map(n => (typeof n === 'number' && isFinite(n) ? n : 0));
+  if (vals.length < 2) return '<div class="empty" style="padding:14px">not enough data yet</div>';
+  const max = Math.max(1, ...vals);
+  const step = w / (vals.length - 1);
+  const points = vals.map((v, i) => [(i * step).toFixed(1), (h - 4 - (v / max) * (h - 12)).toFixed(1)]);
+  const line = points.map(p => p.join(',')).join(' ');
+  const area = '0,' + h + ' ' + line + ' ' + w + ',' + h;
+  return '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" width="100%" height="' + h + '">' +
+    '<polygon points="' + area + '" fill="' + color + '" opacity="0.15"></polygon>' +
+    '<polyline points="' + line + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></polyline>' +
+    '</svg>';
+}
+function barPairs(items, { w = 560, h = 130 } = {}) {
+  const list = (items || []).filter(Boolean);
+  if (!list.length) return '<div class="empty" style="padding:14px">no runs recorded yet</div>';
+  const max = Math.max(1, ...list.map(i => (i.ok || 0) + (i.bad || 0)));
+  const slot = (w - 8) / list.length;
+  const bw = Math.max(8, Math.min(38, slot - 8));
+  const bars = list.map((it, i) => {
+    const x = 4 + i * slot + (slot - bw) / 2;
+    const okH = ((it.ok || 0) / max) * (h - 30);
+    const badH = ((it.bad || 0) / max) * (h - 30);
+    const y0 = h - 20 - okH;
+    return '<rect x="' + x.toFixed(1) + '" y="' + y0.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + Math.max(0, okH).toFixed(1) + '" rx="2" fill="' + CHART.ok + '"><title>' + esc(it.label) + ': ' + (it.ok || 0) + ' ok</title></rect>' +
+      (badH ? '<rect x="' + x.toFixed(1) + '" y="' + (y0 - badH).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + badH.toFixed(1) + '" rx="2" fill="' + CHART.bad + '"><title>' + esc(it.label) + ': ' + (it.bad || 0) + ' failed</title></rect>' : '') +
+      '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (h - 5) + '" font-size="9" fill="' + CHART.muted + '" text-anchor="middle">' + esc(String(it.label).slice(0, 10)) + '</text>';
+  }).join('');
+  return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + h + '">' + bars + '</svg>';
+}
+function donut(segments, { size = 140, thickness = 16 } = {}) {
+  const segs = (segments || []).filter(s => s.value > 0);
+  const total = segs.reduce((n, s) => n + s.value, 0);
+  if (!total) return '<div class="empty" style="padding:14px">no data yet</div>';
+  const r = (size - thickness) / 2;
+  const c = 2 * Math.PI * r;
+  let acc = 0;
+  const arcs = segs.map(s => {
+    const len = (s.value / total) * c;
+    const el = '<circle cx="' + size / 2 + '" cy="' + size / 2 + '" r="' + r + '" fill="none" stroke="' + s.color + '" stroke-width="' + thickness +
+      '" stroke-dasharray="' + len.toFixed(2) + ' ' + (c - len).toFixed(2) + '" stroke-dashoffset="' + (-acc).toFixed(2) +
+      '" transform="rotate(-90 ' + size / 2 + ' ' + size / 2 + ')"><title>' + esc(s.label || '') + ': ' + s.value + '</title></circle>';
+    acc += len;
+    return el;
+  }).join('');
+  return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 ' + size + ' ' + size + '">' + arcs +
+    '<text x="' + size / 2 + '" y="' + (size / 2) + '" text-anchor="middle" font-size="24" fill="' + CHART.ok + '" font-weight="600">' + total + '</text>' +
+    '<text x="' + size / 2 + '" y="' + (size / 2 + 17) + '" text-anchor="middle" font-size="10" fill="' + CHART.muted + '">total</text></svg>';
+}
+const legend = items => '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px">' + (items || []).map(i =>
+  '<span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--muted)"><span style="width:9px;height:9px;border-radius:3px;background:' + i.color + ';display:inline-block"></span>' + esc(i.label) + ' <strong style="color:var(--text)">' + esc(dash(i.value)) + '</strong></span>').join('') + '</div>';
 
 /* ------------------------------------------------------------------ views */
 const VIEWS = {};
@@ -924,21 +979,147 @@ VIEWS.logs = { title: 'Logs', sub: 'Structured runtime log (newest first)', acti
 } };
 
 /* metrics */
-let metricsTimer = null; let stopMetrics = null;
-function startMetricsPoll() { stopMetrics = setInterval(() => { if (current === 'metrics') VIEWS.metrics.render(el('view')).catch(() => {}); }, 5000); metricsTimer = stopMetrics; }
-VIEWS.metrics = { title: 'Metrics', sub: 'Counters and circuit breaker (auto-refresh 5s)', render: async (v) => {
-  const [m, h] = await Promise.all([api('/v1/admin/metrics'), api('/health')]);
+// Counts are shown as cards and graphs; the raw JSON is still available but
+// demoted into a collapsed <details> so it is never the primary view.
+// The request graph is fed by the same live SSE stream as the Requests page,
+// so it needs no polling and no second connection.
+const METRIC_BUCKET_MS = 5000;
+const METRIC_BUCKETS = 12;
+function metricBuckets(events) {
+  const now = Date.now();
+  const buckets = Array.from({ length: METRIC_BUCKETS }, () => ({ total: 0, ok: 0, bad: 0 }));
+  for (const e of events) {
+    const t = Date.parse(e.ts || '');
+    if (!isFinite(t)) continue;
+    const age = now - t;
+    if (age < 0 || age > METRIC_BUCKET_MS * METRIC_BUCKETS) continue;
+    const idx = METRIC_BUCKETS - 1 - Math.floor(age / METRIC_BUCKET_MS);
+    if (idx < 0 || idx >= METRIC_BUCKETS) continue;
+    const b = buckets[idx];
+    b.total += 1;
+    if (e.outcome === 'failure' || e.level === 'error' || e.statusCode >= 400) b.bad += 1;
+    else if (e.outcome === 'success' || (e.statusCode >= 200 && e.statusCode < 400)) b.ok += 1;
+  }
+  return buckets;
+}
+VIEWS.metrics = { title: 'Metrics', sub: 'Live counters, graphs and circuit state', actions: '<button class="btn" data-act="refresh">Reload</button>', render: async (v) => {
+  const [m, h, { metrics: agentRuns }, { providers }, { clients, active }] = await Promise.all([
+    api('/v1/admin/metrics'), api('/health'), api('/v1/admin/agents/metrics'),
+    api('/v1/admin/providers'), api('/v1/admin/mcp/clients')
+  ]);
+  const cb = h.circuitBreaker || {};
+  const modules = h.coreModules || {};
+  const moduleTotal = Object.keys(modules).length;
+  const moduleUp = Object.values(modules).filter(Boolean).length;
+  const downModules = Object.entries(modules).filter(([, on]) => !on).map(([k]) => k);
+  const enabledProviders = providers.filter(p => p.enabled !== false);
+  const health = {
+    healthy: enabledProviders.filter(p => String(p.healthStatus || '').toLowerCase() === 'healthy').length,
+    error: enabledProviders.filter(p => String(p.healthStatus || '').toLowerCase() === 'error').length,
+    unchecked: enabledProviders.filter(p => !p.healthStatus).length
+  };
+
   v.innerHTML =
-    '<div class="grid g4">' +
+    '<div class="grid g4" style="margin-bottom:14px">' +
       stat('Providers', m.providers.enabled + ' / ' + m.providers.total, 'enabled / total') +
-      stat('Models', m.models.total, '') +
-      stat('Agents mapped', m.agents.mapped + ' / ' + m.agents.total, '') +
+      stat('Models', m.models.total, 'across enabled providers') +
+      stat('Agents ready', (h.agentRuntime && h.agentRuntime.ready) + ' / ' + m.agents.total, 'runtime audit') +
       stat('Applications', m.applications.active + ' / ' + m.applications.total, 'active / total') +
+      stat('MCP clients', active + ' / ' + clients.length, 'working now / seen') +
+      stat('Core modules', moduleUp + ' / ' + moduleTotal, downModules.length ? downModules.length + ' down' : 'all up') +
       stat('MCP audit events', m.auditEvents, '') +
       stat('Execution mode', m.executionMode, '') +
     '</div>' +
-    panel('Circuit breaker', '', '<div class="panel-b">' + kv(h.circuitBreaker || {}) + '</div>') +
-    panel('Raw metrics', 'generated ' + esc(dash(m.generatedAt)), '<div class="panel-b">' + jsonBlock(m) + '</div>');
+    panel('Requests over time', 'live · last 60s in 5s buckets',
+      '<div class="panel-b">' +
+        '<div id="mx-spark">' + sparkline(metricBuckets(liveEvents).map(b => b.total)) + '</div>' +
+        '<div id="mx-legend">' + legend([{ label: 'events', value: liveEvents.length, color: CHART.accent }]) + '</div>' +
+      '</div>') +
+    panel('Success vs failure', 'live · from the request stream',
+      '<div class="panel-b" style="display:flex;gap:22px;align-items:center;flex-wrap:wrap">' +
+        '<div id="mx-donut">' + donut([{ label: 'success', value: 1, color: CHART.ok }]) + '</div>' +
+        '<div id="mx-split" style="flex:1;min-width:220px"></div>' +
+      '</div>') +
+    panel('Agent runs', 'observed outcomes per agent', '<div class="panel-b" id="mx-agents">' + barPairs(agentRuns.map(r => ({ label: r.agentId, ok: r.success, bad: r.failure }))) + '</div>') +
+    panel('Provider health', enabledProviders.length + ' enabled provider(s)',
+      '<div class="panel-b" style="display:flex;gap:22px;align-items:center;flex-wrap:wrap">' +
+        donut([
+          { label: 'healthy', value: health.healthy, color: CHART.ok },
+          { label: 'error', value: health.error, color: CHART.bad },
+          { label: 'not checked', value: health.unchecked, color: CHART.muted }
+        ]) +
+        '<div style="flex:1;min-width:260px">' + legend([
+          { label: 'healthy', value: health.healthy, color: CHART.ok },
+          { label: 'error', value: health.error, color: CHART.bad },
+          { label: 'not checked', value: health.unchecked, color: CHART.muted }
+        ]) +
+        '<div class="tablewrap" style="margin-top:12px"><table><tbody>' + enabledProviders.map(p =>
+          '<tr><td><strong>' + esc(p.name || p.id) + '</strong><div class="sub mono">' + esc(p.id) + '</div></td>' +
+          '<td>' + healthTag(p) + '</td><td class="muted">' + esc(when(p.lastHealthCheckAt)) + '</td>' +
+          '<td>' + esc((p.models || []).length) + ' model(s)</td></tr>').join('') +
+        '</tbody></table></div></div>' +
+      '</div>') +
+    panel('Circuit breaker', 'outbound provider calls',
+      '<div class="grid g4">' +
+        stat('Failure threshold', cb.failureThreshold, 'consecutive failures') +
+        stat('Reset timeout', cb.resetTimeoutMs ? (cb.resetTimeoutMs / 1000) + 's' : '—', 'before half-open') +
+        stat('Half-open probes', cb.halfOpenMaxCalls, 'allowed calls') +
+        stat('State', cb.state || 'closed', cb.openedAt ? 'opened ' + when(cb.openedAt) : 'normal operation') +
+      '</div>') +
+    panel('Runtime capabilities', moduleUp + ' / ' + moduleTotal + ' modules up',
+      '<div class="panel-b">' +
+        '<div style="display:flex;flex-wrap:wrap;gap:6px">' + Object.entries(modules).map(([k, on]) =>
+          '<span class="chip" style="' + (on ? '' : 'border-color:var(--bad);color:var(--bad)') + '">' + esc(k) + '</span>').join('') + '</div>' +
+      '</div>') +
+    panel('Raw metrics', 'generated ' + esc(dash(m.generatedAt)),
+      '<div class="panel-b"><details><summary class="muted" style="cursor:pointer;font-size:12px">Show raw JSON</summary>' + jsonBlock(m) + '</details></div>');
+
+  // Live wiring: repaint the graphs from the shared buffer, throttled so a burst
+  // of events cannot repaint on every single frame.
+  const paint = () => {
+    const buckets = metricBuckets(liveEvents);
+    const total = buckets.reduce((n, b) => n + b.total, 0);
+    const ok = buckets.reduce((n, b) => n + b.ok, 0);
+    const bad = buckets.reduce((n, b) => n + b.bad, 0);
+    const spark = el('mx-spark'); if (spark) spark.innerHTML = sparkline(buckets.map(b => b.total));
+    const d = el('mx-donut'); if (d) d.innerHTML = donut([
+      { label: 'success', value: ok, color: CHART.ok },
+      { label: 'failure', value: bad, color: CHART.bad }
+    ]);
+    const split = el('mx-split');
+    if (split) split.innerHTML = legend([
+      { label: 'success', value: ok, color: CHART.ok },
+      { label: 'failure', value: bad, color: CHART.bad },
+      { label: 'other', value: Math.max(0, total - ok - bad), color: CHART.muted }
+    ]) + '<p class="muted" style="font-size:11.5px;margin:10px 0 0">Window: last ' + (METRIC_BUCKET_MS * METRIC_BUCKETS / 1000) + 's of runtime events.</p>';
+    const lg = el('mx-legend'); if (lg) lg.innerHTML = legend([{ label: 'events in window', value: total, color: CHART.accent }]);
+  };
+  let lastPaint = 0, pending = null;
+  const schedulePaint = () => {
+    const now = Date.now();
+    if (now - lastPaint > 1500) { lastPaint = now; paint(); return; }
+    if (pending) return;
+    pending = setTimeout(() => { pending = null; lastPaint = Date.now(); paint(); }, 1500);
+  };
+  let agentTimer = null;
+  const refreshAgents = () => {
+    if (agentTimer) return;
+    agentTimer = setTimeout(async () => {
+      agentTimer = null;
+      try {
+        const { metrics: rows } = await api('/v1/admin/agents/metrics');
+        const box = el('mx-agents');
+        if (box) box.innerHTML = barPairs(rows.map(r => ({ label: r.agentId, ok: r.success, bad: r.failure })));
+      } catch { /* the graph simply keeps its previous state */ }
+    }, 1200);
+  };
+  const off = onLive(e => {
+    schedulePaint();
+    if (/^(chat\.|execution\.|tool_loop\.)/.test(String(e.event || ''))) refreshAgents();
+  });
+  startLogStream(80);
+  paint();
+  currentTeardown = () => { off(); if (pending) clearTimeout(pending); if (agentTimer) clearTimeout(agentTimer); };
 } };
 
 /* runtime */
