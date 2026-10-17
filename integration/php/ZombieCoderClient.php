@@ -3,9 +3,22 @@
 declare(strict_types=1);
 
 /**
- * Minimal server-side PHP client for ZombieCoder Runtime.
+ * Server-side PHP client for the ZombieCoder Runtime — CLIENT side.
  *
- * No Composer package is required. Keep the API key server-side.
+ * This class speaks for ONE ecommerce application, using that application's own
+ * key. It can chat, stream, and manage its own sessions. It can NOT create
+ * applications, change expiry, or grant tools: those belong to the operator and
+ * live in ZombieCoderAdminClient (which needs the admin token).
+ *
+ * Keep the application key on the server. The browser must never receive it.
+ *
+ * Verified against the running runtime (LIVE_PROBE_PASSED):
+ *   POST /v1/chat/completions   (stream:false and stream:true)
+ *   POST /v1/sessions           -> {session:{id,applicationId,userId,status,...}}
+ *
+ * NOT_TESTED: no `php` binary exists on the build host, so this file has never
+ * been executed. The HTTP contract it targets was probed live; the PHP code was
+ * not. Run `php -l` and a smoke call on a host that has PHP before trusting it.
  */
 final class ZombieCoderClient
 {
@@ -18,7 +31,11 @@ final class ZombieCoderClient
 
     /**
      * Send a normal chat request and return the decoded runtime payload.
-     * The caller receives the runtime's request/trace IDs for support/debugging.
+     *
+     * @param array<int,array{role:string,content:string}> $messages
+     * @param array<string,mixed> $options  e.g. agent, autoToolLoop, consent,
+     *                                      toolIds, provider, sessionId, userId
+     * @return array{data:array<string,mixed>,request_id:string,trace_id:string,http_status:int}
      */
     public function chat(array $messages, array $options = []): array
     {
@@ -32,13 +49,141 @@ final class ZombieCoderClient
     }
 
     /**
+     * Stream a chat answer over SSE, invoking $onDelta for every token.
+     *
+     * A token travels on the `data:` channel ONLY. `event: runtime` frames are
+     * lifecycle metadata (`assistant`, `tool_result`, `tool_error`,
+     * `stream_chunk`, `complete`) and carry no token text. Do not concatenate
+     * both channels — that doubled every answer before runtime phase 72.
+     *
+     * This is the method a Laravel controller uses when it wants to push tokens
+     * to the browser through Pusher instead of buffering the whole answer.
+     *
+     * @param callable(string,array<string,mixed>):void $onDelta  ($text, $frame)
+     * @param callable(array<string,mixed>):void|null   $onEvent  runtime events
+     * @return array{text:string,request_id:string,trace_id:string,http_status:int}
+     */
+    public function chatStream(array $messages, callable $onDelta, array $options = [], ?callable $onEvent = null): array
+    {
+        $payload = array_merge([
+            'model' => $this->model,
+            'messages' => $messages,
+            'stream' => true,
+        ], $options);
+
+        $url = rtrim($this->baseUrl, '/') . '/chat/completions';
+        $requestId = 'php_' . bin2hex(random_bytes(12));
+        $traceId = 'php_trace_' . bin2hex(random_bytes(12));
+
+        $text = '';
+        $buffer = '';
+
+        $ch = curl_init($url);
+        if ($ch === false) {
+            throw new RuntimeException('zombiecoder_transport_init_failed');
+        }
+
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_RETURNTRANSFER => false,
+            CURLOPT_CONNECTTIMEOUT => min(10, $this->timeoutSeconds),
+            CURLOPT_TIMEOUT => $this->timeoutSeconds,
+            CURLOPT_HTTPHEADER => [
+                'Accept: text/event-stream',
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . $this->apiKey,
+                'X-Request-ID: ' . $requestId,
+                'X-Trace-ID: ' . $traceId,
+                'X-Client-ID: php-server-integration',
+            ],
+            CURLOPT_POSTFIELDS => json_encode($payload, JSON_THROW_ON_ERROR),
+            CURLOPT_WRITEFUNCTION => static function ($handle, string $chunk) use (&$buffer, &$text, $onDelta, $onEvent): int {
+                $buffer .= $chunk;
+
+                while (($cut = strpos($buffer, "\n\n")) !== false) {
+                    $frame = substr($buffer, 0, $cut);
+                    $buffer = substr($buffer, $cut + 2);
+                    if (trim($frame) === '') {
+                        continue;
+                    }
+
+                    $event = null;
+                    $data = null;
+                    foreach (explode("\n", $frame) as $line) {
+                        if (str_starts_with($line, 'event:')) {
+                            $event = trim(substr($line, 6));
+                        } elseif (str_starts_with($line, 'data:')) {
+                            $data = ltrim(substr($line, 5));
+                        }
+                    }
+                    if ($data === null || $data === '[DONE]') {
+                        continue;
+                    }
+
+                    $decoded = json_decode($data, true);
+                    if (!is_array($decoded)) {
+                        continue;
+                    }
+
+                    if ($event === 'runtime') {
+                        if ($onEvent !== null) {
+                            $onEvent($decoded);
+                        }
+                        continue;
+                    }
+
+                    $delta = $decoded['choices'][0]['delta']['content'] ?? null;
+                    if (is_string($delta) && $delta !== '') {
+                        $text .= $delta;
+                        $onDelta($delta, $decoded);
+                    }
+                }
+
+                return strlen($chunk);
+            },
+        ]);
+
+        $ok = curl_exec($ch);
+        $curlError = curl_error($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+
+        if ($ok === false) {
+            throw new RuntimeException('zombiecoder_transport_failed:' . ($curlError ?: 'unknown'));
+        }
+        if ($status !== 200) {
+            throw new RuntimeException(sprintf(
+                'zombiecoder_stream_failed:http_%d:request_id=%s:trace_id=%s',
+                $status,
+                $requestId,
+                $traceId,
+            ));
+        }
+
+        return [
+            'text' => $text,
+            'request_id' => $requestId,
+            'trace_id' => $traceId,
+            'http_status' => $status,
+        ];
+    }
+
+    /**
      * Create a runtime session for this application.
+     *
+     * `$userId` is the ONLY customer identity the runtime ever stores. Pass an
+     * opaque support PIN (e.g. "PIN-0005") and keep the mapping from PIN to the
+     * real customer inside your own database. The model then never receives a
+     * name, phone number or address — only the PIN.
      */
     public function createSession(?string $userId = null, array $metadata = []): array
     {
-        $payload = ['metadata' => $metadata];
+        $payload = [];
         if ($userId !== null && $userId !== '') {
             $payload['userId'] = $userId;
+        }
+        if ($metadata !== []) {
+            $payload['metadata'] = $metadata;
         }
         return $this->post('/sessions', $payload, 201);
     }

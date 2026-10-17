@@ -386,6 +386,7 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 | `phase49` protocol-version test | failing | asserts `2025-06-18`; stale assertion |
 | `server-side PHP integration client` test | failing | no `php` on the build host |
 | `instances/zc-10001/.env` dead MCP keys | left in place | deliberately untouched |
+| Per-application MCP credentials | `NOT_IMPLEMENTED` | an external MCP endpoint carries one credential set on the endpoint (`endpoint.headers`, set at registration). Injecting each application's own token at call time is the next change; until then a per-shop token means a per-shop endpoint. Documented in `docs/LARAVEL_INTEGRATION.md` §18.7 |
 
 Regression baseline at the time of writing: **329 tests, 327 pass, 2 fail**
 (both listed above). The two failures are left failing rather than silenced.

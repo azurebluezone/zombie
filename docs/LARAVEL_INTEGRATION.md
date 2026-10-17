@@ -676,13 +676,171 @@ ZOMBICODER_TIMEOUT=60
 
 ---
 
-## 18. Related documents
+## 18. The multi-tenant service model
+
+This section is the contract for running **one runtime for many client shops**.
+It is the part a Laravel developer needs when the runtime is not "our server"
+but "the service our shop subscribes to".
+
+### 18.1 One runtime, many applications
+
+One runtime process serves many applications. Each application is one client's
+shop, with its own key, its own sessions, its own feature switches, its own
+expiry, and its own tool and MCP permissions. Measured on the reference
+deployment: 13 applications in one process, RSS ≈ 80 MB. Do not start one
+process per client.
+
+```
+Client shop A (Laravel)  ─┐
+Client shop B (Laravel)  ─┤   HTTPS + that shop's application key
+Client shop C (Laravel)  ─┼──────────────────────────────────────► one runtime
+                          │                                          │
+Operator control plane   ─┘   HTTPS + the ADMIN token                ├─ agents + personas
+     (never a shop)                                                ├─ tool loop + evidence gate
+                                                                    ├─ MCP client (external tools)
+                                                                    └─ provider routing
+```
+
+### 18.2 Two credentials, and why they must never mix
+
+| Credential | Who holds it | What it can do |
+| --- | --- | --- |
+| **Application key** (`zc_…`) | the shop's `.env`, server-side only | chat, stream, sessions — **only for its own application** |
+| **Admin token** (`ADMIN_TOKEN`) | the operator only | create/revoke/extend applications, set feature switches, grant tools and MCP endpoints |
+
+Every `/v1/admin/*` route is authorised by the admin token
+(`isAdminAuthorized(bearer(req), config.adminToken)`), so an application key
+cannot reach it. **Never ship the admin token to a shop.** If a shop needs a
+feature turned on, the operator turns it on.
+
+`integration/php/ZombieCoderClient.php` is the shop's client.
+`integration/php/ZombieCoderAdminClient.php` is the operator's client.
+
+### 18.3 Onboarding one client (the exact calls)
+
+All of these are operator calls and were probed live.
+
+```php
+$admin = new ZombieCoderAdminClient('http://127.0.0.1:9999/v1', getenv('ZOMBIECODER_ADMIN_TOKEN'));
+
+// 1. Create the shop and get its key. The key is shown ONCE.
+$created = $admin->createApplication('Rahim Store', '2026-11-17T00:00:00.000Z');
+$applicationId = $created['application']['id'];
+$shopKey       = $created['apiKey'];          // hand this to the shop securely
+
+// 2. Turn on exactly the features the shop bought.
+foreach (['note_store', 'read_file'] as $toolId) {
+    $admin->setTool($applicationId, $toolId, true);
+}
+// Everything not named stays off when a stored value exists; the environment
+// defaults still apply where no stored value exists (see §18.4).
+
+// 3. Allow the external capabilities the shop bought.
+$admin->grantMcpTool($applicationId, 'mcp_facebook-ads_create_campaign');
+$admin->grantMcpTool($applicationId, 'mcp_whatsapp_send_message');
+```
+
+The runtime keeps only a **hash** of the key (`apiKeyHash`); the plaintext key
+is returned once and never stored. If it is lost, rotate it:
+`$admin->rotateApplicationKey($applicationId)` — the old key stops working
+immediately.
+
+### 18.4 Feature entitlement — the "5 features for 700 BDT" switch
+
+`GET /v1/admin/applications/capabilities?applicationId=…` returns the effective
+state of every tool with the reason:
+
+```json
+{
+  "applicationId": "app_…",
+  "tools": {
+    "runtime_echo": { "enabled": true, "source": "environment-list", "explicit": true },
+    "write_file":   { "enabled": true, "source": "database",         "explicit": true }
+  }
+}
+```
+
+Resolution order, highest first:
+
+1. the value stored on the application (`capabilities.tools.<id>` in the DB) —
+   survives restarts and wins over the environment;
+2. `ZOMBIECODER_TOOL_<ID>` for that one tool;
+3. the `ZOMBIECODER_TOOLS` allow-list;
+4. otherwise "unconfigured".
+
+So a stored value is what makes a paid feature deterministic. Set it for every
+feature in the shop's plan; leave unplanned features unset or explicitly false.
+
+### 18.5 Expiry and renewal
+
+`expiresAt` is enforced at **authentication**, not at the route:
+
+```js
+a.status === 'active' && (!a.expiresAt || new Date(a.expiresAt) > new Date())
+```
+
+A shop whose period ended gets `401 application_unauthorized_or_expired` on
+every call — including chat. `POST /v1/admin/applications/{id}/extend` moves the
+date; `…/revoke` stops it immediately. Drive this from the operator's billing,
+not from the shop.
+
+### 18.6 The support PIN — the runtime never learns who the customer is
+
+The runtime stores exactly one customer identifier per session: an opaque
+`userId`. Probed live:
+
+```bash
+POST /v1/sessions  { "userId": "PIN-0005" }
+→ { "session": { "id": "sess_…", "userId": "PIN-0005", … } }
+```
+
+The contract:
+
+1. The shop keeps the mapping **PIN → real customer** in its own database.
+2. The shop sends only the PIN to the runtime (`userId`, or a `supportPin` field
+   the shop folds into the session).
+3. The runtime echoes the PIN back in `meta.session`.
+4. When an image goes to a vision model, only the PIN and the image are sent —
+   never a name, phone number, or address.
+
+The runtime has nothing to look up, because it was never given anything to look
+up. The shop is the only place where a PIN becomes a person.
+
+### 18.7 Who provides what
+
+| Concern | Provider |
+| --- | --- |
+| The model, the answer, the runtime service | **the runtime** |
+| The shop's data (products, stock, orders, customers) | **the shop** |
+| The Meta app, the Page token, the WhatsApp number | **the shop** |
+| Turning a feature on, expiry, revocation | **the operator** (admin token) |
+| What a PIN means | **the shop** (the runtime never knows) |
+
+The runtime does not hold a client's Meta credentials today. An external MCP
+endpoint currently carries **one** credential set on the endpoint itself
+(`endpoint.headers`, set at registration). Per-application credentials — so each
+shop's own token is injected at call time — are **NOT_IMPLEMENTED** and are the
+next change; until then, a per-shop token means a per-shop endpoint.
+
+### 18.8 What is verified
+
+| Claim | Status | Basis |
+| --- | --- | --- |
+| The admin routes and their shapes in §18.3–§18.5 | **LIVE_PROBE_PASSED** | probed against a running instance |
+| Session `userId` round-trip (§18.6) | **LIVE_PROBE_PASSED** | probed: `PIN-0005` stored and returned |
+| Streaming `data:`-only contract (§6.3) | **LIVE_PROBE_PASSED** | re-probed after the phase-72 fix |
+| The PHP clients in §18.3 | **NOT_TESTED** | no `php` on the build host |
+| Per-application MCP credentials (§18.7) | **NOT_IMPLEMENTED** | named here so it is not assumed |
+
+---
+
+## 19. Related documents
 
 | Document | Contents |
 | --- | --- |
 | `README.md` | the runtime as a whole |
 | `docs/OBSERVABILITY.md` | logging, diagnostics, troubleshooting |
 | `docs/DESIGN_FLOW.md` | why the runtime is built this way and how the next change must be made |
-| `integration/php/` | the dependency-free PHP client |
+| `integration/php/` | the dependency-free PHP clients (shop + operator) |
 | `GET /v1/admin/routes` | authoritative, machine-readable route inventory |
 | `.env.example` | every configuration key |

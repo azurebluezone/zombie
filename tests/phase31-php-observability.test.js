@@ -19,7 +19,9 @@ test('logger preserves request/trace correlation and redacts credentials', async
   await rm(dir, {recursive:true, force:true});
 });
 
-test('server-side PHP integration client passes PHP syntax validation', () => {
-  execFileSync('php', ['-l', path.resolve('integration/php/ZombieCoderClient.php')], {stdio:'pipe'});
+test('server-side PHP integration clients pass PHP syntax validation', () => {
+  for (const file of ['integration/php/ZombieCoderClient.php', 'integration/php/ZombieCoderAdminClient.php']) {
+    execFileSync('php', ['-l', path.resolve(file)], {stdio:'pipe'});
+  }
   assert.ok(true);
 });
