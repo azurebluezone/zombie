@@ -426,6 +426,8 @@ one strict Content-Security-Policy.
 
 ## 11. Quick start
 
+On a machine that already has this checkout:
+
 ```bash
 # 1. install (no dependencies — this only fetches nothing, it is here for clarity)
 node --version          # must be >= 22.5.0
@@ -442,6 +444,32 @@ npm test
 # 4. start the runtime
 npm start
 ```
+
+### A machine with nothing on it (bootstrap)
+
+`scripts/bootstrap.sh` is for the case that actually hurts: a reinstalled OS, where there is
+no Node, no checkout, no `.env` and no service. It finds what exists, installs only what is
+missing, and never overwrites what it did not create.
+
+```bash
+# from inside a checkout
+bash scripts/bootstrap.sh
+
+# from a bare machine (clones the repository first)
+curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombie/main/scripts/bootstrap.sh | bash
+```
+
+It checks the distribution and whether `sudo` is available, installs `git`/`curl` only if
+they are missing, brings in Node >= 22.5 through `nvm` (user-level, no system change) when
+the installed Node is too old, reuses an existing checkout or clones one, creates `data/`,
+`logs/` and `certs/`, copies `.env.example` to `.env` **only when no `.env` exists**, runs
+`npm install` only when `package.json` actually declares dependencies, and then verifies
+itself with `node --check`, the Node version, and a browser discovery. `ZC_SKIP_SYSTEM=1`
+never calls `apt`; `ZC_NO_START=1` never offers to start the runtime.
+
+It does not install a systemd unit, does not edit an existing `.env`, does not run
+`git reset`/`clean`, and does not change `ZOMBIECODER_EXECUTION_MODE`. Installing a service
+is the separate, deliberately root-only `scripts/setup-os-runtime.sh` below.
 
 Then open:
 
