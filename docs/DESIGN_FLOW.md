@@ -408,6 +408,41 @@ the reason it was made.
   post-restart checklist and the troubleshooting table are in
   `docs/FRESH_INSTALL.md`.
 
+### 3.19 The zero-dependency rule is enforced, not assumed
+
+- **Where:** `scripts/check-zero-deps.mjs` (the guard),
+  `tests/phase76-zero-deps.test.js` (the rule in the suite), `.gitignore`
+  (insurance), `package.json` (`check:zero-deps`).
+- **What:** this project declares no dependencies, has no lockfile, and must have no
+  `node_modules`. Any one of the three appearing is a failure. The test runner is
+  `node --test`; a script that names vitest, jest, mocha, ava or tape is a failure
+  too.
+- **The incident this comes from:** on 2026-10-16 at 22:11:46 a `npx vitest` was run
+  in this directory — npm cached vite 8.3.4 and its tree under `~/.npm/_npx`. At
+  22:12:00 vitest ran `tests/phase23-system-session.test.js`, which failed, and wrote
+  `node_modules/.vite` and `node_modules/.vitest-cache` into the working tree. The
+  test failed for a plain reason: that file imports `node:test`, and vitest cannot
+  run a `node:test` file. It was simply the wrong runner.
+- **Why it matters more than it looks:** `node_modules/` is gitignored, so the
+  repository was never affected — 0 files tracked, the tree committed clean. What
+  was affected is the *impression*. A `node_modules` directory in a project whose
+  whole design is that it has none makes the next person ask whether dependencies
+  were added, and a wrong answer there is expensive. The failure is silent, so the
+  rule has to be checked rather than remembered.
+- **How:** the guard reads `package.json`, refuses any non-empty dependency field,
+  refuses a `scripts.test` that is not `node --test`, refuses a script that names a
+  forbidden runner, probes every lockfile name an installer could leave, and refuses
+  the mere existence of `node_modules` (an empty one included — something created
+  it). It is runnable on its own and is applied on every suite run.
+- **Proof:** the guard exits `0` on this repository and exits `1` on the exact
+  incident shape, reproduced by hand (`mkdir -p node_modules/.vitest-cache` →
+  `node_modules exists — 1 entry/ies: .vitest-cache`). `phase76` (7 tests) covers a
+  declared dependency, a lockfile, a wrong `test` script, a forbidden runner name,
+  an empty `node_modules`, and that a synthetic clean root passes. The stray was
+  removed surgically — only the two cache directories, then the empty parent — after
+  proving it held no `package.json` and that the running process had zero
+  `node_modules` mappings.
+
 ---
 
 ## 4. The map — where each concern lives
@@ -494,7 +529,7 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 | `instances/zc-10001/.env` dead MCP keys | left in place | deliberately untouched |
 | Per-application MCP credentials | `NOT_IMPLEMENTED` | an external MCP endpoint carries one credential set on the endpoint (`endpoint.headers`, set at registration). Injecting each application's own token at call time is the next change; until then a per-shop token means a per-shop endpoint. Documented in `docs/LARAVEL_INTEGRATION.md` §18.7 |
 
-Regression baseline at the time of writing: **357 tests, 355 pass, 2 fail**
+Regression baseline at the time of writing: **364 tests, 362 pass, 2 fail**
 (both listed above). The two failures are left failing rather than silenced.
 
 ---

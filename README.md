@@ -99,12 +99,20 @@ tools/common/            # the runnable tool implementations (26 tools in 5 modu
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 357 tests, run with node --test
+tests/                   # 364 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
 
-There are **no dependencies**. `package.json` declares none, and `node_modules` is empty.
+There are **no dependencies**. `package.json` declares none, there is no lockfile,
+and `node_modules` must not exist. That is enforced, not assumed:
+`node scripts/check-zero-deps.mjs` fails if any of the three appears, and
+`tests/phase76-zero-deps.test.js` applies the same rule on every run.
+
+The test runner is `node --test` (`npm test`) — never vitest, jest or mocha. This
+matters more than it sounds: a `npx vitest` in this directory cannot run a
+`node:test` file (it fails), and it leaves a `node_modules` cache behind, which
+makes a zero-dependency project look as though dependencies were added.
 
 ## 3. How a request works
 
@@ -698,7 +706,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **357 tests, 355 passing, 2 failing.** The two failures are known and
+Current baseline: **364 tests, 362 passing, 2 failing.** The two failures are known and
 pre-existing:
 
 - `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the

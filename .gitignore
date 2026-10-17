@@ -39,7 +39,13 @@ build/
 coverage/
 
 # ── dependencies ─────────────────────────────────────────────
+# This project has NO dependencies. node_modules must never exist; the entry here
+# is insurance so that a stray cache (e.g. from a `npx vitest` that cannot even
+# run a node:test file) can never reach the repository. Enforced by
+# scripts/check-zero-deps.mjs and tests/phase76-zero-deps.test.js.
 node_modules/
+.vite/
+.vitest-cache/
 npm-debug.log*
 yarn-error.log*
 pnpm-debug.log*

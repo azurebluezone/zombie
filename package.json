@@ -9,6 +9,7 @@
     "start": "node start.js",
     "dev": "node --watch src/server.js",
     "build": "node scripts/build-runtime.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "check:zero-deps": "node scripts/check-zero-deps.mjs"
   }
 }

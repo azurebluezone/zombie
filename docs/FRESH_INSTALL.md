@@ -48,6 +48,35 @@ Laravel shop uses. That is a separate surface; see
 The zero-dependency choice is deliberate: there is no lockfile to drift, no
 `node_modules` to age, and nothing to audit except Node itself.
 
+### 2.1 Nothing to install — and the runner rule that follows from it
+
+Do not run `npm install`, `npx vitest`, `npx jest`, or any other installer or test
+runner in this directory. There is nothing to install, and the wrong runner does
+real damage:
+
+- `npx vitest` cannot run a `node:test` file. This project's tests import
+  `node:test`; vitest fails on them.
+- It also writes a cache into `node_modules/` — so a zero-dependency project ends
+  up looking as though dependencies were added, and the next person has to work out
+  whether they were.
+
+The runner is `node --test` (`npm test`). The rule is enforced:
+
+```bash
+node scripts/check-zero-deps.mjs    # exit 0 clean, exit 1 polluted
+```
+
+`tests/phase76-zero-deps.test.js` applies the same check on every run. If the guard
+fails, a stray cache appeared; it is not read by anything, so removing
+`node_modules` is the whole fix.
+
+This has happened once already. On 2026-10-16 at 22:11 a `npx vitest` was run here
+(it cached vite 8.3.4 under `~/.npm/_npx`), and at 22:12 it wrote
+`node_modules/.vite` and `node_modules/.vitest-cache` while failing
+`tests/phase23-system-session.test.js`. `node_modules` is gitignored, so the
+repository was never affected — 0 files were tracked — but the working tree was
+polluted. That is why the check exists.
+
 ---
 
 ## 3. Get the code
