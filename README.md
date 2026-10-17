@@ -855,6 +855,7 @@ Be explicit about the line between "implemented" and "verified".
 | --- | --- |
 | `README.md` | this file |
 | `docs/DESIGN_FLOW.md` | why the runtime is built this way, the invariants, and how the next change must be made |
+| `docs/JOURNEY.md` | the living record: what the plan was, how far it got with measured numbers, and what the next journey is |
 | `docs/LARAVEL_INTEGRATION.md` | the PHP/Laravel HTTP contract, auth, sessions, tools and error codes |
 | `docs/FACEBOOK_CHANNELS.md` | the Messenger / comment / WhatsApp / Ads plan: the rules, the blockers, and the build order |
 | `docs/FRESH_INSTALL.md` | bringing the runtime up on a fresh OS, connecting an MCP client, and the post-restart checklist |

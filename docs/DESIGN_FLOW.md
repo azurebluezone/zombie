@@ -638,6 +638,9 @@ This section tells the next agent where to begin and where to stop.
 
 ### 7.1 Where to start
 
+`docs/JOURNEY.md` holds the living queue with measured numbers and the evidence gate for each
+item. What follows is the design-driven ordering of the same work.
+
 Start from the **unfinished items in §6**, in this order of value:
 
 1. **The messaging channels** — `docs/FACEBOOK_CHANNELS.md` §9 gives the build
@@ -772,6 +775,7 @@ These were observed in an ancestor repository and must not be repeated.
 | Document | Contents |
 | --- | --- |
 | `README.md` | the runtime as a whole, and the honest limitations |
+| `docs/JOURNEY.md` | the living record: the plan, where we stand with measured numbers, and the next journey |
 | `docs/LARAVEL_INTEGRATION.md` | the PHP/Laravel HTTP contract |
 | `docs/FACEBOOK_CHANNELS.md` | the messaging-channel plan: rules, blockers, build order |
 | `docs/FRESH_INSTALL.md` | fresh-OS install, MCP client connection, post-restart checklist |
