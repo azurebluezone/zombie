@@ -99,7 +99,7 @@ tools/common/            # the 25 runnable tool implementations
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 290 tests, run with node --test
+tests/                   # 306 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -262,6 +262,36 @@ policy and the execution mode are all enforced downstream and unchanged. Set
 allowed surface; `TOOL_SURFACE_MAX` (default 12) caps only the optional families. If the
 narrowed surface somehow contains no runnable tool, the request falls back to the full
 allowed surface rather than failing.
+
+### The browser pipe (`src/browser/cdp-pipe.js`)
+
+A zero-dependency, self-contained way to drive a Chromium browser without opening a debug
+port. Chrome is launched with `--remote-debugging-pipe`, so CDP JSON travels over an
+inherited pipe — **Chrome reads fd 3 and writes fd 4**, NUL-terminated; the parent writes
+into `stdio[3]` and reads from `stdio[4]`. There is no TCP port, no WebSocket and no HTTP in
+the control channel, so nothing else on the machine can connect to a DevTools socket. The
+page may of course load `http(s)`/`file`/`data` URLs; that is Chrome doing its job.
+
+It is a module, not a tool: nothing in the agent loop calls it unless an operator wires it
+up. `browseCdp({url, action})` supports `text`, `html`, `title`, `url` and `screenshot`, and
+every returned payload is bounded.
+
+`discoverChrome()` finds a browser instead of assuming one: `CHROME_BIN`, then `PATH`, then
+the platform's well-known locations, and a failure lists everything it tried. It keeps
+Chrome's own sandbox unless the process is already root or `CDP_NO_SANDBOX=1` is set, uses
+`os.tmpdir()` (override with `CDP_TMP_ROOT`) instead of a hardcoded `/tmp`, removes its
+profile directory on stop, keeps a bounded tail of Chrome's stderr and attaches it to
+failures, and kills its browser on process exit. `openTarget()` prefers a fresh tab but
+falls back to an existing page target, because an Electron-based Chromium does not implement
+`Target.createTarget` and answers "Not supported".
+
+**Verification status.** The transport is *live-probed* against a real Chromium: Electron
+bundles Chromium, and the OpenCode desktop app on this machine answers `Browser.getVersion`
+over the pipe as `Chrome/152.0.7977.130`. A full page browse against a stock Chrome is
+**not tested** here — this machine has no Chrome binary (only a `chromium-browser` snap stub
+that refuses to start). The remaining behaviour is covered by
+`tests/phase67-cdp-pipe.test.js` against `tests/fixtures/fake-chrome.mjs`, a
+protocol-compatible stand-in that speaks the same NUL-framed fd 3/4 protocol.
 
 ## 6. Providers and model masking
 
@@ -580,7 +610,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **290 tests, 288 passing, 2 failing.** The two failures are known and
+Current baseline: **306 tests, 304 passing, 2 failing.** The two failures are known and
 pre-existing:
 
 - `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the

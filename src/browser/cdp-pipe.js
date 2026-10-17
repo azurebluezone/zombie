@@ -1,255 +1,513 @@
 #!/usr/bin/env node
-'use strict';
-
 /**
- * cdp-pipe.js — headless Chrome over --remote-debugging-pipe (ZERO HTTP).
+ * cdp-pipe.js — headless Chrome over `--remote-debugging-pipe` (zero HTTP on the control
+ * channel).
  *
- * 🧟 Ethical browsing tool (#7):
- *   Chrome is launched with `--remote-debugging-pipe`. CDP JSON messages
- *   travel over **file descriptor 3 (write) / 4 (read)** with `\0` framing.
- *   → No debug port, no TCP, no WebSocket, no HTTP anywhere in the
- *     control channel. Nothing can snarf the DevTools socket.
- *   The PAGE itself may load http(s)/file URLs — that is Chrome doing
- *     its job; OUR code never opens a socket.
+ * Chrome is launched with `--remote-debugging-pipe`, so CDP JSON messages travel over the
+ * inherited pipe: Chrome **reads fd 3** and **writes fd 4**, NUL-terminated. The parent
+ * therefore writes into `stdio[3]` and reads from `stdio[4]`. There is no debug port, no TCP,
+ * no WebSocket and no HTTP anywhere in the control channel, so nothing on the machine can
+ * reach in and talk to the DevTools socket. The page itself may load http(s)/file URLs —
+ * that is Chrome doing its job; this module never opens a socket.
  *
- * Zero-dependency, CommonJS. Used by api.js MCP tool `browse_cdp`.
+ * Zero dependencies, ESM (this package is `"type": "module"`).
+ *
+ * What changed and why
+ * --------------------
+ * The previous version was CommonJS in an ES-module package, so it could not load at all
+ * (`ReferenceError: require is not defined in ES module scope`). It also hardcoded
+ * `/opt/google/chrome/chrome`, a path that does not exist on most machines, and
+ * `/tmp/zombiecoder` for its profile. This version:
+ *
+ *   - finds a browser instead of assuming one: `CHROME_BIN`, then `PATH`, then the
+ *     well-known location for the platform, and says what it looked for when it fails;
+ *   - keeps Chrome's own sandbox. `--no-sandbox` is added only when it is asked for
+ *     (`CDP_NO_SANDBOX=1`) or when the process is already root, where Chrome refuses to
+ *     start otherwise — and the returned result says which;
+ *   - uses `os.tmpdir()`, not a hardcoded `/tmp`, and removes its profile directory when
+ *     the browser stops, so repeated runs do not fill the disk;
+ *   - keeps a bounded tail of Chrome's stderr and attaches it to failures, because a
+ *     silent stderr is how "it just does not work" happens;
+ *   - frames on the NUL **byte** and decodes afterwards, instead of splitting a decoded
+ *     string;
+ *   - waits for the pipe to answer instead of sleeping for a fixed 400 ms;
+ *   - bounds every payload it returns;
+ *   - kills its browser on process exit, so a crash does not leave Chrome behind.
  *
  * Public API:
- *   browseCdp({ url, action, timeout_ms }) → { ok, url, ... }
- *   CLI test:  node cdp-pipe.js <url> [text|html|title|screenshot]
+ *   browseCdp({ url, action, timeoutMs, maxOutputChars }) → { ok, url, title, ... }
+ *   stopCdp()
+ *   discoverChrome()
+ * CLI self-test:
+ *   node src/browser/cdp-pipe.js <url> [text|html|title|screenshot]
  */
 
-const { spawn } = require("node:child_process");
-const fs = require("node:fs");
-const path = require("node:path");
+import { spawn } from 'node:child_process';
+import { accessSync, constants as FS, existsSync, mkdirSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const CHROME_BIN = process.env.CHROME_BIN || "/opt/google/chrome/chrome";
-const TMP_ROOT = process.env.CDP_TMP_ROOT || "/tmp/zombiecoder";
-const DEFAULT_TIMEOUT = 20000;
+const DEFAULT_TIMEOUT_MS = 20000;
+const DEFAULT_READY_TIMEOUT_MS = 10000;
+const DEFAULT_MAX_OUTPUT_CHARS = 4_000_000;
+const STDERR_TAIL_CHARS = 2000;
 
-class CDPipe {
-  constructor() {
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Executable names to look for on PATH, in order of preference. */
+const PATH_CANDIDATES = Object.freeze([
+  'google-chrome',
+  'google-chrome-stable',
+  'chromium',
+  'chromium-browser',
+  'chrome',
+  'chrome-headless-shell',
+  'headless_shell'
+]);
+
+function wellKnownCandidates(platform = process.platform, env = process.env) {
+  if (platform === 'darwin') {
+    return [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary'
+    ];
+  }
+  if (platform === 'win32') {
+    const roots = [env['PROGRAMFILES'], env['PROGRAMFILES(X86)'], env['LOCALAPPDATA']].filter(Boolean);
+    return roots.flatMap((root) => [
+      path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(root, 'Chromium', 'Application', 'chrome.exe')
+    ]);
+  }
+  return [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    '/opt/google/chrome/chrome'
+  ];
+}
+
+/** Is this a file we could actually execute? Existence alone is not enough. */
+function isExecutable(candidate) {
+  if (!candidate || !existsSync(candidate)) return false;
+  try {
+    accessSync(candidate, process.platform === 'win32' ? FS.F_OK : FS.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve a bare command name against PATH, without a shell. */
+function findOnPath(name, env = process.env, platform = process.platform) {
+  const dirs = String(env.PATH ?? '').split(path.delimiter).filter(Boolean);
+  const exts = platform === 'win32'
+    ? String(env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';').filter(Boolean)
+    : [''];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      for (const variant of [name + ext.toLowerCase(), name + ext.toUpperCase(), name + ext]) {
+        const candidate = path.join(dir, variant);
+        if (isExecutable(candidate)) return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Find a browser to drive.
+ *
+ * Order: an explicit `CHROME_BIN`, then PATH, then the platform's well-known locations.
+ * A failure lists everything that was tried — "chrome binary not found" on its own leaves
+ * the operator with nothing to act on.
+ *
+ * `env`, `platform` and `wellKnownPaths` can be supplied so the search is testable without
+ * depending on what happens to be installed on the machine running the test.
+ */
+export function discoverChrome(options = {}) {
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const wellKnown = options.wellKnownPaths ?? wellKnownCandidates(platform, env);
+  const explicit = String(env.CHROME_BIN ?? '').trim();
+  if (explicit) {
+    if (!isExecutable(explicit)) {
+      throw new Error(`chrome_binary_not_executable: CHROME_BIN=${explicit}`);
+    }
+    return { path: explicit, source: 'CHROME_BIN' };
+  }
+  for (const name of PATH_CANDIDATES) {
+    const found = findOnPath(name, env, platform);
+    if (found) return { path: found, source: 'PATH' };
+  }
+  for (const candidate of wellKnown) {
+    if (isExecutable(candidate)) return { path: candidate, source: 'well-known-path' };
+  }
+  const tried = [...PATH_CANDIDATES, ...wellKnown].join(', ');
+  throw new Error(`chrome_binary_not_found: set CHROME_BIN. tried: ${tried}`);
+}
+
+/** The profile root: an explicit override, else the platform temp directory. */
+function profileRoot() {
+  const override = String(process.env.CDP_TMP_ROOT ?? '').trim();
+  return override || path.join(os.tmpdir(), 'zombiecoder');
+}
+
+/** Chrome refuses to start as root without `--no-sandbox`; nobody should have to. */
+function runningAsRoot() {
+  if (process.platform === 'win32') return false;
+  return typeof process.getuid === 'function' && process.getuid() === 0;
+}
+
+export class CDPipe {
+  constructor({ timeoutMs = DEFAULT_TIMEOUT_MS, readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS } = {}) {
+    this.timeoutMs = timeoutMs;
+    this.readyTimeoutMs = readyTimeoutMs;
     this.proc = null;
     this.msgId = 0;
-    this.pending = new Map(); // id → {resolve, reject, timer}
-    this.buf = "";
+    this.pending = new Map(); // id -> {resolve, reject, timer}
+    this.buffer = Buffer.alloc(0);
     this.toChild = null;
     this.fromChild = null;
     this.exited = false;
+    this.profileDir = null;
+    this.stderrTail = '';
+    this.sandboxDisabled = false;
+    this.browserPath = null;
+    this._onExit = null;
   }
 
-  start() {
-    if (this.proc) return;
-    if (!fs.existsSync(CHROME_BIN)) {
-      throw new Error("chrome binary not found: " + CHROME_BIN);
-    }
-    const profile = process.env.CDP_USER_DATA_DIR || path.join(TMP_ROOT, "cdp-pipe-profile-" + Date.now());
-    fs.mkdirSync(profile, { recursive: true });
-    // stdio[0]=ignore, [1]=pipe(chrome stdout, unused by pipe mode),
-    // [2]=pipe(stderr), [3]=pipe → CDP write channel, [4]=pipe → CDP read.
-    this.proc = spawn(
-      CHROME_BIN,
-      [
-        "--headless=new",
-        "--remote-debugging-pipe",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-extensions",
-        "--hide-scrollbars",
-        "--user-data-dir=" + profile,
-        "about:blank",
-      ],
-      { stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"] },
-    );
+  /** Launch Chrome and wait until the pipe answers. */
+  async start() {
+    if (this.proc) return this;
+
+    const chrome = discoverChrome();
+    this.browserPath = chrome.path;
+    this.sandboxDisabled = process.env.CDP_NO_SANDBOX === '1' || runningAsRoot();
+
+    this.profileDir = String(process.env.CDP_USER_DATA_DIR ?? '').trim()
+      || path.join(profileRoot(), `cdp-pipe-profile-${process.pid}-${Date.now()}`);
+    mkdirSync(this.profileDir, { recursive: true });
+
+    const headless = process.env.CDP_HEADLESS === '0' ? [] : ['--headless=new'];
+    const args = [
+      ...headless,
+      '--remote-debugging-pipe',
+      ...(this.sandboxDisabled ? ['--no-sandbox'] : []),
+      '--disable-gpu',
+      '--disable-dev-shm-usage',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-component-update',
+      '--disable-sync',
+      '--metrics-recording-only',
+      '--hide-scrollbars',
+      '--no-first-run',
+      '--no-default-browser-check',
+      `--user-data-dir=${this.profileDir}`,
+      'about:blank'
+    ];
+
+    // fd 3 = CDP write channel, fd 4 = CDP read channel. stdout/stderr are drained so a
+    // chatty Chrome can never block on a full pipe.
+    this.proc = spawn(chrome.path, args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'] });
     this.toChild = this.proc.stdio[3];
     this.fromChild = this.proc.stdio[4];
-    this.fromChild.setEncoding("utf8");
-    this.fromChild.on("data", (chunk) => this._onData(chunk));
-    this.proc.on("exit", (code) => {
+    // A pipe that closes under us emits `error` on the stream. Without a listener Node
+    // turns that into an uncaught exception and the whole process dies with
+    // `write EPIPE` instead of the caller getting a failed tool call.
+    this.toChild.on('error', (error) => this._failAll(`cdp_write_stream_error: ${error.message}`));
+    this.fromChild.on('error', (error) => this._failAll(`cdp_read_stream_error: ${error.message}`));
+    this.fromChild.on('data', (chunk) => this._onData(chunk));
+    this.proc.stderr.setEncoding('utf8');
+    this.proc.stderr.on('data', (chunk) => {
+      // Keep the tail instead of discarding it: a Chrome that dies at startup explains
+      // itself on stderr, and that explanation is the only useful thing in the failure.
+      this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL_CHARS);
+    });
+    this.proc.stdout.on('data', () => {});
+    this.proc.on('exit', (code, signal) => {
       this.exited = true;
-      for (const [, p] of this.pending) {
-        clearTimeout(p.timer);
-        p.reject(new Error("chrome exited (code " + code + ")"));
+      const reason = signal ? `signal ${signal}` : `code ${code}`;
+      for (const [, entry] of this.pending) {
+        clearTimeout(entry.timer);
+        entry.reject(new Error(`chrome exited (${reason})${this.stderrSuffix()}`));
       }
       this.pending.clear();
     });
-    this.proc.stderr.on("data", () => {}); // keep drained
-    // Give chrome a moment to spin up its pipe endpoint
-    return new Promise((r) => setTimeout(r, 400));
+
+    // A crash between spawn and exit must not leave Chrome running.
+    this._onExit = () => this.stop();
+    process.once('exit', this._onExit);
+
+    await this.waitForPipe();
+    return this;
   }
 
-  _onData(chunk) {
-    this.buf += chunk;
-    let idx;
-    while ((idx = this.buf.indexOf("\0")) !== -1) {
-      const raw = this.buf.slice(0, idx);
-      this.buf = this.buf.slice(idx + 1);
-      if (!raw) continue;
-      let msg;
+  stderrSuffix() {
+    const tail = this.stderrTail.trim();
+    return tail ? ` | chrome stderr: ${tail}` : '';
+  }
+
+  /** Reject every in-flight call with one reason. */
+  _failAll(reason) {
+    if (!this.pending.size) return;
+    for (const [, entry] of this.pending) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error(reason));
+    }
+    this.pending.clear();
+  }
+
+  /**
+   * Ask the browser something and wait for the answer. This replaces a fixed 400 ms
+   * sleep: a sleep that is too short fails on a slow machine and too long wastes time on
+   * a fast one, and neither says which happened.
+   */
+  async waitForPipe() {
+    const deadline = Date.now() + this.readyTimeoutMs;
+    let lastError = null;
+    while (Date.now() < deadline) {
+      if (this.exited) throw new Error(`chrome_exited_during_startup${this.stderrSuffix()}`);
       try {
-        msg = JSON.parse(raw);
-      } catch (_) {
-        continue;
+        await this.send('Browser.getVersion', {}, undefined, { timeoutMs: Math.min(2000, this.readyTimeoutMs) });
+        return true;
+      } catch (error) {
+        lastError = error;
+        await delay(100);
       }
-      if (msg.id !== undefined && this.pending.has(msg.id)) {
-        const p = this.pending.get(msg.id);
-        this.pending.delete(msg.id);
-        clearTimeout(p.timer);
-        if (msg.error) p.reject(new Error(msg.error.message || "cdp error"));
-        else p.resolve(msg.result || {});
+    }
+    throw new Error(`cdp_pipe_not_ready after ${this.readyTimeoutMs}ms: ${lastError?.message ?? 'no response'}${this.stderrSuffix()}`);
+  }
+
+  /** Frame on the NUL byte, then decode. Splitting a decoded string works by luck. */
+  _onData(chunk) {
+    this.buffer = Buffer.concat([this.buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')]);
+    let index;
+    while ((index = this.buffer.indexOf(0)) !== -1) {
+      const raw = this.buffer.subarray(0, index).toString('utf8');
+      this.buffer = this.buffer.subarray(index + 1);
+      if (!raw) continue;
+      let message;
+      try {
+        message = JSON.parse(raw);
+      } catch {
+        continue; // not our frame; CDP events we do not subscribe to are ignored
       }
-      // events are ignored (we only need request/response pairs)
+      if (message.id !== undefined && this.pending.has(message.id)) {
+        const entry = this.pending.get(message.id);
+        this.pending.delete(message.id);
+        clearTimeout(entry.timer);
+        if (message.error) entry.reject(new Error(message.error.message || 'cdp error'));
+        else entry.resolve(message.result || {});
+      }
     }
   }
 
-  send(method, params, sessionId) {
+  send(method, params, sessionId, { timeoutMs } = {}) {
     return new Promise((resolve, reject) => {
-      if (this.exited || !this.toChild) {
-        return reject(new Error("chrome not running"));
-      }
+      if (this.exited || !this.toChild) return reject(new Error('chrome not running'));
       const id = ++this.msgId;
+      const budget = Number(timeoutMs) > 0 ? Number(timeoutMs) : this.timeoutMs;
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error("CDP timeout: " + method));
-      }, DEFAULT_TIMEOUT);
+        reject(new Error(`CDP timeout after ${budget}ms: ${method}`));
+      }, budget);
+      if (typeof timer.unref === 'function') timer.unref();
       this.pending.set(id, { resolve, reject, timer });
-      const payload = JSON.stringify({
-        id,
-        method,
-        params: params || {},
-        ...(sessionId ? { sessionId } : {}),
-      });
-      this.toChild.write(payload + "\0");
+      try {
+        this.toChild.write(`${JSON.stringify({ id, method, params: params || {}, ...(sessionId ? { sessionId } : {}) })}\0`);
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new Error(`cdp_write_failed: ${error.message}`));
+      }
     });
   }
 
-  async browse({ url, action = "text", timeout_ms }) {
-    if (!url || typeof url !== "string") throw new Error("url is required");
-    if (!/^(https?:|file:)/i.test(url.trim())) {
-      throw new Error("url must start with http:// https:// or file://");
-    }
-    await this.start();
-    // Browser-level: open a target + attach flat session
-    const { targetId } = await this.send("Target.createTarget", {
-      url: "about:blank",
-    });
-    const { sessionId } = await this.send("Target.attachToTarget", {
-      targetId,
-      flatten: true,
-    });
+  /**
+   * Get a page to drive.
+   *
+   * Preferred: a fresh target, so the caller's browsing cannot disturb a page someone
+   * else is using. Electron-based Chromium (an Electron app bundles Chromium and answers
+   * on the same pipe) does not implement `Target.createTarget` and replies "Not
+   * supported", so fall back to the page target that already exists. The transport is the
+   * point, not the tab.
+   */
+  async openTarget() {
     try {
-      await this.send("Page.enable", {}, sessionId);
-      await this.send("Runtime.enable", {}, sessionId);
-      // Navigate — Chrome fetches the page itself (our code: no socket)
-      const nav = await this.send(
-        "Page.navigate",
-        { url: url.trim() },
-        sessionId,
+      const { targetId } = await this.send('Target.createTarget', { url: 'about:blank' });
+      const { sessionId } = await this.send('Target.attachToTarget', { targetId, flatten: true });
+      return { targetId, sessionId, created: true };
+    } catch (error) {
+      const listing = await this.send('Target.getTargets').then(
+        (value) => ({ value }),
+        (listError) => ({ error: listError })
       );
-      if (nav.errorText) throw new Error("navigate: " + nav.errorText);
-      // Wait for load (poll readyState — no event bookkeeping needed)
-      const deadline = Date.now() + (timeout_ms || DEFAULT_TIMEOUT);
-      let ready = "loading";
-      while (ready === "loading" && Date.now() < deadline) {
-        const r = await this.send(
-          "Runtime.evaluate",
-          {
-            expression: "document.readyState",
-            returnByValue: true,
-          },
-          sessionId,
-        );
-        ready = (r.result && r.result.value) || "loading";
-        if (ready === "loading") await new Promise((r2) => setTimeout(r2, 250));
+      const infos = Array.isArray(listing.value?.targetInfos) ? listing.value.targetInfos : [];
+      const page = infos.find((t) => t.type === 'page' && t.attached !== true) ?? infos.find((t) => t.type === 'page');
+      if (!page) {
+        // Say why both halves failed; "it did not work" is not a diagnosis.
+        const because = listing.error
+          ? `createTarget: ${error.message}; getTargets: ${listing.error.message}`
+          : `createTarget: ${error.message}; ${infos.length} target(s), none of type page`;
+        throw new Error(`cdp_no_page_target (${because})`);
       }
-      const finalUrl = await this.eval("location.href", sessionId);
-      const title = await this.eval("document.title", sessionId);
-      const out = { ok: true, url: finalUrl || url, title: title || "" };
-
-      if (action === "html") {
-        out.html = (await this.eval("document.documentElement.outerHTML", sessionId)) || "";
-      } else if (action === "title") {
-        // title already collected
-      } else if (action === "screenshot") {
-        const shot = await this.send(
-          "Page.captureScreenshot",
-          { format: "png" },
-          sessionId,
-        );
-        out.png_base64 = shot.data || "";
-      } else {
-        // default: readable text
-        out.text =
-          (await this.eval(
-            "document.body ? document.body.innerText : ''",
-            sessionId,
-          )) || "";
-      }
-      return out;
-    } finally {
-      try {
-        await this.send("Target.closeTarget", { targetId });
-      } catch (_) { /* already gone */ }
+      const { sessionId } = await this.send('Target.attachToTarget', { targetId: page.targetId, flatten: true });
+      return { targetId: page.targetId, sessionId, created: false };
     }
   }
 
   async eval(expression, sessionId) {
-    const r = await this.send(
-      "Runtime.evaluate",
-      { expression, returnByValue: true },
-      sessionId,
-    );
-    return r.result ? r.result.value : null;
+    const result = await this.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId);
+    return result.result ? result.result.value : null;
   }
 
-  stop() {
-    if (this.proc && !this.exited) {
-      try {
-        this.toChild && this.toChild.end();
-      } catch (_) {}
-      this.proc.kill("SIGKILL");
+  /**
+   * Open a URL in a fresh target and return the requested view of it.
+   *
+   * `action` is one of `text` (default), `html`, `title`, `url` or `screenshot`. Every
+   * string payload is bounded by `maxOutputChars`; a screenshot that exceeds it fails
+   * with `screenshot_too_large` rather than returning base64 that has been cut in half and
+   * no longer decodes.
+   */
+  async browse(options = {}) {
+    const { url, action = 'text', maxOutputChars } = options;
+    // `timeout_ms` is the original spelling; `timeoutMs` matches the rest of the runtime.
+    const requestedTimeout = options.timeoutMs ?? options.timeout_ms;
+    if (!url || typeof url !== 'string') throw new Error('url is required');
+    const target = url.trim();
+    if (!/^(https?:|file:|data:)/i.test(target)) {
+      throw new Error('url must start with http:// https:// file:// or data:');
     }
+    const budget = Number(requestedTimeout) > 0 ? Number(requestedTimeout) : this.timeoutMs;
+    const cap = Number(maxOutputChars) > 0 ? Number(maxOutputChars) : DEFAULT_MAX_OUTPUT_CHARS;
+
+    await this.start();
+    const { targetId, sessionId, created } = await this.openTarget();
+    try {
+      await this.send('Page.enable', {}, sessionId);
+      await this.send('Runtime.enable', {}, sessionId);
+      const navigation = await this.send('Page.navigate', { url: target }, sessionId, { timeoutMs: budget });
+      if (navigation.errorText) throw new Error(`navigate: ${navigation.errorText}`);
+
+      const deadline = Date.now() + budget;
+      let ready = 'loading';
+      while (ready === 'loading' && Date.now() < deadline) {
+        ready = (await this.eval('document.readyState', sessionId)) || 'loading';
+        if (ready === 'loading') await delay(250);
+      }
+
+      const finalUrl = (await this.eval('location.href', sessionId)) || target;
+      const title = (await this.eval('document.title', sessionId)) || '';
+      const out = { ok: true, url: finalUrl, title, readyState: ready, sandboxDisabled: this.sandboxDisabled };
+
+      const bounded = (text, label) => {
+        const value = String(text ?? '');
+        if (value.length <= cap) return value;
+        return `${value.slice(0, cap)}\n[truncated ${label}: showing ${cap} of ${value.length} characters]`;
+      };
+
+      if (action === 'html') {
+        out.html = bounded(await this.eval('document.documentElement.outerHTML', sessionId), 'html');
+      } else if (action === 'title' || action === 'url') {
+        // already collected above
+      } else if (action === 'screenshot') {
+        const shot = await this.send('Page.captureScreenshot', { format: 'png' }, sessionId, { timeoutMs: budget });
+        const data = String(shot.data ?? '');
+        if (data.length > cap) throw new Error(`screenshot_too_large: ${data.length} base64 characters exceeds maxOutputChars=${cap}`);
+        out.png_base64 = data;
+        out.png_base64_chars = data.length;
+      } else if (action === 'text') {
+        out.text = bounded(await this.eval('document.body ? document.body.innerText : ""', sessionId), 'text');
+      } else {
+        throw new Error(`unknown action: ${action} (expected text, html, title, url or screenshot)`);
+      }
+      return out;
+    } finally {
+      // Only close what we opened: an Electron target belongs to the application.
+      if (created) {
+        try {
+          await this.send('Target.closeTarget', { targetId });
+        } catch {
+          /* the target may already be gone */
+        }
+      }
+    }
+  }
+
+  /** Stop the browser and remove its profile directory. */
+  stop() {
+    const proc = this.proc;
     this.proc = null;
+    if (this._onExit) {
+      process.removeListener('exit', this._onExit);
+      this._onExit = null;
+    }
+    if (proc && !this.exited) {
+      try {
+        this.toChild?.end();
+      } catch {
+        /* already closed */
+      }
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    this.toChild = null;
+    this.fromChild = null;
+    if (this.profileDir) {
+      try {
+        rmSync(this.profileDir, { recursive: true, force: true });
+      } catch {
+        /* a locked profile is not worth failing over */
+      }
+      this.profileDir = null;
+    }
   }
 }
 
-// ─── Shared lazy instance (one chrome for the process, reused) ──
+// One browser for the process, reused across calls; replaced when it dies.
 let shared = null;
-async function browseCdp(opts) {
+
+export async function browseCdp(options) {
   if (!shared || shared.exited) shared = new CDPipe();
-  return await shared.browse(opts || {});
+  return shared.browse(options || {});
 }
-function stopCdp() {
+
+export function stopCdp() {
   if (shared) shared.stop();
   shared = null;
 }
 
-module.exports = { CDPipe, browseCdp, stopCdp };
-
-// ─── CLI self-test (pipe only, zero HTTP from this script) ──────
-if (require.main === module) {
+// ─── CLI self-test (pipe only; this script opens no socket) ──────
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
   (async () => {
-    const url = process.argv[2] || "about:blank";
-    const action = process.argv[3] || "text";
-    const c = new CDPipe();
+    const url = process.argv[2] || 'about:blank';
+    const action = process.argv[3] || 'text';
+    const pipe = new CDPipe();
     try {
-      const r = await c.browse({ url, action });
-      if (action === "screenshot") {
-        console.log(JSON.stringify({ ...r, png_base64: "<" + (r.png_base64 || "").length + " bytes>" }));
+      const result = await pipe.browse({ url, action });
+      if (action === 'screenshot') {
+        console.log(JSON.stringify({ ...result, png_base64: `<${result.png_base64_chars} base64 chars>` }, null, 2));
       } else {
-        const copy = { ...r };
-        if (copy.html) copy.html = copy.html.slice(0, 400) + "…";
+        const copy = { ...result };
+        if (copy.html) copy.html = `${copy.html.slice(0, 400)}…`;
         if (copy.text) copy.text = copy.text.slice(0, 800);
         console.log(JSON.stringify(copy, null, 2));
       }
     } finally {
-      c.stop();
+      pipe.stop();
     }
-  })().catch((e) => {
-    console.error("FAIL:", e.message);
+  })().catch((error) => {
+    console.error('FAIL:', error.message);
     process.exit(1);
   });
 }
