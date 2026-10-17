@@ -56,6 +56,7 @@ import { startTransportServers, stopTransportServers } from './transport/server.
 import { SSOTService } from './context/ssot.js';
 import { SyllabusService } from './context/syllabus.js';
 import { ProjectMemoryService } from './context/memory.js';
+import { NoteStore } from './notes/note.js';
 import { AutoSetupService } from './context/auto-setup.js';
 import { SmartRouter } from './providers/router/smart-router.js';
 import { maskCanonicalResponse, maskEvidenceForPublic, maskRouteForPublic } from './providers/masking/provider-mask.js';
@@ -67,6 +68,7 @@ import { ToolPolicy } from './tools/policy.js';
 import { sanitizeSessionMetadata } from './session/metadata.js';
 import { ExecutionLifecycle } from './execution/lifecycle.js';
 import { bootstrapProviders } from './startup/provider-bootstrap.js';
+import { warnAboutAllowlistExclusions } from './startup/allowlist-guard.js';
 import { buildBoundedContext } from './context/context-budget.js';
 import { compileContext } from './context/compiler.js';
 import { CapabilityConfigResolver } from './registry/config-resolver.js';
@@ -109,6 +111,7 @@ const projectContext = new ProjectContextStore({defaultRoot:config.dataDir, allo
 const ssot = new SSOTService({contextStore:projectContext});
 const syllabus = new SyllabusService({contextStore:projectContext});
 const memory = new ProjectMemoryService({contextStore:projectContext, maxEntries:config.memoryMaxEntries ?? 500});
+const notes = new NoteStore({maxNotes:config.notesMaxEntries ?? 500});
 const autoSetup = new AutoSetupService({contextStore:projectContext, ssot, syllabus, memory});
 await autoSetup.ensure(config.dataDir, {refreshSSOT:false});
 const entityDoor = new EntityDoor();
@@ -138,6 +141,13 @@ const smartRouter = new SmartRouter({providers, logger});
 const capabilityConfig = new CapabilityConfigResolver({store});
 const toolPolicy = new ToolPolicy(store, {configResolver:capabilityConfig, accessMode:config.toolAccessMode});
 const toolExecution = new ToolExecutionAdapter({registry:toolsRegistry, toolRoot:config.toolRoot, logger, policy:toolPolicy});
+// Registering a tool is not enough. `ZOMBIECODER_TOOLS` is a hand-maintained allowlist,
+// and a runnable tool that is missing from it is refused as
+// `tool_disabled_by_configuration` — which the executor reports as `tool_not_permitted`,
+// exactly like a missing grant. Say so once at boot instead of leaving the first tool
+// call to explain it. Read from `process.env` because that is the source the capability
+// resolver itself reads, so there is only one list.
+await warnAboutAllowlistExclusions({allowList:process.env.ZOMBIECODER_TOOLS,runnableToolIds:await runnableToolIds(),logger});
 const mcpExecution = new McpExecutionAdapter({registry:mcp, permissions, audit:mcpAudit, connections, limits, logger});
 const evidenceGate = new EvidenceGate({store, logger});
 const sessions = new SessionService(store);
@@ -654,6 +664,45 @@ const requestHandler = async (req,res) => {
       if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
       const root=url.searchParams.get('projectRoot') || config.dataDir;
       return send(res,200,{applicationId:app.id,entries:await memory.recent(root,url.searchParams.get('limit') || 10)});
+    }
+    // Project notes. The agent writes these through the `note_store` tool; this is the
+    // same store for the console and for an application, so a note an agent left behind
+    // is visible to the person who owns the folder.
+    if (req.method==='GET' && url.pathname==='/v1/context/notes') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const root=url.searchParams.get('projectRoot') || config.dataDir;
+      const query=url.searchParams.get('query') || '';
+      const limit=url.searchParams.get('limit') || 20;
+      const result=query
+        ? await notes.search(root,{query,limit})
+        : await notes.list(root,{limit,topic:url.searchParams.get('topic') || undefined,tag:url.searchParams.get('tag') || undefined});
+      return send(res,200,{applicationId:app.id,path:result.path,total:result.total,returned:result.returned,notes:result.notes,warnings:result.warnings});
+    }
+    if (req.method==='POST' && url.pathname==='/v1/context/notes') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const input=await body(req, config.maxBodyBytes);
+      try {
+        const result=await notes.append(input.projectRoot || config.dataDir,{...input,source:input.source || `application:${app.id}`});
+        return send(res,201,{applicationId:app.id,path:result.path,count:result.count,note:result.note});
+      } catch (error) {
+        if (String(error?.message)==='note_text_required') return send(res,400,{error:'note_text_required'});
+        throw error;
+      }
+    }
+    if (req.method==='DELETE' && url.pathname==='/v1/context/notes') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      const input=await body(req, config.maxBodyBytes);
+      if (!input.id) return send(res,400,{error:'note_id_required'});
+      try {
+        const result=await notes.remove(input.projectRoot || config.dataDir,{id:input.id});
+        return send(res,200,{applicationId:app.id,path:result.path,removed:result.removed,count:result.count});
+      } catch (error) {
+        if (String(error?.message)==='note_not_found') return send(res,404,{error:'note_not_found'});
+        throw error;
+      }
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/tools/permissions') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});

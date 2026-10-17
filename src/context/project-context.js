@@ -1,11 +1,19 @@
 import { access, mkdir, readFile, writeFile, realpath } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
+import { PROJECT_ROOT } from '../runtime/paths.js';
 
 const AGENTS_DIR = path.join('.zombiecoder', 'agents');
 
 export class ProjectContextStore {
-  constructor({ defaultRoot = process.cwd(), allowedRoots = null } = {}) {
+  /**
+   * `defaultRoot` used to be `process.cwd()`: a project root that silently changed with
+   * the directory the shell happened to be in. The runtime is launched by a shell, by
+   * systemd, by a test runner and by packaged builds, so the fallback is now the runtime's
+   * own package root — deterministic, and the same from every working directory. Callers
+   * that know the real project (the server passes `config.dataDir`) still win.
+   */
+  constructor({ defaultRoot = PROJECT_ROOT, allowedRoots = null } = {}) {
     this.defaultRoot = path.resolve(defaultRoot);
     this.allowedRoots = Array.isArray(allowedRoots) && allowedRoots.length ? allowedRoots.map(x => path.resolve(String(x))) : null;
   }

@@ -99,7 +99,7 @@ tools/common/            # the 25 runnable tool implementations
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 253 tests, run with node --test
+tests/                   # 290 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -184,17 +184,25 @@ behaviour; it cannot talk an agent out of the rules.
 
 ## 5. Tools
 
-32 tools are registered; **25 are runnable**.
+33 tools are registered; **26 are runnable**.
 
-**Runnable (25):** `runtime_echo`, `read_file`, `write_file`, `list_directory`,
+**Runnable (26):** `runtime_echo`, `read_file`, `write_file`, `list_directory`,
 `create_file`, `edit_file`, `apply_diff`, `delete_file`, `list_dir`, `read_directory`,
 `grep_search`, `regex_search`, `file_search`, `find_files`, `view_symbol`, `code_graph`,
 `run_terminal_command`, `execute_bash`, `kill_process`, `undo`, `revert_file`, `git_diff`,
-`git_status`, `task_planner`, `todo_manager`.
+`git_status`, `task_planner`, `todo_manager`, `note_store`.
 
 **Deliberately not implemented (7):** `web_search`, `fetch_web_page`, `delegate_subagent`
 (`NOT_IMPLEMENTED`), and `public_api`, `tts`, `ocr`, `facebook_ads` (`UNVERIFIED`).
 They are registered so the surface is honest about what does not exist yet.
+
+> **Registering a tool is not the same as enabling it.** `ZOMBIECODER_TOOLS` is a
+> hand-maintained allowlist, and a runnable tool that is missing from it is refused at
+> execution time as `tool_disabled_by_configuration` — which the executor reports as
+> `tool_not_permitted`, exactly like an application that was never granted it. An empty
+> list means "no list-based restriction"; the runtime warns at boot
+> (`tool.config_allowlist_excludes_runnable_tools`) and logs the reason of every refusal
+> (`tool.permission_denied`) so the two are no longer indistinguishable.
 
 A tool call is authorised by, in order: the **task policy**, the **application
 permission** grant, **execution consent**, the **path boundary**, and the **execution
@@ -303,6 +311,17 @@ authenticated) and through the execution boundary (`POST /v1/execution/run` with
 - **SSOT** is the single source of truth for project state; agents are told to read it
   before acting.
 - **Syllabus** records what was learned per project; **memory** holds recent entries.
+- **Notes** are the agent's own short, dated lines about the folder it is working in
+  (`.zombiecoder/agents/notes.json`). The syllabus and the memory have no writer an agent
+  can reach, so an agent that learned something had nowhere to put it and the next request
+  started from zero; `note_store` closes that gap with three actions — `append`, `list`,
+  `search` — plus `remove` for the console. Notes are **per project root**, so the folder
+  you work in is the one that is remembered, and switching folders remembers that one
+  instead. The store is built on Node's own modules, writes atomically (temporary file
+  plus rename, so a crash cannot leave a half-written file), is bounded
+  (`NOTES_MAX_ENTRIES`, default 500), and **never reads `process.cwd()`**: every call takes
+  an absolute root and a relative one is refused with `note_root_must_be_absolute`. A file
+  that does not parse is reported through `warnings` and left untouched, never deleted.
 - **Entities** model domain objects.
 - **Context compiler** assembles the minimum relevant context under a configurable byte
   budget (`COMPILED_CONTEXT_BYTES`, default 20 KB) and a recent-message window. Which SSOT
@@ -492,15 +511,17 @@ Never commit `.env`, API keys, tunnel tokens or private keys.
 ## 13. API surface
 
 The route inventory is machine-readable at `GET /v1/admin/routes`
-(`currentConcreteRoutes: 91`, `currentHandlerBlocks: 55`; the legacy inventory is 31
-concrete routes plus 17 compatibility routes). The 91 current routes group as follows:
+(`currentConcreteRoutes: 94`, `currentHandlerBlocks: 58`; the legacy inventory is 31
+concrete routes plus 17 compatibility routes). `currentConcreteRoutes` is derived from the
+route map, so it tracks the code; `currentHandlerBlocks` is hand-maintained and no code
+derives it, and the map now says so. The 94 current routes group as follows:
 
 | Group | Routes | Examples |
 | --- | --- | --- |
 | Health / models | 1 | `GET /health` (`GET /v1/models` is also served) |
 | OpenAI-compatible | 1 | `POST /v1/chat/completions` (stream and non-stream) |
 | Execution | 3 | `POST /v1/execution/prepare`, `POST /v1/execution/run`, `POST /v1/execution/stream` |
-| Context | 6 | `POST /v1/context/setup`, `GET /v1/context`, `POST /v1/context/ssot/refresh`, `/syllabus`, `/memory` |
+| Context | 9 | `POST /v1/context/setup`, `GET /v1/context`, `POST /v1/context/ssot/refresh`, `/syllabus`, `/memory`, `/notes` (GET/POST/DELETE) |
 | Sessions | 5 | `POST /v1/sessions`, `GET /v1/sessions/{id}`, `PATCH /v1/sessions/{id}/metadata`, `GET …/messages`, `POST …/close` |
 | MCP (public) | 1 | `POST /v1/mcp/tools/call` |
 | Admin — applications | 7 | `POST /v1/admin/applications`, `…/{id}/rotate-key`, `…/revoke`, `…/extend`, `…/capabilities` |
@@ -559,7 +580,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **253 tests, 251 passing, 2 failing.** The two failures are known and
+Current baseline: **290 tests, 288 passing, 2 failing.** The two failures are known and
 pre-existing:
 
 - `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the

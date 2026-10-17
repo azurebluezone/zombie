@@ -2,6 +2,9 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { NoteStore } from '../../src/notes/note.js';
+
+const notes = new NoteStore();
 
 const background = new Map();
 const textResult = (text, extra={}) => ({content:[{type:'text',text:String(text)}],...extra});
@@ -87,6 +90,7 @@ export async function execute(args={},ctx={}) { const tool=ctx.toolId; let root=
  case 'kill_process': {const key=String(args.processId??'');const proc=background.get(key);if(!proc)throw new Error('managed_process_not_found');proc.kill('SIGTERM');background.delete(key);return textResult(`Termination requested for managed process ${key}`);}
  case 'task_planner': {const tasks=Array.isArray(args.tasks)?args.tasks.map((x,i)=>({id:i+1,task:String(x).slice(0,500),status:'pending'})):String(args.goal??'').split(/\n|(?<=[.!?])\s+/).map(x=>x.trim()).filter(Boolean).map((task,i)=>({id:i+1,task:task.slice(0,500),status:'pending'}));return textResult(JSON.stringify({goal:String(args.goal??''),tasks,warning:'Plan only; no tasks were executed.'}));}
  case 'todo_manager': {const dir=path.join(getRoot(),'.zombiecoder');const p=path.join(dir,'tasks.json');try{const st=await fs.lstat(dir);if(st.isSymbolicLink()||!st.isDirectory())throw new Error('todo_directory_not_safe')}catch(e){if(e.code!=='ENOENT')throw e;await fs.mkdir(dir,{recursive:true})}let tasks=[];try{tasks=JSON.parse(await fs.readFile(p,'utf8'));if(!Array.isArray(tasks))tasks=[]}catch{};const action=String(args.action??'list');if(action==='list')return textResult(JSON.stringify(tasks));if(action==='add'){if(!args.task)throw new Error('task_required');tasks.push({id:randomUUID(),task:String(args.task).slice(0,500),status:'pending',createdAt:new Date().toISOString()})}else if(action==='complete'||action==='remove'){const i=tasks.findIndex(t=>t.id===args.id);if(i<0)throw new Error('todo_not_found');if(action==='complete')tasks[i].status='completed';else tasks.splice(i,1)}else throw new Error('todo_action_invalid');await fs.writeFile(p,JSON.stringify(tasks,null,2)+'\n','utf8');return textResult(JSON.stringify(tasks));}
+  case 'note_store': {const root=getRoot();const action=String(args.action??'list');const rel=(p)=>path.relative(root,p);if(action==='append'){const r=await notes.append(root,{text:args.text,topic:args.topic,tags:args.tags,source:'agent'});return textResult(JSON.stringify({action,path:rel(r.path),note:r.note,count:r.count}));}if(action==='list'){const r=await notes.list(root,{limit:args.limit,topic:args.topic});return textResult(JSON.stringify({action,path:rel(r.path),total:r.total,returned:r.returned,notes:r.notes,...(r.notes.length?{}:{hint:'no notes for this project yet; use action=append with text'})}));}if(action==='search'){const r=await notes.search(root,{query:args.query,limit:args.limit});return textResult(JSON.stringify({action,path:rel(r.path),total:r.total,returned:r.returned,notes:r.notes}));}if(action==='remove'){const r=await notes.remove(root,{id:args.id});return textResult(JSON.stringify({action,path:rel(r.path),removed:r.removed,count:r.count}));}throw new Error('note_action_invalid');}
  default: throw new Error(`native_tool_not_implemented:${tool}`);
  }
 }

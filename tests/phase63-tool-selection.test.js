@@ -26,7 +26,9 @@ test('phase63 every tool the selector can offer actually exists', () => {
 test('phase63 a read-only question gets the look tools and no write tools', () => {
   const s = selectToolSurface({ text: 'What does src/policy do?', availableToolIds: RUNNABLE });
   assert.equal(s.mode, TOOL_SURFACE_MODES.NARROWED);
-  assert.deepEqual(s.toolIds, ['read_file', 'list_directory', 'grep_search', 'file_search']);
+  // `note_store` is always offered: it is the agent's own memory, and a note tool that
+  // only appeared when the user said the word "note" would never be used.
+  assert.deepEqual(s.toolIds, ['read_file', 'list_directory', 'grep_search', 'file_search', 'note_store']);
   assert.equal(s.toolIds.includes('write_file'), false);
   assert.equal(s.toolIds.includes('execute_bash'), false);
   assert.equal(s.reason, 'core_only');
@@ -34,7 +36,7 @@ test('phase63 a read-only question gets the look tools and no write tools', () =
 
 test('phase63 the surface is much smaller than the full one', () => {
   const read = selectToolSurface({ text: 'explain this module', availableToolIds: RUNNABLE });
-  assert.ok(read.toolIds.length <= 4, `expected a small surface, got ${read.toolIds.length}`);
+  assert.ok(read.toolIds.length <= 5, `expected a small surface, got ${read.toolIds.length}`);
   const write = selectToolSurface({ text: 'fix the bug in the parser', availableToolIds: RUNNABLE });
   assert.ok(write.toolIds.length < RUNNABLE.length, 'a narrowed surface must be smaller');
   assert.ok(write.toolIds.length <= 12, `expected the cap to hold, got ${write.toolIds.length}`);
@@ -113,7 +115,7 @@ test('phase63 the cap bounds the optional tools but never the core', () => {
     maxTools: 6
   });
   assert.ok(s.toolIds.length <= 6, `cap not honoured: ${s.toolIds.length}`);
-  for (const id of ['read_file', 'list_directory', 'grep_search', 'file_search']) {
+  for (const id of ['read_file', 'list_directory', 'grep_search', 'file_search', 'note_store']) {
     assert.ok(s.toolIds.includes(id), `the core tool ${id} must survive the cap`);
   }
 });

@@ -25,13 +25,17 @@ export const TOOL_SURFACE_MODES = Object.freeze({ NARROWED: 'narrowed', FULL: 'f
 /**
  * The canonical tool for each purpose.
  *
+ * `note_store` is here because it is the agent's own memory: a tool that lets an agent
+ * record what it learned about this folder is only useful if it is always at hand. A
+ * "note" tool that appeared only when the user said the word "note" would never be used.
+ *
  * Deliberately excludes the compatibility aliases (`list_dir`, `read_directory`,
  * `find_files`, `execute_bash`, `revert_file`) and the near-duplicates
  * (`regex_search`, `view_symbol`, `code_graph`). They stay reachable through the full
  * surface; offering a model three spellings of "list a directory" is the confusion we
  * are removing, not a feature we are protecting.
  */
-const CORE_TOOL_IDS = Object.freeze(['read_file', 'list_directory', 'grep_search', 'file_search']);
+const CORE_TOOL_IDS = Object.freeze(['read_file', 'list_directory', 'grep_search', 'file_search', 'note_store']);
 
 /**
  * Purpose groups, in the order they are considered. Each one is added whole, so a

@@ -86,6 +86,9 @@ export const CURRENT_ROUTE_MAP = Object.freeze([
   ['POST','/v1/context/syllabus','syllabus append'],
   ['POST','/v1/context/memory','project memory append'],
   ['GET','/v1/context/memory/recent','recent project memory'],
+  ['GET','/v1/context/notes','project notes list or search'],
+  ['POST','/v1/context/notes','project note append'],
+  ['DELETE','/v1/context/notes','project note removal'],
   ['GET','/v1/admin/registry/external-mcp','external MCP registry'],
   ['POST','/v1/admin/registry/external-mcp/sync','external MCP registry sync'],
   ['GET','/v1/admin/applications/capabilities','application capability status'],
@@ -161,13 +164,18 @@ export function routeMapReport() {
     legacyConcreteRoutes: LEGACY_ROUTE_COUNT,
     legacyCompatibilityRoutes: LEGACY_COMPATIBILITY_ROUTE_MAP.length,
     currentConcreteRoutes: CURRENT_ROUTE_COUNT,
-    currentHandlerBlocks: 55,
+    // Hand-maintained: it has moved 51 -> 54 -> 55 -> 58 alongside route additions, one
+    // per route-adding block, but nothing in the code derives or verifies it. Treated as
+    // an inventory note, not as a measurement.
+    currentHandlerBlocks: 58,
     notes: [
       'Legacy route count is a concrete route inventory reconstructed from api.md.',
       'Current route count treats /revoke and /extend as two concrete routes although they share one matcher.',
       'Three admin provider handlers are duplicated in src/server.js and should be consolidated.'
       ,'Phase 25 adds three application-scoped Tool permission control-plane routes.',
       'Phase 26 adds the agent tool-access scope routes: one GET/PATCH pair that reads and writes the persisted toolBoundary (global | working-directory) and workingDirectory on the agents table.',
+      'The project-notes routes add one GET/POST/DELETE trio on /v1/context/notes, backed by src/notes/note.js and the agent-reachable note_store tool.',
+      'currentHandlerBlocks is hand-maintained: no code derives it and no test can verify it. Either derive it or drop it; until then it is an inventory note, not a measurement.',
       'Counts describe route inventory only; they do not claim legacy behavioral parity.'
     ],
     legacy: LEGACY_ROUTE_MAP,

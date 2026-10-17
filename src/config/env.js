@@ -139,6 +139,11 @@ export const config = {
   toolLoopMaxToolCallsPerRound: numberEnv('TOOL_LOOP_MAX_TOOL_CALLS_PER_ROUND', 8, {min:1,max:100}),
   toolLoopMaxRepeatedCalls: numberEnv('TOOL_LOOP_MAX_REPEATED_CALLS', 2, {min:1,max:100}),
   sessionMaxMessages: numberEnv('SESSION_MAX_MESSAGES', 100, {min:1,max:10000}),
+  // How many entries the per-project memory and the per-project notes keep. Both are
+  // appended to forever otherwise, and an unbounded notes file is a prompt that grows
+  // every time the agent learns something.
+  memoryMaxEntries: numberEnv('MEMORY_MAX_ENTRIES', 500, {min:10,max:100000}),
+  notesMaxEntries: numberEnv('NOTES_MAX_ENTRIES', 500, {min:10,max:100000}),
   contextBudgetBytes: numberEnv('CONTEXT_BUDGET_BYTES', 1024 * 1024, {min:64 * 1024,max:4 * 1024 * 1024}),
   // The compiled context is embedded in the prompt, and the prompt can only carry about
   // 24,000 characters of it. This budget must therefore stay *below* that: when it was
