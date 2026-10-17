@@ -69,8 +69,8 @@ ZombieCoder Runtime is a **self-hosted runtime**, not a SaaS. One Node.js proces
 | **Masking layer** | Presents a public "ZombieCoder" model identity so a client never learns the real provider or model |
 | **Agent layer** | 12 agents with DB-backed personas, an access scope, and per-agent metrics |
 | **Execution layer** | A lifecycle of `goal → plan → consent → execute → verify` with four boundaries: provider, native tool, remote MCP tool, and tool loop |
-| **Tool layer** | A registry of 32 tools, application-scoped permissions, path boundaries, and consent |
-| **MCP** | A client that consumes external MCP servers and an optional server that exposes 25 tools to MCP clients |
+| **Tool layer** | A registry of 33 tools (26 runnable), application-scoped permissions, path boundaries, and consent |
+| **MCP** | A client that consumes external MCP servers and an optional server that exposes 26 tools to MCP clients |
 | **Context layer** | SSOT, syllabus, memory, entities and a compiled context budget |
 | **Evidence layer** | Records observations, refuses to promote them to "verified" without proof |
 | **Admin layer** | A single-file SPA over an admin JSON API |
@@ -95,11 +95,11 @@ src/
   config/                # env loading and configuration
   compatibility/         # legacy/current route maps and feature reconciliation
   transport/, http/, admin/, auth/, browser/, network/, policy/, registry/, runtime/, skills/
-tools/common/            # the 25 runnable tool implementations
+tools/common/            # the runnable tool implementations (26 tools in 5 modules)
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 315 tests, run with node --test
+tests/                   # 321 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -648,7 +648,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **315 tests, 313 passing, 2 failing.** The two failures are known and
+Current baseline: **321 tests, 319 passing, 2 failing.** The two failures are known and
 pre-existing:
 
 - `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the
@@ -706,6 +706,8 @@ Be explicit about the line between "implemented" and "verified".
 | Document | Contents |
 | --- | --- |
 | `README.md` | this file |
+| `docs/DESIGN_FLOW.md` | why the runtime is built this way, the invariants, and how the next change must be made |
+| `docs/LARAVEL_INTEGRATION.md` | the PHP/Laravel HTTP contract, auth, sessions, tools and error codes |
 | `docs/OBSERVABILITY.md` | runtime logging, diagnostics, privacy guidance, troubleshooting |
 | `IMPLEMENTATION_MANIFEST.md` | per-phase implementation record |
 | `CHANGELOG.md` | release history |
