@@ -350,6 +350,30 @@ the reason it was made.
   `tests/phase74-openai-compat.test.js` (8 tests) pins the envelope, the status
   mapping and the `logprobs` rule.
 
+### 3.17 A channel plan is data, not prose
+
+- **Where:** `src/channels/catalog.js`, `GET /v1/admin/channels`,
+  `src/agents/ecommerce-tool-boundaries.js` (`channels`), and the `Channels` view in
+  `public/admin/index.html`.
+- **What:** the four messaging channels the business needs — Facebook Messenger,
+  Facebook comments, WhatsApp Cloud API, and read-only Facebook Ads insights — are
+  declared once as data, together with the scopes, the webhook object and field, the
+  reply window, and the rules that decide whether a reply is allowed at all.
+- **How:** `CHANNELS` is a frozen array; `channelSummary()` is what the admin route
+  returns. Every channel is `status: 'PLANNED'` and names its `blockedBy`. The
+  e-commerce boundary files name the channels their agent serves, and the test
+  validates every id against the catalog, so a typo fails the suite instead of
+  becoming a silent no-op.
+- **Why:** the reply window *is* the product. A Messenger reply outside the 24-hour
+  window, a second private reply to a comment, or a WhatsApp message to a number that
+  never opted in is a policy violation, not a bug to patch later — Meta's response is
+  a restricted app. Keeping the rule next to the channel, pinned by a test, is cheaper
+  than rediscovering it from Meta's documentation during an incident. The declaration
+  is also honest: nothing behind it calls Meta, and the status says so.
+- **Proof:** `GET /v1/admin/channels` returns `4 declared / 4 planned / 0
+  implemented` with the scopes and windows above; `tests/phase75-channels.test.js`
+  (7 tests) fails if a window, a scope or the one-message limit is changed.
+
 ---
 
 ## 4. The map — where each concern lives
@@ -424,7 +448,8 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| `facebook-ads` transport | declared `grpc`, refused with `mcp_transport_grpc_requires_bridge` | needs a JSON/HTTP facade in front of the gRPC service |
+| Messaging channels (Messenger, comments, WhatsApp, Ads insights) | declared, `PLANNED` | `src/channels/catalog.js` records the plan, the scopes, the reply windows and the blockers; `GET /v1/admin/channels` reports it; `tests/phase75-channels.test.js` pins it. No webhook receiver, no Graph call and no reply exists. Blocked on per-application credentials (below). Plan: `docs/FACEBOOK_CHANNELS.md` |
+| `facebook-ads` transport | declared `grpc`, refused with `mcp_transport_grpc_requires_bridge` | points at an internal gRPC service, not the Graph API — the Graph API is REST/JSON and must not be sent down this path. Needs a JSON/HTTP facade in front of the gRPC service. See `docs/FACEBOOK_CHANNELS.md` §1.4 |
 | Path scoping (`working-directory` mode) | frozen | feature deferred, not removed |
 | `grep_search` / `file_search` / `find_files` outside the project root | not implemented | they take no path argument |
 | `src/providers/manifest.js`, `src/providers/openai-compatible.js` | dead files | measured; not removed |
@@ -435,7 +460,7 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 | `instances/zc-10001/.env` dead MCP keys | left in place | deliberately untouched |
 | Per-application MCP credentials | `NOT_IMPLEMENTED` | an external MCP endpoint carries one credential set on the endpoint (`endpoint.headers`, set at registration). Injecting each application's own token at call time is the next change; until then a per-shop token means a per-shop endpoint. Documented in `docs/LARAVEL_INTEGRATION.md` §18.7 |
 
-Regression baseline at the time of writing: **350 tests, 348 pass, 2 fail**
+Regression baseline at the time of writing: **357 tests, 355 pass, 2 fail**
 (both listed above). The two failures are left failing rather than silenced.
 
 ---
@@ -448,16 +473,25 @@ This section tells the next agent where to begin and where to stop.
 
 Start from the **unfinished items in §6**, in this order of value:
 
-1. **The `facebook-ads` gRPC endpoint** — put a JSON/HTTP facade in front of the
+1. **The messaging channels** — `docs/FACEBOOK_CHANNELS.md` §9 gives the build
+   order and the exit condition for each step. Build the window, the dedupe and the
+   credential before the reply text: a working reply behind a broken window is a
+   policy violation, and a broken window stays invisible until Meta acts on it.
+   Nothing in that plan can be verified before item 2.
+2. **Per-application credentials** — see §6. This is the blocker for "each shop
+   brings its own Meta token", and therefore for every channel above. The smallest
+   version: a write-only per-application credential store, resolved at call time in
+   `src/execution/mcp-adapter.js` (which already receives the application id).
+3. **The `facebook-ads` gRPC endpoint** — put a JSON/HTTP facade in front of the
    gRPC service and declare that facade as an `http` endpoint. Do not widen the
    HTTP client to guess gRPC: the message shape and method path come from a
-   `.proto` schema and cannot be derived from a URL.
-2. **The two failing tests** — fix the `phase49` assertion to the current
+   `.proto` schema and cannot be derived from a URL. Note that the Graph API path
+   in `docs/FACEBOOK_CHANNELS.md` §5 is REST/JSON and does **not** go through this
+   endpoint.
+4. **The two failing tests** — fix the `phase49` assertion to the current
    negotiated version, and either make the PHP test skip cleanly when `php` is
    absent or install `php` in the verification environment.
-3. **Per-application MCP credentials** — see §6. This is the blocker for "each
-   shop brings its own Meta token".
-4. **The external capability endpoints** (`public_api`, `tts`, `ocr`) — configure
+5. **The external capability endpoints** (`public_api`, `tts`, `ocr`) — configure
    a reachable endpoint and verify them end-to-end, or leave them declared and
    unreachable. A discovered endpoint's tools already reach the agent's surface,
    so no runtime code is missing here.

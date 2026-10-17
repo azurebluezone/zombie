@@ -13,18 +13,19 @@ import path from 'node:path';
 test('phase24 route map is explicit and matches the current inventory', () => {
   const report = routeMapReport();
   assert.equal(report.legacyConcreteRoutes, 31);
-  // Bumped 69 -> 86 -> 89 -> 91 -> 94: the inventory also lists the routes added for the
-  // admin console (logs + SSE stream, agent metrics, runtime metrics, model and
+  // Bumped 69 -> 86 -> 89 -> 91 -> 94 -> 95: the inventory also lists the routes added for
+  // the admin console (logs + SSE stream, agent metrics, runtime metrics, model and
   // masking-model catalogs, agent-model mappings, tool status update, provider
   // live test, persona update/deletion, the inbound MCP server/client endpoints
   // plus endpoint removal, the inbound MCP auth policy GET/PATCH/DELETE, the
-  // agent tool-access scope GET/PATCH pair, and the project-notes GET/POST/DELETE trio).
+  // agent tool-access scope GET/PATCH pair, the project-notes GET/POST/DELETE trio,
+  // and the messaging-channel plan GET).
   // The pinned number is intentional: it must be raised deliberately whenever the
   // route inventory changes.
-  assert.equal(report.currentConcreteRoutes, 94);
+  assert.equal(report.currentConcreteRoutes, 95);
   // Hand-maintained, and recorded as such in the map's own notes: no code derives it.
-  assert.equal(report.currentHandlerBlocks, 58);
-  assert.equal(report.notes.length, 8);
+  assert.equal(report.currentHandlerBlocks, 59);
+  assert.equal(report.notes.length, 9);
 });
 
 test('phase24 default agent count matches the actual registry', () => {

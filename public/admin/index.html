@@ -372,6 +372,7 @@ const ROUTES = [
   { id: 'agents', label: 'Agents', group: 'Agents', icon: 'cpu' },
   { id: 'agent-mappings', label: 'Agent Mappings', group: 'Agents', icon: 'link' },
   { id: 'tools', label: 'Tools', group: 'Tools & MCP', icon: 'wrench' },
+  { id: 'channels', label: 'Channels', group: 'Tools & MCP', icon: 'plug' },
   { id: 'mcp', label: 'MCP', group: 'Tools & MCP', icon: 'plug' },
   { id: 'requests', label: 'Requests', group: 'Operations', icon: 'activity' },
   { id: 'logs', label: 'Logs', group: 'Operations', icon: 'file' },
@@ -787,6 +788,31 @@ VIEWS.tools = { title: 'Tools', sub: 'Native tool registry, global on/off switch
       '<label class="f">Tool<select id="perm-tool">' + components.filter(t => t.entry).map(t => '<option value="' + esc(t.id) + '">' + esc(t.id) + '</option>').join('') + '</select></label>' +
       '<button class="btn primary" data-act="perm-grant">Grant</button></div>' +
       '<p class="muted" style="font-size:11.5px;margin:10px 0 0">Disabling a tool above stops it for every application. A grant here only permits one application; both must allow it.</p></div>');
+} };
+
+/* channels */
+// The messaging channels the runtime is being built to serve. This view reports a
+// DECLARATION, not health: nothing behind it calls Meta yet, and the status says so.
+// It exists so the operator can see the plan without reading the source.
+VIEWS.channels = { title: 'Channels', sub: 'Messaging channels: the plan, the rules and what still blocks each one', actions: '<button class="btn" data-act="refresh">Reload</button>', render: async (v) => {
+  const summary = await api('/v1/admin/channels');
+  const channels = summary.channels || [];
+  const rows = channels.map(c => {
+    const blocked = (c.blockedBy || []).map(b => '<span class="tag warn">' + esc(b) + '</span>').join(' ');
+    return '<tr><td><strong>' + esc(c.name) + '</strong><div class="sub mono">' + esc(c.id) + '</div></td>' +
+      '<td class="mono">' + esc(c.product) + '</td>' +
+      '<td>' + (c.window ? '<span class="tag">' + esc(c.window) + '</span>' : '<span class="muted">none</span>') + '</td>' +
+      '<td class="mono sub">' + esc((c.scopes || []).join(', ')) + '</td>' +
+      '<td>' + statusTag(c.status) + '</td>' +
+      '<td>' + (blocked || '<span class="muted">—</span>') + '</td></tr>';
+  }).join('');
+  v.innerHTML =
+    panel('Messaging channels', summary.planned + ' planned / ' + summary.total + ' declared',
+      '<div class="panel-b"><p class="muted" style="font-size:12.5px;margin:0">Each channel below is a <b>declaration</b>, not a running integration — nothing here calls Meta. The rules that decide whether a reply is allowed (the 24-hour window, the one-message private reply, the WhatsApp opt-in) live in <span class="mono">src/channels/catalog.js</span> and are pinned by a test. The full plan is <span class="mono">docs/FACEBOOK_CHANNELS.md</span>.</p></div>') +
+    panel('Channels', channels.length + ' declared', table(['Channel', 'Product', 'Window', 'Scopes', 'Status', 'Blocked by'], rows, 'No channels declared.')) +
+    panel('Credential model', esc(summary.credentialModel || '—'),
+      '<div class="panel-b">' + kv({ owner: summary.credentialModel, blockers: summary.blockers }) +
+      '<p class="muted" style="font-size:11.5px;margin:10px 0 0">The runtime holds no Meta app of its own and no client token. Each client supplies their own from their own admin panel, and a customer is an opaque id to the runtime.</p></div>');
 } };
 
 /* mcp */

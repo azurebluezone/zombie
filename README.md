@@ -99,7 +99,7 @@ tools/common/            # the runnable tool implementations (26 tools in 5 modu
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 350 tests, run with node --test
+tests/                   # 357 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -628,10 +628,10 @@ Never commit `.env`, API keys, tunnel tokens or private keys.
 ## 13. API surface
 
 The route inventory is machine-readable at `GET /v1/admin/routes`
-(`currentConcreteRoutes: 94`, `currentHandlerBlocks: 58`; the legacy inventory is 31
+(`currentConcreteRoutes: 95`, `currentHandlerBlocks: 59`; the legacy inventory is 31
 concrete routes plus 17 compatibility routes). `currentConcreteRoutes` is derived from the
 route map, so it tracks the code; `currentHandlerBlocks` is hand-maintained and no code
-derives it, and the map now says so. The 94 current routes group as follows:
+derives it, and the map now says so. The 95 current routes group as follows:
 
 | Group | Routes | Examples |
 | --- | --- | --- |
@@ -647,6 +647,7 @@ derives it, and the map now says so. The 94 current routes group as follows:
 | Admin — registry | 16 | agents, `agents/{id}/boundary`, `agents/runtime-audit`, tools, skills, transports, external-mcp |
 | Admin — personas | 4 | `GET/POST /v1/admin/personas`, `PATCH/DELETE /v1/admin/personas/{id}` |
 | Admin — tools | 3 | `GET/POST/DELETE /v1/admin/tools/permissions` |
+| Admin — channels | 1 | `GET /v1/admin/channels` (the messaging-channel plan; a declaration, not health) |
 | Admin — agents | 2 | `GET/DELETE /v1/admin/agents/metrics` |
 | Admin — MCP | 19 | endpoints, `{id}/discover`, permissions, connections, reconcile, incomplete, audit, tools, auth, server, clients |
 | Admin — operations | 11 | routes, logs, `logs/stream`, metrics, evidence, constitution, `compatibility/*`, task-profiles |
@@ -697,7 +698,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **350 tests, 348 passing, 2 failing.** The two failures are known and
+Current baseline: **357 tests, 355 passing, 2 failing.** The two failures are known and
 pre-existing:
 
 - `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the
@@ -769,6 +770,7 @@ Be explicit about the line between "implemented" and "verified".
 | `README.md` | this file |
 | `docs/DESIGN_FLOW.md` | why the runtime is built this way, the invariants, and how the next change must be made |
 | `docs/LARAVEL_INTEGRATION.md` | the PHP/Laravel HTTP contract, auth, sessions, tools and error codes |
+| `docs/FACEBOOK_CHANNELS.md` | the Messenger / comment / WhatsApp / Ads plan: the rules, the blockers, and the build order |
 | `docs/OBSERVABILITY.md` | runtime logging, diagnostics, privacy guidance, troubleshooting |
 | `IMPLEMENTATION_MANIFEST.md` | per-phase implementation record |
 | `CHANGELOG.md` | release history |

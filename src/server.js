@@ -75,6 +75,7 @@ import { compileContext } from './context/compiler.js';
 import { CapabilityConfigResolver } from './registry/config-resolver.js';
 import { ExternalMcpRegistry } from './registry/external-mcp.js';
 import { ECOMMERCE_AGENT_TOOL_BOUNDARIES, getAgentToolBoundary } from './agents/ecommerce-tool-boundaries.js';
+import { channelSummary } from './channels/catalog.js';
 import { TOOL_BOUNDARY_MODES, agentAccessRecord, isToolBoundaryMode, resolveAgentAccess } from './agents/access.js';
 import { configureOutboundCircuitLogger, configureOutboundCircuitBreaker, sharedOutboundCircuitBreaker } from './network/circuit-breaker.js';
 import { RUNTIME_VERSION, RUNTIME_PHASE } from './runtime/version.js';
@@ -764,6 +765,13 @@ const requestHandler = async (req,res) => {
     if (req.method==='GET' && url.pathname==='/v1/admin/registry/tools') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{components:await toolsRegistry.list()});
+    }
+    // The messaging channels the runtime is being built to serve. This reports a
+    // declaration, not health: nothing here calls Meta yet, and `status` says so.
+    // It exists so the operator can see the plan without reading the source.
+    if (req.method==='GET' && url.pathname==='/v1/admin/channels') {
+      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,channelSummary());
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/registry/tools') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
