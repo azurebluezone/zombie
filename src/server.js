@@ -187,6 +187,10 @@ async function resolveAgentScope(agentId, { requestedRoot = null, requestedWorki
   const agent = (await agentsRegistry.list()).find(item => item.id === String(agentId)) ?? null;
   const access = resolveAgentAccess(agent, { requestedRoot, requestedWorkingDirectory, defaultRoot: projectContext.defaultRoot });
   const projectRoot = access.projectRoot ? projectContext.root(access.projectRoot, { allowAnyRoot: true }) : null;
+  // The agent scope has already authorized this root. Remember it, so the services that
+  // only receive the resolved path (SSOT, syllabus, memory, auto-setup) do not re-check it
+  // against PROJECT_ROOTS and refuse a root the agent was just granted.
+  if (projectRoot) projectContext.trustRoot(projectRoot);
   const workspaceRoot = projectRoot ?? projectContext.root(process.cwd(), { allowAnyRoot: true });
   return { agent, access, projectRoot, workspaceRoot };
 }

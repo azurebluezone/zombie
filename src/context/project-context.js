@@ -42,6 +42,34 @@ export class ProjectContextStore {
     return r;
   }
   async assertAllowedRoot(inputRoot) { return this.root(inputRoot); }
+
+  /**
+   * Mark a root as already authorized.
+   *
+   * The HTTP layer authorizes a root through the agent's persisted tool-access scope and
+   * resolves it with `allowAnyRoot`. Every service that afterwards receives only the
+   * resolved path — SSOT, syllabus, memory, auto-setup — re-checks it against
+   * `allowedRoots` and refused a folder the caller had just been granted:
+   * `project_root_not_allowed` for a root the agent scope allows, which is why a global
+   * agent could not be pointed at a project outside `PROJECT_ROOTS` even though the scope
+   * says it may name any root on the host. Trusting the resolved root here keeps one
+   * authorization decision instead of two that disagree.
+   *
+   * Call this only for a root that has already been authorized. It is additive: it can
+   * widen `allowedRoots`, never narrow it, and a path that does not exist still fails
+   * closed rather than being remembered.
+   */
+  trustRoot(inputRoot) {
+    // With no allowlist configured nothing is restricted, so there is nothing to trust.
+    if (this.allowedRoots === null || inputRoot == null || String(inputRoot).trim() === '') return null;
+    let resolved;
+    try { resolved = realpathSync(path.resolve(String(inputRoot))); }
+    catch { throw new Error('project_root_not_found'); }
+    const alreadyAllowed = this.allowedRoots.some(base => resolved === base || resolved.startsWith(`${base}${path.sep}`));
+    if (!alreadyAllowed) this.allowedRoots.push(resolved);
+    return resolved;
+  }
+
   ssotPath(root) { return path.join(this.root(root), '.zombiecoder', 'SSOT.md'); }
   syllabusPath(root) { return path.join(this.root(root), AGENTS_DIR, 'syllabus.md'); }
   memoryPath(root) { return path.join(this.root(root), AGENTS_DIR, 'memory.json'); }

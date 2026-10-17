@@ -99,7 +99,7 @@ tools/common/            # the 25 runnable tool implementations
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 311 tests, run with node --test
+tests/                   # 315 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -620,7 +620,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **311 tests, 309 passing, 2 failing.** The two failures are known and
+Current baseline: **315 tests, 313 passing, 2 failing.** The two failures are known and
 pre-existing:
 
 - `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the
