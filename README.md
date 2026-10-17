@@ -210,6 +210,23 @@ Symlink-escape and must-exist checks still apply in both modes: "any folder" is 
 gate; `unrestricted` drops that gate so every agent can call every runnable tool. A tool
 disabled by configuration is refused either way.
 
+**Choosing where to look.** The six search tools — `grep_search`, `regex_search`,
+`file_search`, `find_files`, `view_symbol` and `code_graph` — take an optional `path`
+(a folder, or a single file), plus `maxFiles`, `maxDepth` and `includeIgnored`. Without
+`path` they start at the project root. A walk is bounded three ways (file count, depth and
+a 10-second deadline) and reports when it truncated instead of quietly returning a partial
+answer, and a path that does not exist is reported as `[path not found: …]` rather than as
+an empty result. A symlink cannot be used to escape a scoped root.
+
+**Terminal commands are allowlisted, and the list is deliberately not configurable.**
+`run_terminal_command` accepts `node`, `npm`, `pnpm`, `yarn`, `composer`, `php`, `python3`
+and `git`, and only in read/verify subcommands (`node --version|--check|--test`,
+`git status|diff|log|rev-parse|branch`, `php -l`, `python -m pytest`, …). Package
+mutations such as `npm install` are refused with `package_mutation_requires_separate_approval`,
+so installing dependencies is an explicit operator action rather than something an agent can
+decide. `execute_bash` is the broader tool and is governed by the same consent, path and
+execution-mode gates.
+
 ## 6. Providers and model masking
 
 Providers are declared in `PROVIDER_CONFIG_JSON`; keys are read from
