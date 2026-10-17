@@ -99,7 +99,7 @@ tools/common/            # the runnable tool implementations (26 tools in 5 modu
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 364 tests, run with node --test
+tests/                   # 373 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -706,7 +706,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **364 tests, 362 passing, 2 failing.** The two failures are known and
+Current baseline: **373 tests, 371 passing, 2 failing.** The two failures are known and
 pre-existing:
 
 - `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the
@@ -784,7 +784,7 @@ Be explicit about the line between "implemented" and "verified".
 | `IMPLEMENTATION_MANIFEST.md` | per-phase implementation record |
 | `CHANGELOG.md` | release history |
 | `GET /v1/admin/routes` | the authoritative, machine-readable route inventory |
-| `GET /v1/admin/constitution` | the core constitution returned as JSON |
+| `GET /v1/admin/constitution` | the core constitution as JSON — the six rule names plus the statement each one stands for |
 | `.env.example` | every configuration key, documented |
 | `tests/` | executable specification of current behaviour |
 

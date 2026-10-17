@@ -443,6 +443,35 @@ the reason it was made.
   proving it held no `package.json` and that the running process had zero
   `node_modules` mappings.
 
+### 3.20 The constitution is policy, so it is written down and checked
+
+- **Where:** `src/policy/constitution.js`, `src/agents/system-prompt.js`
+  (`constitutionRules`), and `GET /v1/admin/constitution`.
+- **What:** each of the six rules now carries the sentence it stands for. The name
+  is what an operator skims and what the admin route has always returned; the
+  statement is what the model is given as the `NON-NEGOTIABLE RULES` block, and what
+  a reviewer can hold the runtime to.
+- **How:** `statementFor(name)` turns a name into `name — statement` and passes any
+  other text through untouched, so a caller's own rule (an operator persona, a test)
+  is never rewritten and can never become `[object Object]`. `constitutionRules()`
+  maps through it, so all five prompt call sites benefit from one change. With no
+  constitution passed, the prompt falls back to the real rules rather than to a
+  second, shorter paraphrase — a paraphrase is a copy, and a copy drifts.
+  `GET /v1/admin/constitution` gained `statements` alongside the existing
+  `constitution`, additively.
+- **Why:** a rule name is a slogan, and the first thing that gets softened when a
+  `404` is easier to write than an explanation is a slogan. The operator's
+  instruction is that the rules carry no exceptions, so each rule has to be
+  expressible as something a test can check rather than as a sentiment everyone
+  interprets for themselves.
+- **Proof:** LIVE_PROBE_PASSED — `GET /v1/admin/constitution` returns six names and
+  six statements, and the chat response reports the same six rules the prompt was
+  built from. `tests/phase77-constitution.test.js` (8 tests) pins that every name has
+  a statement, that no statement is orphaned, that "Never Hide Errors" names 501,
+  503 and 404 plus the phrase "off is off", that the statements actually reach the
+  prompt, that a caller's own rule survives untouched, and that the whole block stays
+  inside a prompt budget (<= 1600 chars — it goes into every system message).
+
 ---
 
 ## 4. The map — where each concern lives
@@ -489,7 +518,8 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 
 1. **Never fabricate evidence.** Do not log a success that did not happen.
 2. **Never hide an error.** Represent it as a tool-result error or an API error
-   and keep it observable.
+   and keep it observable. Report the code and the reason, and never answer with
+   silence.
 3. **Never invent a model ID.** The public identity is a ZombieCoder alias;
    upstream IDs live only in the authenticated admin catalog.
 4. **Consent before risky action.** A consent-gated tool runs only with
@@ -510,6 +540,13 @@ scripts/         bootstrap, OS runtime setup, deployment verification
     `servers.json` that cannot be reached stays in `error` and is reported.
 13. **One token, one channel.** A streamed token is written once, as a `data:`
     frame. A `runtime` event must never repeat token text.
+14. **Absent is not the same as switched off.** A known path that is not serving
+    must say what it is and why: `501 mcp_server_not_implemented` when the MCP
+    server is off, `503 tool_execution_not_verified` when execution is
+    `chat-only`. `404` is reserved for a path that genuinely does not exist. An
+    empty or silent response is never an option — success is success, failure is
+    failure, off is off. The operator's standing instruction is that this has no
+    exceptions.
 
 ---
 
@@ -529,7 +566,7 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 | `instances/zc-10001/.env` dead MCP keys | left in place | deliberately untouched |
 | Per-application MCP credentials | `NOT_IMPLEMENTED` | an external MCP endpoint carries one credential set on the endpoint (`endpoint.headers`, set at registration). Injecting each application's own token at call time is the next change; until then a per-shop token means a per-shop endpoint. Documented in `docs/LARAVEL_INTEGRATION.md` §18.7 |
 
-Regression baseline at the time of writing: **364 tests, 362 pass, 2 fail**
+Regression baseline at the time of writing: **373 tests, 371 pass, 2 fail**
 (both listed above). The two failures are left failing rather than silenced.
 
 ---

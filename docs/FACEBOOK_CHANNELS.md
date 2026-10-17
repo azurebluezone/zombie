@@ -38,9 +38,9 @@ That is a deliberate limit, not an unfinished feature. If the runtime held the
 token, a bug in the runtime would be a security incident for every client at
 once.
 
-### 1.3 The open decision: Path A or Path B
+### 1.3 The decision: Path A — each client owns their own Meta app
 
-| | Path A — each client owns their Meta app | Path B — we own one app |
+| | **Path A — chosen** | Path B — not chosen |
 | --- | --- | --- |
 | Who creates the Meta app | the client | us |
 | Who passes App Review | the client, once, for their own app | us, once, for everyone |
@@ -50,14 +50,29 @@ once.
 | Blast radius of an app-level problem | one client | every client |
 | Matches "clients bring their own token" | yes | partly |
 
-**Not chosen yet.** Path A is what the business model describes — clients bring
-their own Meta tokens and apps — and it keeps us out of the data-controller
-role. Path B is less work per client and makes onboarding a copy-paste, at the
-cost of owning the Meta relationship for everyone.
+**Path A is the decision.** The operator's instruction was that the rules carry no
+exceptions, and that on the client's site the client uses their own — their own Meta
+app, their own token, their own customer data, on their own site. (Recorded as a
+translation of the operator's Bengali, not as a verbatim quote.)
 
-Nothing in this document depends on the answer. Everything below works with
-either, because in both paths the token belongs to the client and arrives
-per-application. The answer only changes who completes App Review.
+What that settles:
+
+- We never hold a Meta app of our own, so we are never the data controller.
+- Each client completes App Review once, for their own app. That is *their* wait,
+  not a single gate that blocks every client at once.
+- If one client's app is restricted, it is one client's problem. On Path B it would
+  be everyone's, at the same moment.
+- Responsibility is where the risk is: the shop already holds the customer's name,
+  phone number and address, and it is the only place the support PIN maps to a
+  person. Adding a copy of that at our end would create a second breach surface for
+  no benefit.
+
+Path B is written down only so the reasoning is inspectable if it is ever
+revisited. It is not a fallback that gets switched on quietly: it would make us the
+data controller for every client's customers, and that is a different business.
+
+Nothing below depends on the app's owner, because in Path A the token belongs to the
+client and arrives per-application — which is §7, the blocker.
 
 ### 1.4 Transport
 

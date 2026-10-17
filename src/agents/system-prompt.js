@@ -1,4 +1,5 @@
 import { formatSharedPersona } from '../policy/shared-persona.js';
+import { statementFor, constitutionWithStatements } from '../policy/constitution.js';
 
 /**
  * How much of the compiled context the prompt may carry.
@@ -20,8 +21,10 @@ function clean(value, max = 4000) {
 // Accepting both shapes is deliberate: reading only `.rules` silently dropped
 // every constitution rule from the prompt.
 function constitutionRules(constitution) {
-  if (Array.isArray(constitution)) return constitution.map(rule => String(rule));
-  if (Array.isArray(constitution?.rules)) return constitution.rules.map(rule => String(rule));
+  // A rule name is expanded to the sentence it stands for. Text the caller wrote
+  // itself (an operator's persona, a test) is passed through untouched.
+  if (Array.isArray(constitution)) return constitution.map(rule => statementFor(rule));
+  if (Array.isArray(constitution?.rules)) return constitution.rules.map(rule => statementFor(rule));
   return [];
 }
 
@@ -64,8 +67,10 @@ export function buildAgentSystemPrompt({
 } = {}) {
   const metadata = safeSessionMetadata({...sessionMetadata, ...(session?.metadata ?? {})});
   const rules = constitutionRules(constitution);
-  const ruleText = rules.length ? rules.map((rule, i) => `${i + 1}. ${clean(rule, 800)}`).join('\n') :
-    'Evidence before confidence. Never fabricate evidence. Never claim execution success without verification. Consent before risky action.';
+  // No constitution was passed: fall back to the real one, not to a second,
+  // shorter paraphrase of it. A paraphrase is a copy, and a copy drifts.
+  const ruleList = rules.length ? rules : constitutionWithStatements();
+  const ruleText = ruleList.map((rule, i) => `${i + 1}. ${clean(rule, 800)}`).join('\n');
   // The persona text is the operator-editable role definition. It used to be
   // dropped here, which meant editing a persona in the admin console changed the
   // reported metadata but never the model's behaviour.

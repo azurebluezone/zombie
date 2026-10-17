@@ -24,6 +24,9 @@
 /** The credential model every channel shares. */
 export const CHANNEL_CREDENTIAL_MODEL = Object.freeze({
   owner: 'client',
+  path: 'A',
+  decision:
+    'Each client owns their own Meta app and completes App Review for it, then keeps their own token and their own customer data on their own site. We never hold a Meta app of our own, so we are never the data controller. Path B (one app we own) was considered and rejected: it would make us the data controller for every client\'s customers, and one app-level problem would become everyone\'s problem at once.',
   note: 'Each client supplies their own Meta app, page/phone id and access token from their own admin panel. The runtime never holds a Meta app of its own, and never holds a customer PII record: a customer is an opaque id to the runtime.',
   blocker: 'per_application_credentials',
   blockerNote: 'An external MCP endpoint currently carries one credential set on the endpoint. Injecting each application\'s own token at call time is not implemented, so a per-shop token today means a per-shop endpoint.'
@@ -156,6 +159,7 @@ export function channelSummary() {
   return {
     ...counts,
     credentialModel: CHANNEL_CREDENTIAL_MODEL.owner,
+    decision: { path: CHANNEL_CREDENTIAL_MODEL.path, summary: CHANNEL_CREDENTIAL_MODEL.decision },
     blockers: [...new Set(CHANNELS.flatMap(channel => channel.blockedBy))].sort(),
     channels: CHANNELS.map(channel => ({
       id: channel.id,

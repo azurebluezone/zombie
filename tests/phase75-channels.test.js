@@ -76,6 +76,17 @@ test('phase75 the credential model is client-owned and says what blocks it', () 
   }
 });
 
+test('phase75 Path A stands: the client owns the app, not us', () => {
+  // The operator's decision. It is pinned because the opposite choice — one app we
+  // own — would make us the data controller for every client's customers, and that
+  // is a different business, not a cheaper deployment.
+  assert.equal(CHANNEL_CREDENTIAL_MODEL.path, 'A');
+  assert.ok(CHANNEL_CREDENTIAL_MODEL.decision.includes('Each client owns their own Meta app'));
+  assert.ok(CHANNEL_CREDENTIAL_MODEL.decision.includes('never the data controller'));
+  assert.ok(CHANNEL_CREDENTIAL_MODEL.decision.includes('rejected'), 'Path B is recorded as rejected, not as a quiet fallback');
+  assert.equal(channelSummary().decision.path, 'A');
+});
+
 test('phase75 getChannel / listChannels / channelSummary behave', () => {
   assert.equal(getChannel('MESSENGER').id, 'messenger');
   assert.equal(getChannel('nope'), null);

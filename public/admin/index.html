@@ -811,8 +811,9 @@ VIEWS.channels = { title: 'Channels', sub: 'Messaging channels: the plan, the ru
       '<div class="panel-b"><p class="muted" style="font-size:12.5px;margin:0">Each channel below is a <b>declaration</b>, not a running integration — nothing here calls Meta. The rules that decide whether a reply is allowed (the 24-hour window, the one-message private reply, the WhatsApp opt-in) live in <span class="mono">src/channels/catalog.js</span> and are pinned by a test. The full plan is <span class="mono">docs/FACEBOOK_CHANNELS.md</span>.</p></div>') +
     panel('Channels', channels.length + ' declared', table(['Channel', 'Product', 'Window', 'Scopes', 'Status', 'Blocked by'], rows, 'No channels declared.')) +
     panel('Credential model', esc(summary.credentialModel || '—'),
-      '<div class="panel-b">' + kv({ owner: summary.credentialModel, blockers: summary.blockers }) +
-      '<p class="muted" style="font-size:11.5px;margin:10px 0 0">The runtime holds no Meta app of its own and no client token. Each client supplies their own from their own admin panel, and a customer is an opaque id to the runtime.</p></div>');
+      '<div class="panel-b">' + kv({ owner: summary.credentialModel, path: summary.decision?.path, blockers: summary.blockers }) +
+      (summary.decision?.summary ? '<p class="muted" style="font-size:11.5px;margin:10px 0 0">' + esc(summary.decision.summary) + '</p>' : '') +
+      '<p class="muted" style="font-size:11.5px;margin:8px 0 0">The runtime holds no Meta app of its own and no client token. Each client supplies their own from their own admin panel, and a customer is an opaque id to the runtime.</p></div>');
 } };
 
 /* mcp */

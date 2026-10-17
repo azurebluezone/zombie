@@ -25,7 +25,7 @@ import { EntityDoor } from './entities/entity-door.js';
 import { CanonicalResponseNormalizer } from './providers/normalizer/canonical-response.js';
 import { PersonaRegistry } from './agents/persona-registry.js';
 import { AdminService } from './admin/admin-service.js';
-import { CORE_CONSTITUTION } from './policy/constitution.js';
+import { CORE_CONSTITUTION, CONSTITUTION_STATEMENTS } from './policy/constitution.js';
 import { send, body, bearer } from './http/json.js';
 import { applySecurityHeaders, isTlsRequest } from './http/security-headers.js';
 import { providerErrorDetail, retryAfterMsFrom } from './providers/adapters/request-shape.js';
@@ -1044,7 +1044,10 @@ const requestHandler = async (req,res) => {
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/constitution') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
-      return send(res,200,{constitution:CORE_CONSTITUTION});
+      // `constitution` keeps the short names it has always returned; `statements`
+      // adds the rule each name stands for, which is what the agent is actually
+      // given. Additive on purpose — an existing reader keeps working.
+      return send(res,200,{constitution:CORE_CONSTITUTION,statements:CONSTITUTION_STATEMENTS});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/mcp/endpoints') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
