@@ -95,7 +95,14 @@ test('phase52 streaming tool loop falls back to the next candidate when the firs
   assert.equal(result.providerId, 'alive-provider', 'the loop must continue on the next candidate');
   assert.equal(result.response.choices[0].message.content, 'ok from the fallback provider');
   assert.equal(chunks.length, 2, 'the client must receive the answer from the fallback provider');
-  assert.equal(events.filter(event => event.type === 'stream_chunk').length, 2);
+  // A token must travel on exactly one channel. The runtime event channel is a
+  // progress marker only; mirroring the chunk there made clients that listened on
+  // both channels receive every token twice (measured live, see phase72).
+  const streamChunkEvents = events.filter(event => event.type === 'stream_chunk');
+  assert.equal(streamChunkEvents.length, 2, 'one progress marker per delivered chunk');
+  for (const event of streamChunkEvents) {
+    assert.equal(event.chunk, undefined, 'a token must not be mirrored on the runtime event channel');
+  }
   assert.equal(calls.length, 1, 'the healthy provider is used exactly once');
 
   const fallbackLog = logs.find(entry => entry.event === 'tool_loop.stream_candidate_failed');

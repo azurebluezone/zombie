@@ -238,7 +238,13 @@ export class ToolLoopExecutor {
             const maskedChunk = maskCanonicalResponse(chunk,{agentId:input.agent ?? input.persona ?? 'code-guru',configuredModel:route.publicModel || '',capabilities:Object.keys(provider.capabilities ?? {}).filter(k=>provider.capabilities[k])});
             chunks.push(chunk);
             onChunk?.(maskedChunk);
-            onEvent?.({type:'stream_chunk', round, chunk:maskedChunk});
+            // A token travels on exactly ONE channel. This used to mirror the full
+            // chunk on `stream_chunk` as well, so a client that concatenated both
+            // channels (or listened on both) received every token twice — measured
+            // live with autoToolLoop:true (7 data frames + 7 identical mirrors).
+            // `data:` is the token channel (the OpenAI contract); runtime events
+            // carry lifecycle only, so this stays a payload-free progress marker.
+            onEvent?.({type:'stream_chunk', round});
           });
           if (!chunks.length) {
             const raw = await provider.chatCompletions({...input, tools:provider.capabilities?.functionCalling === true && input.forceJsonToolCalls !== true ? input.tools : undefined, messages, model, stream:false});
@@ -248,7 +254,7 @@ export class ToolLoopExecutor {
             chunks.push(fallback);
             const maskedChunk = maskCanonicalResponse(fallback,{agentId:input.agent ?? input.persona ?? 'code-guru',configuredModel:route.publicModel || '',capabilities:Object.keys(provider.capabilities ?? {}).filter(k=>provider.capabilities[k])});
             onChunk?.(maskedChunk);
-            onEvent?.({type:'stream_chunk',round,chunk:maskedChunk,fallback:'non-streaming-provider-response'});
+            onEvent?.({type:'stream_chunk', round, fallback:'non-streaming-provider-response'});
           }
           break;
         } catch (error) {

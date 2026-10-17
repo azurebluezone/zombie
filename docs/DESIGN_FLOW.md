@@ -281,6 +281,26 @@ the reason it was made.
 - **Why:** an agent that has to guess will guess wrong. The map must be complete
   and honest, including what is *not* implemented.
 
+### 3.14 The stream carries one token on one channel
+
+- **Where:** `src/execution/tool-loop.js` (`stream()`), `src/server.js`
+  (`/v1/chat/completions` with `stream:true`), `tests/phase72-stream-single-channel.test.js`.
+- **What:** a streamed token is written once, as an OpenAI-compatible `data:`
+  frame. The `event: runtime` channel carries lifecycle only (`assistant`,
+  `tool_result`, `tool_error`, `stream_chunk`, `complete`) and no token text.
+- **How:** the tool loop used to write each masked chunk twice — once via
+  `onChunk` (a `data:` frame) and once via `onEvent({type:'stream_chunk', chunk})`
+  (a `runtime` event). `stream_chunk` is now a payload-free progress marker that
+  keeps only `round` and, on the fallback path, `fallback`.
+- **Why:** measured live with `autoToolLoop:true`, a 3-token answer produced 7
+  `data:` frames **and** 7 byte-identical mirrors. Any client that concatenated
+  both channels, or listened on the runtime channel, doubled every answer. One
+  token, one channel is also what the sibling Mission Barisal engine does (all
+  twelve of its events ride the single `data:` channel with a `type` field).
+- **Proof:** before the fix the two channels were identical
+  (`dataText === runtimeText === "ALPHA BRAVO CHARLIE"`); after it the runtime
+  channel is empty and `data:` still carries the whole answer.
+
 ---
 
 ## 4. The map — where each concern lives
@@ -346,6 +366,8 @@ scripts/         bootstrap, OS runtime setup, deployment verification
     unauthenticated client.
 12. **A declaration is not a health claim.** An MCP endpoint declared in
     `servers.json` that cannot be reached stays in `error` and is reported.
+13. **One token, one channel.** A streamed token is written once, as a `data:`
+    frame. A `runtime` event must never repeat token text.
 
 ---
 
@@ -358,7 +380,6 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 | `facebook-ads` transport | declared `grpc`, refused with `mcp_transport_grpc_requires_bridge` | needs a JSON/HTTP facade in front of the gRPC service |
 | Path scoping (`working-directory` mode) | frozen | feature deferred, not removed |
 | `grep_search` / `file_search` / `find_files` outside the project root | not implemented | they take no path argument |
-| SSE token delivered twice | measured, not changed | `onChunk` `data:` frame + `onEvent` `stream_chunk` mirror |
 | `src/providers/manifest.js`, `src/providers/openai-compatible.js` | dead files | measured; not removed |
 | Stale `working_directory` on two agents | measured, not changed | frozen area |
 | `process.cwd()` in `projectAllowedRoots` | measured, not changed | too invasive for a frozen area |

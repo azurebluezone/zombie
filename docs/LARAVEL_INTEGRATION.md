@@ -220,12 +220,18 @@ be concatenated without re-serialising the JSON.
 Two behaviours a client must handle:
 
 - **Runtime events are interleaved.** Alongside `data:` token frames the
-  runtime may emit `event: runtime` frames carrying tool-loop progress.
+  runtime may emit `event: runtime` frames carrying tool-loop progress
+  (`assistant`, `tool_result`, `tool_error`, `stream_chunk`, `complete`).
   A client that only reads `data:` will ignore them safely.
-- **A token can arrive twice** (once as a `data:` frame and once as a
-  `runtime`/`stream_chunk` mirror). Concatenating all `data:` frames is
-  therefore the correct client strategy; do not assume the mirrors are absent.
-  This was measured in this environment, not assumed. See §15.
+- **A token travels on exactly one channel — `data:`.** `event: runtime`
+  frames are lifecycle/progress metadata and carry **no** token text. This was
+  not always true: the tool-loop stream used to mirror each chunk on a
+  `stream_chunk` event, so a client that concatenated both channels received
+  every token twice (measured live: 7 `data:` frames and 7 identical mirrors for
+  a 3-token answer). The mirror was removed in phase 72; `stream_chunk` is now a
+  payload-free progress marker (`{type, round}`), and the non-streaming fallback
+  keeps its reason there (`fallback:"non-streaming-provider-response"`).
+  Concatenate `data:` frames only. See §15.
 
 If the upstream stream fails before any chunk is emitted, the runtime falls
 back to a non-streaming provider call. If it fails after chunks were emitted,
@@ -467,7 +473,7 @@ Honest labels for this document and the runtime behaviour it describes.
 | HTTP contract (routes, shapes, error codes) | **SOURCE_VERIFIED** | read from `src/server.js` and confirmed against the live route inventory |
 | Auth behaviour (401 body, loopback bypass) | **LIVE_PROBE_PASSED** | probed against a running instance |
 | Sessions / context / notes shapes | **LIVE_PROBE_PASSED** | probed against a running instance |
-| Streaming SSE frames + ttfb | **LIVE_PROBE_PASSED** | measured: ttfb ≈ 0.7–1.5 s, one token delivered twice |
+| Streaming SSE frames + ttfb | **LIVE_PROBE_PASSED** | measured: ttfb ≈ 0.7–1.5 s; re-probed after the phase-72 fix — a token now travels on one channel only (7 `data:` frames, 0 mirrored tokens) |
 | Tool execution end-to-end | **END_TO_END_TESTED** | the full suite exercises the tool loop with real registered tools |
 | `public_api`, `tts`, `ocr`, `facebook_ads` | **UNVERIFIED** | no endpoint configured; never called |
 | A PHP/Laravel snippet executed on this host | **NOT_TESTED** | no `php` / `composer` on the build host |
