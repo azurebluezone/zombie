@@ -374,6 +374,40 @@ the reason it was made.
   implemented` with the scopes and windows above; `tests/phase75-channels.test.js`
   (7 tests) fails if a window, a scope or the one-message limit is changed.
 
+### 3.18 The inbound MCP server is opt-in, and says so when it is off
+
+- **Where:** `src/server.js` (the `/mcp` block), `src/config/env.js`
+  (`mcpServerEnabled`, `mcpServerProjectRoot`), `src/mcp/server.js`,
+  `src/mcp/server-auth.js`.
+- **What:** `POST /mcp` serves Streamable HTTP MCP only when
+  `MCP_SERVER_ENABLED=true`. `DELETE /mcp` ends a session (`204`); `GET /mcp` is
+  `405` with `allow: POST, DELETE`. With the server off, every method on `/mcp`
+  answers `501 mcp_server_not_implemented` with the role (`mcp-client`) and the
+  supported protocol versions — a recognised path that explains itself, never a
+  bare `404`.
+- **How:** `initialize` returns `mcp-session-id` and the preferred
+  `mcp-protocol-version`; the body's `result.protocolVersion` is the version
+  *negotiated with the caller*. Authentication follows the `requireAuth` policy
+  (`GET /v1/admin/mcp/auth`); when it is `false` an unauthenticated call is still
+  attributed to an auto-provisioned application, so sessions, per-application tool
+  permissions and the audit trail keep an owner. A presented key always wins.
+- **Why:** advertising a server capability that is switched off would be a lie
+  about the surface, and a `404` would send an integrator hunting for a typo.
+- **The root:** `MCP_SERVER_PROJECT_ROOT` is the root the server's tools operate
+  inside and it defaults to **empty**, which falls back to `DATA_DIR` — so a tool
+  call resolves against `data/`, not the project. Measured: `read_file README.md`
+  answered `File not found: <root>/data/README.md`. Whether a tool may leave that
+  root is `TOOL_ACCESS_MODE` (`permissioned` keeps the boundary, `unrestricted`
+  does not).
+- **Proof:** live — `initialize` → `200` + session id + `mcp-protocol-version:
+  2025-11-25`; `notifications/initialized` → `202`; `tools/list` → **28 tools**,
+  all with an object `inputSchema`; `tools/call` → `200` with the output in
+  `result.content[0].text`; unknown tool → `-32602 unknown_tool`; `DELETE` →
+  `204`; a clean-env instance with the server off → `501` carrying the error
+  envelope plus its sibling fields. The operator-facing walkthrough, the
+  post-restart checklist and the troubleshooting table are in
+  `docs/FRESH_INSTALL.md`.
+
 ---
 
 ## 4. The map — where each concern lives
@@ -606,6 +640,8 @@ These were observed in an ancestor repository and must not be repeated.
 | --- | --- |
 | `README.md` | the runtime as a whole, and the honest limitations |
 | `docs/LARAVEL_INTEGRATION.md` | the PHP/Laravel HTTP contract |
+| `docs/FACEBOOK_CHANNELS.md` | the messaging-channel plan: rules, blockers, build order |
+| `docs/FRESH_INSTALL.md` | fresh-OS install, MCP client connection, post-restart checklist |
 | `docs/OBSERVABILITY.md` | logging, diagnostics, troubleshooting |
 | `IMPLEMENTATION_MANIFEST.md` | the per-phase implementation record |
 | `CHANGELOG.md` | release history |

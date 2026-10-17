@@ -771,6 +771,7 @@ Be explicit about the line between "implemented" and "verified".
 | `docs/DESIGN_FLOW.md` | why the runtime is built this way, the invariants, and how the next change must be made |
 | `docs/LARAVEL_INTEGRATION.md` | the PHP/Laravel HTTP contract, auth, sessions, tools and error codes |
 | `docs/FACEBOOK_CHANNELS.md` | the Messenger / comment / WhatsApp / Ads plan: the rules, the blockers, and the build order |
+| `docs/FRESH_INSTALL.md` | bringing the runtime up on a fresh OS, connecting an MCP client, and the post-restart checklist |
 | `docs/OBSERVABILITY.md` | runtime logging, diagnostics, privacy guidance, troubleshooting |
 | `IMPLEMENTATION_MANIFEST.md` | per-phase implementation record |
 | `CHANGELOG.md` | release history |
