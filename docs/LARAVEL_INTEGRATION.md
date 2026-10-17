@@ -368,40 +368,51 @@ negotiates protocol version `2025-06-18` and advertises the runnable tool set.
 
 ## 11. E-commerce capability tools
 
-Four capability tools are declared for e-commerce and customer-experience
-agents. They are **registered but unverified** in this environment because
-their endpoints are not configured.
+Four e-commerce capabilities are **declared as external MCP servers**, not as
+runtime tools. The one declaration lives in `external-mcp/servers.json`:
 
-| Tool | Purpose | Endpoint env var | Status |
+| Capability | Purpose | Endpoint env var | Declared transport |
 | --- | --- | --- | --- |
-| `public_api` | project / e-commerce public API access | `EXTERNAL_MCP_PUBLIC_API_URL` | UNVERIFIED |
-| `tts` | text-to-speech output | `EXTERNAL_MCP_TTS_URL` | UNVERIFIED |
-| `ocr` | image / document text extraction | `EXTERNAL_MCP_OCR_URL` | UNVERIFIED |
-| `facebook_ads` | advertising / marketing data | `EXTERNAL_MCP_FACEBOOK_ADS_URL` | UNVERIFIED |
+| `public-api` | project / e-commerce public API access | `EXTERNAL_MCP_PUBLIC_API_URL` | http |
+| `tts` | text-to-speech output | `EXTERNAL_MCP_TTS_URL` | http |
+| `ocr` | image / document text extraction | `EXTERNAL_MCP_OCR_URL` | http |
+| `facebook-ads` | advertising / marketing data | `EXTERNAL_MCP_FACEBOOK_ADS_URL` | grpc — refused with `mcp_transport_grpc_requires_bridge` until a JSON/HTTP facade is declared in front of it |
+
+An endpoint whose URL env var is unset stays `configuration_missing` and is
+reported as such. Once a URL is set and the endpoint answers `initialize` and
+`tools/list`, its tools are discovered and become callable by an agent that
+declares that endpoint in its `externalMcp` boundary. No runtime code is needed
+for that step.
+
+> These four are **not** entries in the tool registry. They were mirrored there
+> as `UNVERIFIED` rows for a while, which made the operator's tool list read as
+> "seven broken tools". The mirror is gone; the registry lists only tools the
+> runtime can run.
 
 Their intended agent boundaries are declared in
 `src/agents/ecommerce-tool-boundaries.js`:
 
-| Agent | Tools |
-| --- | --- |
-| `ecommerce-operations-analyst` | `read_file`, `list_directory`, `public_api`, `facebook_ads`, `ocr` |
-| `customer-experience-specialist` | `read_file`, `list_directory`, `ocr`, `tts` |
+| Agent | External endpoints | Native tools |
+| --- | --- | --- |
+| `ecommerce-operations-analyst` | `public-api`, `facebook-ads`, `ocr` | `read_file`, `list_directory` |
+| `customer-experience-specialist` | `ocr`, `tts` | `read_file`, `list_directory` |
 
-To enable one for an application once its URL is set:
+To allow one application to call one discovered external tool:
 
 ```bash
-curl -sX POST http://127.0.0.1:9999/v1/admin/applications/capabilities/tools \
+curl -sX POST http://127.0.0.1:9999/v1/admin/mcp/permissions \
   -H 'Content-Type: application/json' \
-  -d '{"applicationId":"app_…","toolId":"tts","enabled":true}'
+  -d '{"applicationId":"app_…","qualifiedName":"mcp_public-api_list_products"}'
 ```
 
-The effective decision is reported by the same endpoint family
-(`GET /v1/admin/applications/capabilities?applicationId=…`) and is resolved in
-this order: application setting → `ZOMBICODER_TOOL_<ID>` → `ZOMBICODER_TOOLS`
+The per-application feature switch for native tools is separate and uses
+`/v1/admin/applications/capabilities/tools`. The effective decision is reported
+by `GET /v1/admin/applications/capabilities?applicationId=…` and is resolved in
+this order: application setting → `ZOMBIECODER_TOOL_<ID>` → `ZOMBIECODER_TOOLS`
 allowlist → unconfigured.
 
-> Until a capability tool has a reachable endpoint and has been called
-> end-to-end, treat it as `UNVERIFIED`. A declaration is not a health claim.
+> Until a capability has a reachable endpoint and has been called end-to-end,
+> treat it as `UNVERIFIED`. A declaration is not a health claim.
 
 ---
 
@@ -475,7 +486,11 @@ Honest labels for this document and the runtime behaviour it describes.
 | Sessions / context / notes shapes | **LIVE_PROBE_PASSED** | probed against a running instance |
 | Streaming SSE frames + ttfb | **LIVE_PROBE_PASSED** | measured: ttfb ≈ 0.7–1.5 s; re-probed after the phase-72 fix — a token now travels on one channel only (7 `data:` frames, 0 mirrored tokens) |
 | Tool execution end-to-end | **END_TO_END_TESTED** | the full suite exercises the tool loop with real registered tools |
-| `public_api`, `tts`, `ocr`, `facebook_ads` | **UNVERIFIED** | no endpoint configured; never called |
+| `fetch_web_page` | **LIVE_PROBE_PASSED** | called through the chat tool loop; fetched `https://example.com` and returned `Example Domain` |
+| `web_search` without a backend | **LIVE_PROBE_PASSED** | returns `search_backend_not_configured` rather than an empty success |
+| `web_search` with a backend | **LIVE_PROBE_PASSED** | with `WEB_SEARCH_ENDPOINT` set it returned normalized title/url/snippet results |
+| The registry lists only runnable tools | **LIVE_PROBE_PASSED** | live read: 28 tools, 28 runnable, 0 unavailable |
+| `public_api`, `tts`, `ocr`, `facebook-ads` | **UNVERIFIED** | external MCP servers; no endpoint configured, never called |
 | A PHP/Laravel snippet executed on this host | **NOT_TESTED** | no `php` / `composer` on the build host |
 | HTTPS certificate / reverse-proxy setup | **NOT_TESTED** | loopback deployment only |
 

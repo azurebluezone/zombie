@@ -69,8 +69,8 @@ ZombieCoder Runtime is a **self-hosted runtime**, not a SaaS. One Node.js proces
 | **Masking layer** | Presents a public "ZombieCoder" model identity so a client never learns the real provider or model |
 | **Agent layer** | 12 agents with DB-backed personas, an access scope, and per-agent metrics |
 | **Execution layer** | A lifecycle of `goal → plan → consent → execute → verify` with four boundaries: provider, native tool, remote MCP tool, and tool loop |
-| **Tool layer** | A registry of 33 tools (26 runnable), application-scoped permissions, path boundaries, and consent |
-| **MCP** | A client that consumes external MCP servers and an optional server that exposes 26 tools to MCP clients |
+| **Tool layer** | A registry of 28 tools, all runnable, with application-scoped permissions, path boundaries, and consent |
+| **MCP** | A client that consumes external MCP servers and an optional server that exposes 28 tools to MCP clients |
 | **Context layer** | SSOT, syllabus, memory, entities and a compiled context budget |
 | **Evidence layer** | Records observations, refuses to promote them to "verified" without proof |
 | **Admin layer** | A single-file SPA over an admin JSON API |
@@ -184,17 +184,36 @@ behaviour; it cannot talk an agent out of the rules.
 
 ## 5. Tools
 
-33 tools are registered; **26 are runnable**.
+28 tools are registered, and **all 28 are runnable**. There is no
+"declared but unavailable" tier any more: a tool the runtime cannot run is not
+in the list at all.
 
-**Runnable (26):** `runtime_echo`, `read_file`, `write_file`, `list_directory`,
+**Runnable (28):** `runtime_echo`, `read_file`, `write_file`, `list_directory`,
 `create_file`, `edit_file`, `apply_diff`, `delete_file`, `list_dir`, `read_directory`,
 `grep_search`, `regex_search`, `file_search`, `find_files`, `view_symbol`, `code_graph`,
 `run_terminal_command`, `execute_bash`, `kill_process`, `undo`, `revert_file`, `git_diff`,
-`git_status`, `task_planner`, `todo_manager`, `note_store`.
+`git_status`, `task_planner`, `todo_manager`, `note_store`, `web_search`,
+`fetch_web_page`.
 
-**Deliberately not implemented (7):** `web_search`, `fetch_web_page`, `delegate_subagent`
-(`NOT_IMPLEMENTED`), and `public_api`, `tts`, `ocr`, `facebook_ads` (`UNVERIFIED`).
-They are registered so the surface is honest about what does not exist yet.
+The last two are the tools that leave the machine, and both were verified live:
+
+- **`fetch_web_page`** needs no configuration. It is https-only, standard-port-only,
+  refuses private addresses, and re-validates every redirect hop against the same
+  policy. It fetched `https://example.com` and returned the title `Example Domain`.
+- **`web_search`** needs a backend. Point `WEB_SEARCH_ENDPOINT` at a
+  SearXNG-compatible JSON endpoint — a self-hosted SearXNG on a private address is
+  expected and allowed. Without one it reports `search_backend_not_configured`
+  rather than returning an empty success. With one, it returned normalized
+  title/url/snippet results.
+
+The four external capabilities (`public_api`, `tts`, `ocr`, `facebook_ads`) are
+**not** runtime tools. They are external MCP servers, declared once in
+`external-mcp/servers.json`; a discovered endpoint's tools reach the agent's
+surface on their own. They used to be mirrored into the tool registry as
+`UNVERIFIED` rows, which made the list read as "seven broken tools".
+
+`delegate_subagent` was removed. Choosing an agent is a per-request field
+(`agent`), not a tool, and the runtime never shipped a delegation contract.
 
 > **Registering a tool is not the same as enabling it.** `ZOMBIECODER_TOOLS` is a
 > hand-maintained allowlist, and a runnable tool that is missing from it is refused at
@@ -715,8 +734,10 @@ Known, accepted gaps: `DELETE /mcp` terminates a session without authentication
 This repository does **not** claim complete compatibility with every provider or client.
 Be explicit about the line between "implemented" and "verified".
 
-- `web_search`, `fetch_web_page` and `delegate_subagent` are **not implemented**;
-  `public_api`, `tts`, `ocr` and `facebook_ads` are registered but **unverified**.
+- Every registered tool is runnable. `web_search` needs `WEB_SEARCH_ENDPOINT`;
+  without it the tool reports `search_backend_not_configured` instead of
+  pretending. `public_api`, `tts`, `ocr` and `facebook_ads` are external MCP
+  servers declared in `external-mcp/servers.json`, not runtime tools.
 - Remote MCP endpoints are only useful if something is actually listening at their URL.
   A declared endpoint that cannot be reached stays in `error` with zero tools and is
   reported as such rather than being silently dropped.

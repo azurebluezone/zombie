@@ -31,8 +31,12 @@ test('phase58 the advertised catalog equals the runnable catalog', () => {
   for (const expected of ['runtime_echo', 'read_file', 'write_file', 'run_terminal_command', 'git_status']) {
     assert.ok(names.includes(expected), `expected ${expected} to be advertised`);
   }
-  // ...but NOT_IMPLEMENTED and external-MCP placeholders (entry: null) are not.
-  for (const hidden of ['web_search', 'fetch_web_page', 'delegate_subagent', 'public_api', 'tts', 'ocr', 'facebook_ads']) {
+  // ...and the tools that leave the machine are advertised now that they exist.
+  for (const expected of ['web_search', 'fetch_web_page']) {
+    assert.ok(names.includes(expected), `expected ${expected} to be advertised`);
+  }
+  // A name the runtime does not ship must never be advertised.
+  for (const hidden of ['delegate_subagent', 'public_api', 'tts', 'ocr', 'facebook_ads']) {
     assert.equal(names.includes(hidden), false, `${hidden} must not be advertised`);
   }
   for (const tool of catalog) assert.ok(tool.inputSchema && typeof tool.inputSchema.type === 'string', `${tool.name} needs an inputSchema`);
@@ -158,7 +162,7 @@ test('phase58 the runtime serves MCP on /mcp when explicitly enabled', async t =
   const listed = await (await call({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).json();
   const toolNames = listed.result.tools.map(tool => tool.name);
   assert.ok(toolNames.includes('read_file'));
-  assert.equal(toolNames.includes('web_search'), false);
+  assert.ok(toolNames.includes('web_search'), 'a runnable web tool is part of the catalog now');
 
   // A tool without a grant is refused, matching the chat tool loop.
   const denied = await (await call({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'read_file', arguments: { path: 'probe.txt' } } })).json();

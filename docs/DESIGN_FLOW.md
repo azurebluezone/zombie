@@ -147,8 +147,9 @@ the reason it was made.
 
 - **Where:** `src/tools/` (registry, selection), `src/execution/`
   (`tool-loop.js`, `tool-adapter.js`, `path-boundary.js`).
-- **How:** 33 tools are registered; **26 are runnable** (status `ENABLED` or
-  `VERIFIED` with an entry). Tool *access* is global
+- **How:** 28 tools are registered and **all 28 are runnable** (an entry, status
+  `ENABLED` or `VERIFIED`). A tool the runtime cannot run is not listed at all —
+  see §3.15. Tool *access* is global
   (`TOOL_ACCESS_MODE=unrestricted`); path *scope* is per-agent
   (`global` | `working-directory`) with a `working_directory`.
 - **Why:** two different concerns were deliberately separated. "Which tools may
@@ -301,6 +302,30 @@ the reason it was made.
   (`dataText === runtimeText === "ALPHA BRAVO CHARLIE"`); after it the runtime
   channel is empty and `data:` still carries the whole answer.
 
+### 3.15 A tool the runtime cannot run is not in the list
+
+- **Where:** `src/tools/common-defaults.js` (the declarations),
+  `src/tools/registry.js` (the read-time reconciliation),
+  `tools/common/web_tools.js` (the two network tools).
+- **What:** the registry only lists tools that can actually execute. There is no
+  `NOT_IMPLEMENTED` or `UNVERIFIED` tier left.
+- **How:** `COMMON_TOOLS` is the single source for code-owned rows. On every
+  read the registry (a) **retires** a code-owned row the code no longer declares,
+  so `git pull` can remove a phantom tool and not only add one, and (b) refreshes
+  `status` from the code unless the saved status is `DISABLED`, which is the one
+  value an operator writes from the global tool switch.
+- **Why:** seven tools used to be registered without an implementation — three
+  `NOT_IMPLEMENTED` and four `UNVERIFIED` external-MCP placeholders. The agent
+  never saw them (`canResolveManifest` excludes them) but the operator did, and a
+  list that ships seven names it cannot run is worse than a short list that is
+  true. `web_search` and `fetch_web_page` are now real; `delegate_subagent` was
+  removed (agent choice is a request field, not a tool); the four external
+  capabilities are declared once, in `external-mcp/servers.json`.
+- **Proof:** live registry reads `28 tools | 28 runnable | 0 unavailable`.
+  `fetch_web_page` fetched `https://example.com` through the chat tool loop and
+  returned `Example Domain`. `web_search` reported `search_backend_not_configured`
+  with no backend and returned normalized results with one.
+
 ---
 
 ## 4. The map — where each concern lives
@@ -375,8 +400,6 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| `web_search`, `fetch_web_page`, `delegate_subagent` | `NOT_IMPLEMENTED` | registered, no entry |
-| `public_api`, `tts`, `ocr`, `facebook_ads` | `UNVERIFIED` | endpoint env vars unset; never called |
 | `facebook-ads` transport | declared `grpc`, refused with `mcp_transport_grpc_requires_bridge` | needs a JSON/HTTP facade in front of the gRPC service |
 | Path scoping (`working-directory` mode) | frozen | feature deferred, not removed |
 | `grep_search` / `file_search` / `find_files` outside the project root | not implemented | they take no path argument |
@@ -388,7 +411,7 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 | `instances/zc-10001/.env` dead MCP keys | left in place | deliberately untouched |
 | Per-application MCP credentials | `NOT_IMPLEMENTED` | an external MCP endpoint carries one credential set on the endpoint (`endpoint.headers`, set at registration). Injecting each application's own token at call time is the next change; until then a per-shop token means a per-shop endpoint. Documented in `docs/LARAVEL_INTEGRATION.md` §18.7 |
 
-Regression baseline at the time of writing: **329 tests, 327 pass, 2 fail**
+Regression baseline at the time of writing: **342 tests, 340 pass, 2 fail**
 (both listed above). The two failures are left failing rather than silenced.
 
 ---
@@ -401,18 +424,19 @@ This section tells the next agent where to begin and where to stop.
 
 Start from the **unfinished items in §6**, in this order of value:
 
-1. **Capability tools** (`public_api`, `tts`, `ocr`, `facebook_ads`) — either
-   configure a reachable endpoint and verify them end-to-end, or remove them.
-   An `UNVERIFIED` tool that nobody intends to finish is a trap. The runtime side
-   is ready: a discovered endpoint's tools already reach the agent's surface.
-2. **The `facebook-ads` gRPC endpoint** — put a JSON/HTTP facade in front of the
+1. **The `facebook-ads` gRPC endpoint** — put a JSON/HTTP facade in front of the
    gRPC service and declare that facade as an `http` endpoint. Do not widen the
    HTTP client to guess gRPC: the message shape and method path come from a
    `.proto` schema and cannot be derived from a URL.
-3. **The two failing tests** — fix the `phase49` assertion to the current
+2. **The two failing tests** — fix the `phase49` assertion to the current
    negotiated version, and either make the PHP test skip cleanly when `php` is
    absent or install `php` in the verification environment.
-4. **The three `NOT_IMPLEMENTED` tools** — implement or remove.
+3. **Per-application MCP credentials** — see §6. This is the blocker for "each
+   shop brings its own Meta token".
+4. **The external capability endpoints** (`public_api`, `tts`, `ocr`) — configure
+   a reachable endpoint and verify them end-to-end, or leave them declared and
+   unreachable. A discovered endpoint's tools already reach the agent's surface,
+   so no runtime code is missing here.
 
 ### 7.2 How to start
 

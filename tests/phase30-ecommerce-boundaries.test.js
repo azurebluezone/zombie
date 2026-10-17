@@ -13,10 +13,19 @@ test('ecommerce agent boundaries are explicit and distinct', () => {
   assert.notDeepEqual(getAgentToolBoundary('ecommerce-operations-analyst').toolIds, getAgentToolBoundary('customer-experience-specialist').toolIds);
 });
 
-test('external capability tools are declared once in common registry', () => {
+test('external capability tools are declared once, in the external MCP manifest', async () => {
   const ids = COMMON_TOOLS.map(x => x.id);
-  assert.equal(new Set(ids).size, ids.length);
-  for (const id of ['public_api','tts','ocr','facebook_ads']) assert.ok(COMMON_TOOLS.some(x => x.id === id));
+  assert.equal(new Set(ids).size, ids.length, 'no duplicate tool ids');
+  // They are external MCP servers, so the registry must NOT mirror them: a
+  // mirrored row was an UNVERIFIED tool the agent could see but never call.
+  for (const id of ['public_api','tts','ocr','facebook_ads']) {
+    assert.equal(COMMON_TOOLS.some(x => x.id === id), false, `${id} must not be a runtime tool`);
+  }
+  const { readFile } = await import('node:fs/promises');
+  const manifest = JSON.parse(await readFile(new URL('../external-mcp/servers.json', import.meta.url), 'utf8'));
+  for (const id of ['public-api','tts','ocr','facebook-ads']) {
+    assert.ok(manifest.servers.some(x => x.id === id), `${id} must be declared in external-mcp/servers.json`);
+  }
 });
 
 test('external MCP manifest can remain unconfigured without becoming healthy', async () => {
