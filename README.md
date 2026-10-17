@@ -99,7 +99,7 @@ tools/common/            # the runnable tool implementations (26 tools in 5 modu
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 373 tests, run with node --test
+tests/                   # 376 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -706,12 +706,20 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **373 tests, 371 passing, 2 failing.** The two failures are known and
-pre-existing:
+Current baseline: **376 tests, 375 passing, 0 failing, 1 skipped.** The skip is honest
+rather than hidden: `php -l` needs a `php` binary, and this machine has none, so the
+syntax check is reported as `NOT_TESTED` with the reason. Set `ZC_REQUIRE_PHP=1` where
+PHP is expected and its absence becomes a failure instead of a skip.
 
-- `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the
-  runtime now negotiates (stale fixture).
-- `server-side PHP integration` — requires a `php` binary that is not installed here.
+Two failures that used to sit here are fixed rather than tolerated:
+
+- `tests/phase49-mcp-streamable-http.test.js` — it asserted a frozen protocol version,
+  which made it stale the moment the client learned a newer revision. It now pins the
+  *negotiation* instead: the client proposes the latest revision it understands, every
+  request after the handshake carries the revision that was agreed, and an unparseable
+  revision fails closed.
+- the PHP syntax check — now skips with a reason when `php` is absent, while its file
+  presence and shape are still checked on every machine.
 
 Treat a green suite as *suite-verified*, never as *live verified*.
 

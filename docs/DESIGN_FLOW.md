@@ -566,7 +566,7 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 | `instances/zc-10001/.env` dead MCP keys | left in place | deliberately untouched |
 | Per-application MCP credentials | `NOT_IMPLEMENTED` | an external MCP endpoint carries one credential set on the endpoint (`endpoint.headers`, set at registration). Injecting each application's own token at call time is the next change; until then a per-shop token means a per-shop endpoint. Documented in `docs/LARAVEL_INTEGRATION.md` §18.7 |
 
-Regression baseline at the time of writing: **373 tests, 371 pass, 2 fail**
+Regression baseline at the time of writing: **376 tests, 375 pass, 0 fail, 1 skipped** (the skip is the PHP syntax check: no `php` binary here, reported as NOT_TESTED)
 (both listed above). The two failures are left failing rather than silenced.
 
 ---
