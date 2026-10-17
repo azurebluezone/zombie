@@ -104,11 +104,26 @@ const externalMcpBootstrap = await externalMcp.sync({
   refreshDiscovered: config.externalMcpRefreshToolsOnStart
 });
 const contexts = new ContextResolver(store);
-// Allowed project roots never depend on the launch directory: the runtime's own
-// tree, its data directory, and the caller's cwd (the conventional "current
-// project"). Extra roots come from PROJECT_ROOTS.
+// Allowed project roots: the runtime's own tree, its data directory, and the launch
+// directory (the conventional "current project"). Extra roots come from PROJECT_ROOTS.
+//
+// Note that the launch directory IS in this list, so in `permissioned` mode the trust
+// boundary does depend on where the shell happened to be — `cd / && npm start` would make
+// `/` an allowed root. In `unrestricted` mode (and for any agent whose persisted scope is
+// `global`, which resolves with `allowAnyRoot`) `allowedRoots` is not consulted at all, so
+// today this only matters to an operator running `permissioned`. It is logged at boot as
+// `runtime.project_roots` rather than changed here, because path scoping is a deliberate,
+// currently frozen decision: see ProjectContextStore, which dropped the same cwd fallback
+// for the same reason (a root that changes with the shell is not a boundary).
 const projectAllowedRoots = config.projectRoots.length ? config.projectRoots : [...new Set([config.dataDir, PROJECT_ROOT, process.cwd()])];
 const projectContext = new ProjectContextStore({defaultRoot:config.dataDir, allowedRoots:projectAllowedRoots});
+await logger.info('runtime.project_roots', {
+  source: config.projectRoots.length ? 'PROJECT_ROOTS' : 'default',
+  allowedRoots: projectAllowedRoots,
+  cwd: process.cwd(),
+  cwdIsAllowed: projectAllowedRoots.includes(path.resolve(process.cwd())),
+  toolAccessMode: config.toolAccessMode
+});
 const ssot = new SSOTService({contextStore:projectContext});
 const syllabus = new SyllabusService({contextStore:projectContext});
 const memory = new ProjectMemoryService({contextStore:projectContext, maxEntries:config.memoryMaxEntries ?? 500});
