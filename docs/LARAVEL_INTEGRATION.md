@@ -328,6 +328,14 @@ qualified name (or by setting `"executionTarget":"mcp"`). If the tool is not
 permitted for the application, the run returns `mcp_tool_not_permitted` and
 logs `tool.permission_denied` with the reason.
 
+Tools discovered on an external MCP endpoint are also offered to the agent as
+ordinary function definitions, so a tool loop can choose one without the caller
+naming it. The name the model sees is derived from the endpoint id and the
+remote tool name (`self-mcp.runtime_echo` → `mcp_self-mcp_runtime_echo`). An
+agent that declares an external-MCP boundary sees only those endpoints;
+`EXTERNAL_TOOL_SURFACE_MAX` caps how many are offered at once. What was offered
+is reported under `meta.toolSurface.external`.
+
 ---
 
 ## 10. Calling an MCP tool directly

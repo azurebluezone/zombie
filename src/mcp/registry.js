@@ -22,8 +22,21 @@ function normalizeAuthHeaders(input = {}) {
 
 /** Admin-safe projection: header names are shown, values are not. */
 export function redactEndpoint(endpoint) {
-  if (!endpoint || !endpoint.headers || !Object.keys(endpoint.headers).length) return { ...endpoint, hasAuth: false };
-  return { ...endpoint, hasAuth: true, authHeaderNames: Object.keys(endpoint.headers), headers: Object.fromEntries(Object.keys(endpoint.headers).map(k => [k, '***'])) };
+  if (!endpoint) return endpoint;
+  const { ca, ...rest } = endpoint;
+  const hasCa = Boolean(ca || endpoint.caFile);
+  if (!rest.headers || !Object.keys(rest.headers).length) return { ...rest, hasAuth: false, hasCa };
+  return { ...rest, hasAuth: true, hasCa, authHeaderNames: Object.keys(rest.headers), headers: Object.fromEntries(Object.keys(rest.headers).map(k => [k, '***'])) };
+}
+
+// A wire transport an endpoint may declare. `grpc` is accepted here so the
+// declaration is stored and visible, and refused at call time with an
+// actionable code rather than being silently treated as HTTP.
+const TRANSPORTS = new Set(['http', 'sse', 'grpc']);
+function normalizeTransport(value) {
+  const transport = String(value ?? 'http').trim().toLowerCase();
+  if (!TRANSPORTS.has(transport)) throw new Error('mcp_transport_invalid');
+  return transport;
 }
 
 export class McpRegistry {
@@ -45,6 +58,7 @@ export class McpRegistry {
   async list() { return this.store.read('mcp-endpoints', []); }
   async register(input) {
     if (!input?.url) throw new Error('mcp_url_required');
+    const transport = normalizeTransport(input.transport);
     const requestedHosts = Array.isArray(input.allowHosts) ? [...new Set(input.allowHosts.map(String).map(x => x.toLowerCase()).filter(Boolean))] : [];
     await this.validateUrl(input.url, requestedHosts);
     const globalHosts = [...(this.networkPolicy.allowHosts ?? [])];
@@ -62,7 +76,12 @@ export class McpRegistry {
       }
       return existing;
     }
-    const item = { id: input.id ? String(input.id) : id('mcp'), url: input.url, name: String(input.name ?? input.url).slice(0,120), enabled: input.enabled !== false, allowHosts, networkPolicy: {allowHttp:this.networkPolicy.allowHttp===true,allowPrivateNetwork:this.networkPolicy.allowPrivateNetwork===true}, headers, status: 'registered', tools: [], createdAt: new Date().toISOString() };
+    const item = { id: input.id ? String(input.id) : id('mcp'), url: input.url, name: String(input.name ?? input.url).slice(0,120), enabled: input.enabled !== false, allowHosts, transport, networkPolicy: {allowHttp:this.networkPolicy.allowHttp===true,allowPrivateNetwork:this.networkPolicy.allowPrivateNetwork===true}, headers, status: 'registered', tools: [], createdAt: new Date().toISOString() };
+    // TLS trust material travels with the endpoint so a self-signed or
+    // internal-CA server can be reached without disabling verification globally.
+    if (input.caFile) item.caFile = String(input.caFile);
+    if (input.ca) item.ca = String(input.ca);
+    if (input.rejectUnauthorized === false) item.rejectUnauthorized = false;
     endpoints.push(item); await this.store.write('mcp-endpoints', endpoints); return item;
   }
   async discover(endpointId) {

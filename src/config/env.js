@@ -215,6 +215,10 @@ export const config = {
   // explicitly, or sends `toolSurface:'full'`, keeps the full allowed surface.
   toolSurfaceMode: env('TOOL_SURFACE_MODE', 'narrowed') === 'full' ? 'full' : 'narrowed',
   toolSurfaceMax: numberEnv('TOOL_SURFACE_MAX', 12, {min:4,max:64}),
+  // How many tools discovered on external MCP endpoints may be offered in one
+  // request. A discovered endpoint can expose dozens of tools; without a cap a
+  // single endpoint would dominate the surface the model sees.
+  externalToolSurfaceMax: numberEnv('EXTERNAL_TOOL_SURFACE_MAX', 16, {min:0,max:128}),
   // Explicit browser CORS allowlist. Empty means same-origin only (no CORS headers).
   corsAllowOrigins: env('CORS_ALLOW_ORIGINS', '').split(',').map(x => x.trim()).filter(Boolean),
   providerNetworkPolicy: {

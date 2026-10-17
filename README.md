@@ -99,7 +99,7 @@ tools/common/            # the runnable tool implementations (26 tools in 5 modu
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 321 tests, run with node --test
+tests/                   # 329 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -262,6 +262,36 @@ policy and the execution mode are all enforced downstream and unchanged. Set
 allowed surface; `TOOL_SURFACE_MAX` (default 12) caps only the optional families. If the
 narrowed surface somehow contains no runnable tool, the request falls back to the full
 allowed surface rather than failing.
+
+### External MCP tools in the surface
+
+A discovered external MCP endpoint's tools are offered to the agent as ordinary function
+definitions. The name the model sees is derived from the endpoint id and the remote tool
+name (`self-mcp.runtime_echo` → `mcp_self-mcp_runtime_echo`), and the binding carries the
+qualified name plus `executionTarget:'mcp'`, so the tool loop routes the call to the MCP
+execution adapter exactly as it routes a native tool. `meta.toolSurface.external` reports
+`count`, `endpoints`, `tools` and `dropped`, so what was offered is auditable.
+
+- An agent that declares an external-MCP boundary (`externalMcp` in
+  `src/agents/ecommerce-tool-boundaries.js`) sees only those endpoints; every other agent
+  sees the whole discovered set.
+- `EXTERNAL_TOOL_SURFACE_MAX` (default 16) caps how many remote tools are offered in one
+  request, so one large endpoint cannot dominate the surface.
+- Only an endpoint whose status is `discovered` contributes. A declaration is not a
+  health claim, and a registered-but-unreachable endpoint stays out of the surface.
+
+Two outbound facts are handled rather than assumed:
+
+- **TLS.** Certificate verification is on. An internal or self-signed certificate is
+  trusted through `MCP_TLS_CA_FILE` or a per-endpoint `caFile`; `MCP_TLS_INSECURE=true`
+  skips verification and is never the default. Without a CA the connection dies before the
+  MCP handshake with `DEPTH_ZERO_SELF_SIGNED_CERT`.
+- **Non-standard ports.** An HTTPS endpoint on a port other than 443 is refused by default
+  (`outbound_nonstandard_https_port_forbidden`). An explicitly allowlisted host lifts that
+  default, because naming the host is the operator's own trust decision.
+- **Transport.** `transport` is a first-class field (`http` | `sse` | `grpc`). A `grpc`
+  endpoint fails closed with `mcp_transport_grpc_requires_bridge`: the runtime does not
+  embed a protobuf compiler, so a gRPC service needs a JSON/HTTP facade in front of it.
 
 ### The browser pipe (`src/browser/cdp-pipe.js`)
 
@@ -648,7 +678,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **321 tests, 319 passing, 2 failing.** The two failures are known and
+Current baseline: **329 tests, 327 passing, 2 failing.** The two failures are known and
 pre-existing:
 
 - `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the
@@ -693,9 +723,19 @@ Be explicit about the line between "implemented" and "verified".
 - In `global` access mode, `grep_search` / `file_search` / `find_files` still search only
   the project root, because they take no path argument. "Search anywhere" is therefore not
   yet implemented for those three tools.
-- External MCP tools are **not** injected into an agent's native tool list. They are
-  invoked explicitly through `/v1/mcp/tools/call` or the execution boundary, so an agent
-  will not spontaneously choose a remote MCP tool.
+- Tools discovered on an external MCP endpoint **are** offered in an agent's tool
+  surface: a discovered endpoint's tools become ordinary function definitions bound to
+  their qualified name, and the tool loop routes the call to the MCP adapter. An agent
+  that declares an external-MCP boundary only sees those endpoints, and
+  `EXTERNAL_TOOL_SURFACE_MAX` caps how many remote tools are offered at once.
+- A `transport: "grpc"` endpoint is **declared and refused**, not sent down the HTTP
+  path: the runtime does not embed a protobuf compiler, so a gRPC-backed service needs a
+  JSON/HTTP facade in front of it. The refusal code is
+  `mcp_transport_grpc_requires_bridge`.
+- An HTTPS MCP endpoint is reached with certificate verification on. An internal or
+  self-signed certificate needs `MCP_TLS_CA_FILE` (or a per-endpoint `caFile`); without a
+  CA the connection fails before the MCP handshake. `MCP_TLS_INSECURE=true` skips
+  verification and is never the default.
 - The two failing tests above are left failing rather than silenced.
 - A successful `/health`, a fixture test, or a model appearing in a catalog is **not**
   proof that authentication, inference, streaming, tool calling and client integration all

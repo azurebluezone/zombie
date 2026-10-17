@@ -7,6 +7,7 @@ import { createApiKey, hashSecret, authenticateApiKey } from './auth/application
 import { isAdminAuthorized } from './auth/admin-auth.js';
 import { id } from './core/ids.js';
 import { McpRegistry, redactEndpoint } from './mcp/registry.js';
+import { buildExternalToolSurface, boundaryEndpointIds } from './mcp/external-surface.js';
 import { ProviderRegistry } from './providers/registry.js';
 import { ContextResolver } from './context/resolver.js';
 import { McpPermissions } from './mcp/permissions.js';
@@ -1222,7 +1223,10 @@ const requestHandler = async (req,res) => {
       input={...input,toolIds:taskPolicy.effectiveToolIds,allowedToolIds:taskPolicy.effectiveToolIds};
       const registeredNativeTools=(await toolsRegistry.list()).filter(t=>input.toolIds.includes(t.id)&&t.entry&&['ENABLED','VERIFIED'].includes(t.status));
       const generatedToolBindings=Object.fromEntries(registeredNativeTools.map(t=>[t.id,{toolId:t.id}]));
-      input={...input,tools:registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}})),toolBindings:{...(input.toolBindings??{}),...generatedToolBindings},allowJsonToolFallback:true};
+      // Discovered external MCP tools join the same surface here as in the chat tool
+      // loop, so an execution run can reach a remote tool the same way.
+      const externalSurface=buildExternalToolSurface({endpoints:await mcp.list(),allowedEndpointIds:boundaryEndpointIds(String(input.agent ?? input.persona ?? 'code-guru')),maxTools:config.externalToolSurfaceMax});
+      input={...input,tools:[...registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}})),...externalSurface.definitions],toolBindings:{...(input.toolBindings??{}),...generatedToolBindings,...externalSurface.bindings},allowedToolIds:[...(Array.isArray(input.allowedToolIds)?input.allowedToolIds:[]),...externalSurface.entries.map(e=>e.qualifiedName)],allowJsonToolFallback:true};
       const session=input.sessionId ? await sessionClient.resolve({sessionId:input.sessionId,applicationId:app.id}) : (input.createSession ? await sessionClient.resolve({applicationId:app.id,createIfMissing:true,userId:input.userId}) : null);
       const executionMetadata={sessionSource:input.sessionSource ?? req.headers['x-session-source'] ?? 'execution',clientId:input.clientId ?? req.headers['x-client-id'] ?? null,editor:input.editor ?? req.headers['x-editor'] ?? null,editorVersion:input.editorVersion ?? req.headers['x-editor-version'] ?? null,clientVersion:input.clientVersion ?? req.headers['x-client-version'] ?? null,osPlatform:input.osPlatform ?? req.headers['x-os-platform'] ?? null,deviceInfo:input.deviceInfo ?? req.headers['x-device-info'] ?? null};
       if(session) await sessions.updateMetadata(session.id,app.id,Object.fromEntries(Object.entries(executionMetadata).filter(([,v])=>v != null && String(v).trim())));
@@ -1293,7 +1297,10 @@ const requestHandler = async (req,res) => {
       input={...input,stream:true,toolIds:taskPolicy.effectiveToolIds,allowedToolIds:taskPolicy.effectiveToolIds};
       const registeredNativeTools=(await toolsRegistry.list()).filter(t=>input.toolIds.includes(t.id)&&t.entry&&['ENABLED','VERIFIED'].includes(t.status));
       const generatedToolBindings=Object.fromEntries(registeredNativeTools.map(t=>[t.id,{toolId:t.id}]));
-      input={...input,tools:registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}})),toolBindings:{...(input.toolBindings??{}),...generatedToolBindings},allowJsonToolFallback:true};
+      // Discovered external MCP tools join the same surface here as in the chat tool
+      // loop, so an execution run can reach a remote tool the same way.
+      const externalSurface=buildExternalToolSurface({endpoints:await mcp.list(),allowedEndpointIds:boundaryEndpointIds(String(input.agent ?? input.persona ?? 'code-guru')),maxTools:config.externalToolSurfaceMax});
+      input={...input,tools:[...registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}})),...externalSurface.definitions],toolBindings:{...(input.toolBindings??{}),...generatedToolBindings,...externalSurface.bindings},allowedToolIds:[...(Array.isArray(input.allowedToolIds)?input.allowedToolIds:[]),...externalSurface.entries.map(e=>e.qualifiedName)],allowJsonToolFallback:true};
       const session=input.sessionId ? await sessionClient.resolve({sessionId:input.sessionId,applicationId:app.id}) : (input.createSession ? await sessionClient.resolve({applicationId:app.id,createIfMissing:true,userId:input.userId}) : null);
       const streamMetadata={sessionSource:input.sessionSource ?? req.headers['x-session-source'] ?? 'execution-stream',clientId:input.clientId ?? req.headers['x-client-id'] ?? null,editor:input.editor ?? req.headers['x-editor'] ?? null,editorVersion:input.editorVersion ?? req.headers['x-editor-version'] ?? null,clientVersion:input.clientVersion ?? req.headers['x-client-version'] ?? null,osPlatform:input.osPlatform ?? req.headers['x-os-platform'] ?? null,deviceInfo:input.deviceInfo ?? req.headers['x-device-info'] ?? null};
       if(session) await sessions.updateMetadata(session.id,app.id,Object.fromEntries(Object.entries(streamMetadata).filter(([,v])=>v != null && String(v).trim())));
@@ -1389,9 +1396,24 @@ const requestHandler = async (req,res) => {
           input={...input,toolIds:fullSurface,allowedToolIds:fullSurface};
           registeredNativeTools=await runnableFrom(fullSurface);
         }
-        if (!registeredNativeTools.length) return send(res,400,{error:'no_registered_tool_allowed_for_task',taskProfile:taskPolicy.profileId,requestedToolIds:requestedChatTools});
-        const toolDefinitions=registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}}));
-        const toolBindings={...(input.toolBindings??{}),...Object.fromEntries(registeredNativeTools.map(t=>[t.id,{toolId:t.id}]))};
+        // Discovered external MCP tools join the same surface. The tool loop already
+        // routes a `{qualifiedName, executionTarget:'mcp'}` binding to the MCP adapter
+        // (`bindingFor()`); what was missing was offering those bindings at all. An
+        // agent that declares an external-MCP boundary only sees those endpoints;
+        // every other agent sees the whole discovered set, capped by
+        // EXTERNAL_TOOL_SURFACE_MAX so one endpoint cannot dominate the surface.
+        const externalSurface=buildExternalToolSurface({
+          endpoints:await mcp.list(),
+          allowedEndpointIds:boundaryEndpointIds(agentId),
+          maxTools:config.externalToolSurfaceMax
+        });
+        if (!registeredNativeTools.length && !externalSurface.definitions.length) return send(res,400,{error:'no_registered_tool_allowed_for_task',taskProfile:taskPolicy.profileId,requestedToolIds:requestedChatTools});
+        const externalCatalog=externalSurface.entries.map(e=>({id:e.qualifiedName,name:e.name,description:`External MCP tool on endpoint ${e.endpointId}`,status:'DISCOVERED'}));
+        const toolDefinitions=[...registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}})),...externalSurface.definitions];
+        const toolBindings={...(input.toolBindings??{}),...Object.fromEntries(registeredNativeTools.map(t=>[t.id,{toolId:t.id}])),...externalSurface.bindings};
+        // The loop enforces `allowedToolIds` against the binding target, and an external
+        // tool's target is its qualified name.
+        if (externalSurface.entries.length) input={...input,allowedToolIds:[...(Array.isArray(input.allowedToolIds)?input.allowedToolIds:[]),...externalSurface.entries.map(e=>e.qualifiedName)]};
         const projectRoot=agentScope.projectRoot;
         // The tool loop is the path that actually works on a project, so it must carry
         // the same compiled project context as plain chat. Without this the agent was
@@ -1406,7 +1428,7 @@ const requestHandler = async (req,res) => {
         const agentPrepared=await agentRunner.prepare({agentId,personaId:agentId,goal:chatGoal,expectedOutcome:input.expectedOutcome,tools:input.toolIds});
         requestState.agentId=agentPrepared.agent?.id ?? agentId;
         const route=await smartRouter.route({...input,tools:toolDefinitions,allowJsonToolFallback:true});
-        const systemMessage=buildSystemMessage({constitution:CORE_CONSTITUTION,agent:agentPrepared.agent,persona:agentPrepared.persona,goal:chatGoal,expectedOutcome:input.expectedOutcome,projectRoot,ssot:toolLoopProject,syllabus:toolLoopSyllabus,memory:toolLoopMemory,route,tools:input.toolIds,toolCatalog:registeredNativeTools,compiledContext:toolLoopCompiledContext});
+        const systemMessage=buildSystemMessage({constitution:CORE_CONSTITUTION,agent:agentPrepared.agent,persona:agentPrepared.persona,goal:chatGoal,expectedOutcome:input.expectedOutcome,projectRoot,ssot:toolLoopProject,syllabus:toolLoopSyllabus,memory:toolLoopMemory,route,tools:[...input.toolIds,...externalSurface.entries.map(e=>e.name)],toolCatalog:[...registeredNativeTools,...externalCatalog],compiledContext:toolLoopCompiledContext});
         const prepared=await execution.prepare({...input,goal:chatGoal,toolIds:input.toolIds,allowedToolIds:input.allowedToolIds,consent:input.consent===true});
         if (!prepared.consent.allowed) return send(res,409,{error:'execution_consent_required',prepared});
         const executionContext=createExecutionContext({...input,applicationId:app.id,sessionId:input.sessionId ?? null,requestId,projectRoot:agentScope.workspaceRoot,workingDirectory:input.workingDirectory??agentScope.workspaceRoot,allowAnyPath:agentScope.access.allowAnyRoot,allowAnyCommand:agentScope.access.allowAnyRoot,agentId,goal:chatGoal,expectedOutcome:input.expectedOutcome,transport:'http-chat'},runtimeIdentity);
@@ -1445,7 +1467,7 @@ const requestHandler = async (req,res) => {
         // tool.execution.*).
         const toolLoopPublicModel=result.response?.model ?? route.publicModel ?? null;
         const toolLoopRoute={routeId:route.routeId,providerId:'masked',model:route.publicModel || toolLoopPublicModel,publicModel:route.publicModel || toolLoopPublicModel,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status};
-        return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,agentAccess:agentScope.access,toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id),allowedCount:fullSurface.length,mode:surfaceSelection?.mode??'full',reason:surfaceSelection?.reason??(requestedChatTools.length?'request_named_tools':'full_surface'),groups:surfaceSelection?.groups??[],dropped:surfaceSelection?.dropped??[]},evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy:reportedTaskPolicy}});
+        return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,agentAccess:agentScope.access,toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id),allowedCount:fullSurface.length,mode:surfaceSelection?.mode??'full',reason:surfaceSelection?.reason??(requestedChatTools.length?'request_named_tools':'full_surface'),groups:surfaceSelection?.groups??[],dropped:surfaceSelection?.dropped??[],external:{count:externalSurface.entries.length,endpoints:externalSurface.endpointIds,tools:externalSurface.entries.map(e=>e.qualifiedName),dropped:externalSurface.dropped}},evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy:reportedTaskPolicy}});
       }
       if (input.stream === true) {
         const streamContext = await contexts.resolve(input);

@@ -49,10 +49,13 @@ export class ExternalMcpRegistry {
       url:x.url ? String(x.url).trim() : null,
       urlEnv:x.urlEnv ? String(x.urlEnv).trim() : null,
       transport:String(x.transport ?? 'http'),
+      caFile:x.caFile ? String(x.caFile) : null,
+      rejectUnauthorized:x.rejectUnauthorized === false ? false : null,
       enabled:x.enabled!==false,
       source:'folder',
       legacyEntry:x.legacyEntry ?? null,
       purpose:x.purpose ?? null,
+      note:x.note ?? null,
       allowHosts:Array.isArray(x.allowHosts)?x.allowHosts:[],
     }));
   }
@@ -113,7 +116,7 @@ export class ExternalMcpRegistry {
       }
       if(currentById || currentByUrl) { results.push({id:(currentById ?? currentByUrl).id,status:'existing',source:'database'}); continue; }
       try {
-        const endpoint=await this.mcpRegistry.register({id:definition.id,url:definition.url,name:definition.name,allowHosts:definition.allowHosts,enabled:definition.enabled});
+        const endpoint=await this.mcpRegistry.register({id:definition.id,url:definition.url,name:definition.name,allowHosts:definition.allowHosts,enabled:definition.enabled,transport:definition.transport,caFile:definition.caFile,rejectUnauthorized:definition.rejectUnauthorized});
         results.push({id:endpoint.id,status:'registered',source:definition.source});
       } catch(error) {
         const code=safeErrorCode(error);
@@ -158,7 +161,7 @@ export class ExternalMcpRegistry {
       if (duplicate || def.declarationConflict) status='identity_conflict';
       else if (def.enabled===false) status='disabled';
       else status=endpoint?.status ?? (def.url ? 'configuration_only' : 'configuration_missing');
-      return {id:def.id,name:def.name,configured,configurationSource:endpoint?'database':(def.configurationSource ?? def.source),url:endpoint?.url ?? def.url ?? null,urlEnv:def.urlEnv ?? null,enabled:endpoint?.enabled !== false && def.enabled !== false,status,tools:Array.isArray(endpoint?.tools)?endpoint.tools.length:0,discoveredAt:endpoint?.discoveredAt ?? null,legacyEntry:def.legacyEntry ?? null,purpose:def.purpose ?? null};
+      return {id:def.id,name:def.name,configured,configurationSource:endpoint?'database':(def.configurationSource ?? def.source),url:endpoint?.url ?? def.url ?? null,urlEnv:def.urlEnv ?? null,enabled:endpoint?.enabled !== false && def.enabled !== false,status,tools:Array.isArray(endpoint?.tools)?endpoint.tools.length:0,discoveredAt:endpoint?.discoveredAt ?? null,legacyEntry:def.legacyEntry ?? null,purpose:def.purpose ?? null,note:def.note ?? null,transport:endpoint?.transport ?? def.transport ?? 'http',hasCa:Boolean(endpoint?.ca || endpoint?.caFile),tlsVerificationDisabled:endpoint?.rejectUnauthorized === false};
     });
   }
 }

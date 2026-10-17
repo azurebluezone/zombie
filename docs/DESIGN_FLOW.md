@@ -220,14 +220,21 @@ the reason it was made.
 
 ### 3.9 The MCP client and server
 
-- **Where:** `src/mcp/` (client, server, sessions, security, schema),
-  `external-mcp/`.
+- **Where:** `src/mcp/` (client, server, sessions, security, schema,
+  `external-surface.js`), `external-mcp/`.
 - **How:** the client consumes external MCP servers declared in
   `external-mcp/servers.json` (env fallback); the server exposes 26 tools to
-  MCP clients over Streamable HTTP at `POST /mcp`.
+  MCP clients over Streamable HTTP at `POST /mcp`. A **discovered** endpoint's
+  tools are offered in the agent's surface as function definitions bound to
+  their qualified name, and the tool loop routes the call to the MCP adapter —
+  the same mechanism it uses for a native tool.
 - **Why:** the runtime should be usable both as a consumer and as a provider of
-  tools. **Known gap:** external MCP tools are not injected into an agent's
-  native tool list — they are invoked explicitly (§6).
+  tools, and a remote tool should be as reachable as a local one. Two outbound
+  facts are handled explicitly rather than assumed: **TLS** (`MCP_TLS_CA_FILE` /
+  per-endpoint `caFile`, because Node verifies certificates and an internal CA
+  is normal), and **transport** (`http` | `sse` | `grpc`; a `grpc` endpoint fails
+  closed with `mcp_transport_grpc_requires_bridge` because the runtime does not
+  embed a protobuf compiler).
 
 ### 3.10 The memory reporting
 
@@ -306,7 +313,7 @@ src/
   storage/       JSON store and SQLite store
   tools/         tool registry and surface selection
   transport/     HTTP / HTTPS / Unix-socket transport
-tests/           67 files — the executable specification
+tests/           68 files — the executable specification
 docs/            this document, OBSERVABILITY.md, LARAVEL_INTEGRATION.md
 external-mcp/    external MCP server declarations
 integration/php/ dependency-free PHP client
@@ -348,7 +355,7 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 | --- | --- | --- |
 | `web_search`, `fetch_web_page`, `delegate_subagent` | `NOT_IMPLEMENTED` | registered, no entry |
 | `public_api`, `tts`, `ocr`, `facebook_ads` | `UNVERIFIED` | endpoint env vars unset; never called |
-| External MCP tools in the native tool list | open design gap | invoked explicitly today, not chosen by the agent |
+| `facebook-ads` transport | declared `grpc`, refused with `mcp_transport_grpc_requires_bridge` | needs a JSON/HTTP facade in front of the gRPC service |
 | Path scoping (`working-directory` mode) | frozen | feature deferred, not removed |
 | `grep_search` / `file_search` / `find_files` outside the project root | not implemented | they take no path argument |
 | SSE token delivered twice | measured, not changed | `onChunk` `data:` frame + `onEvent` `stream_chunk` mirror |
@@ -359,7 +366,7 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 | `server-side PHP integration client` test | failing | no `php` on the build host |
 | `instances/zc-10001/.env` dead MCP keys | left in place | deliberately untouched |
 
-Regression baseline at the time of writing: **321 tests, 319 pass, 2 fail**
+Regression baseline at the time of writing: **329 tests, 327 pass, 2 fail**
 (both listed above). The two failures are left failing rather than silenced.
 
 ---
@@ -374,9 +381,12 @@ Start from the **unfinished items in §6**, in this order of value:
 
 1. **Capability tools** (`public_api`, `tts`, `ocr`, `facebook_ads`) — either
    configure a reachable endpoint and verify them end-to-end, or remove them.
-   An `UNVERIFIED` tool that nobody intends to finish is a trap.
-2. **External MCP tools in the native tool list** — close the design gap so an
-   agent can choose a remote MCP tool the same way it chooses a native one.
+   An `UNVERIFIED` tool that nobody intends to finish is a trap. The runtime side
+   is ready: a discovered endpoint's tools already reach the agent's surface.
+2. **The `facebook-ads` gRPC endpoint** — put a JSON/HTTP facade in front of the
+   gRPC service and declare that facade as an `http` endpoint. Do not widen the
+   HTTP client to guess gRPC: the message shape and method path come from a
+   `.proto` schema and cannot be derived from a URL.
 3. **The two failing tests** — fix the `phase49` assertion to the current
    negotiated version, and either make the PHP test skip cleanly when `php` is
    absent or install `php` in the verification environment.
@@ -451,7 +461,7 @@ Run the layers that apply and label the rest `NOT_TESTED`.
 | Layer | How |
 | --- | --- |
 | Syntax | `node --check <file>` for each changed file |
-| Unit / integration | `node --test` (67 files) |
+| Unit / integration | `node --test` (68 files) |
 | Contract | `GET /health`, `GET /v1/admin/routes`, `GET /v1/admin/constitution` |
 | Live probe | real HTTP calls against a running instance |
 | End-to-end | the full suite (`zc-full-suite.mjs`) exercising all agents and tools |

@@ -31,11 +31,12 @@
     {
       "id": "facebook-ads",
       "name": "Facebook Ads MCP",
-      "transport": "http",
+      "transport": "grpc",
       "urlEnv": "EXTERNAL_MCP_FACEBOOK_ADS_URL",
       "legacyEntry": "external mcp/facebook-ads-mcp.js",
       "enabled": true,
-      "purpose": "Ecommerce advertising/marketing data"
+      "purpose": "Ecommerce advertising/marketing data",
+      "note": "Facebook ads data is read over gRPC, not Streamable HTTP. The runtime does not embed a protobuf compiler, so this endpoint needs a JSON/HTTP facade in front of the gRPC service (declare that facade as an http endpoint) before it can be discovered. The declaration is kept as grpc so it is never silently sent down the HTTP path."
     }
   ]
 }

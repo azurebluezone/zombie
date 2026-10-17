@@ -14,6 +14,38 @@ export const MCP_PROTOCOL_VERSIONS = Object.freeze(['2025-11-25', '2025-06-18', 
 export const LATEST_MCP_PROTOCOL_VERSION = MCP_PROTOCOL_VERSIONS[0];
 const MAX_RESPONSE_BYTES = 2_000_000;
 
+// Wire transports an endpoint may declare. `http` and `sse` are both the
+// Streamable HTTP transport (the server chooses the framing per response); they
+// share one implementation.
+export const MCP_TRANSPORTS = Object.freeze(['http', 'sse', 'grpc']);
+
+/**
+ * Fail closed on a transport this client cannot speak.
+ *
+ * `grpc` is a different wire protocol — HTTP/2 with length-prefixed protobuf
+ * messages and a method path taken from a `.proto` schema. Neither the message
+ * shape nor the method path can be derived from a URL, so sending gRPC traffic
+ * down the HTTP path would surface as an opaque timeout or a parse error. A
+ * declared gRPC endpoint therefore reports a code an operator can act on
+ * (point it at a JSON/HTTP facade, or add a real gRPC adapter) instead of
+ * pretending to be broken for no reason.
+ */
+export function assertSupportedTransport(endpoint) {
+  const transport = String(endpoint?.transport ?? 'http').trim().toLowerCase();
+  if (transport === 'grpc') throw new Error('mcp_transport_grpc_requires_bridge');
+  if (!['http', 'sse'].includes(transport)) throw new Error(`mcp_transport_unsupported:${transport}`);
+  return transport;
+}
+
+/** HTTPS options for one request. Only ever set for https targets. */
+function tlsRequestOptions(target, tls) {
+  if (target.protocol !== 'https:' || !tls) return {};
+  const options = {};
+  if (tls.ca) options.ca = tls.ca;
+  if (tls.rejectUnauthorized === false) options.rejectUnauthorized = false;
+  return options;
+}
+
 function stableCode(value, fallback='mcp_remote_error') {
   const code=String(value??'').trim().toLowerCase().replace(/[^a-z0-9_.:-]+/g,'_').slice(0,80);
   return code || fallback;
@@ -42,7 +74,7 @@ function parseResponse(raw, contentType, expectedId) {
   return parsed;
 }
 
-async function postJson(url, payload, {timeoutMs=10000,sessionId,lookup,protocolVersion=LATEST_MCP_PROTOCOL_VERSION,notification=false,extraHeaders={}}={}) {
+async function postJson(url, payload, {timeoutMs=10000,sessionId,lookup,protocolVersion=LATEST_MCP_PROTOCOL_VERSION,notification=false,extraHeaders={},tls=null}={}) {
   return protectOutbound(url, () => new Promise((resolve,reject)=>{
     const target=new URL(url);
     if(!['https:','http:'].includes(target.protocol)) return reject(new Error('mcp_protocol_forbidden'));
@@ -50,7 +82,7 @@ async function postJson(url, payload, {timeoutMs=10000,sessionId,lookup,protocol
     const headers={'content-type':'application/json','accept':'application/json, text/event-stream','user-agent':RUNTIME_USER_AGENT,'mcp-protocol-version':protocolVersion};
     if(sessionId) headers['mcp-session-id']=sessionId;
     for (const [key, value] of Object.entries(extraHeaders ?? {})) if (value != null) headers[key]=String(value);
-    const req=request(target,{method:'POST',timeout:timeoutMs,headers,lookup},res=>{
+    const req=request(target,{method:'POST',timeout:timeoutMs,headers,lookup,...tlsRequestOptions(target,tls)},res=>{
       let raw='';let bytes=0;res.setEncoding('utf8');
       res.on('data',chunk=>{bytes+=Buffer.byteLength(chunk);if(bytes>MAX_RESPONSE_BYTES){req.destroy(new Error('mcp_response_too_large'));return;}raw+=chunk;});
       res.on('end',()=>{
@@ -92,11 +124,12 @@ function assertRpcSuccess(response, stage) {
  * Returns after HTTP headers arrive and keeps the stream open until close().
  */
 export async function openMcpEventStream(endpoint, {sessionId,protocolVersion=endpoint.protocolVersion??LATEST_MCP_PROTOCOL_VERSION,onEvent=()=>{},timeoutMs=30000}={}) {
-  const safe=await assertSafeMcpUrl(endpoint.url,{...(endpoint.networkPolicy??{}),allowHosts:endpoint.allowHosts??[]});
+  assertSupportedTransport(endpoint);
+  const safe=await assertSafeMcpUrl(endpoint.url,{...(endpoint.networkPolicy??{}),allowHosts:endpoint.allowHosts??[],tls:{ca:endpoint.ca,caFile:endpoint.caFile,rejectUnauthorized:endpoint.rejectUnauthorized}});
   return protectOutbound(endpoint.url,()=>new Promise((resolve,reject)=>{
     const target=new URL(endpoint.url);const request=target.protocol==='https:'?httpsRequest:httpRequest;
     const headers={accept:'text/event-stream','user-agent':RUNTIME_USER_AGENT,'mcp-protocol-version':protocolVersion};if(sessionId)headers['mcp-session-id']=sessionId;
-    const req=request(target,{method:'GET',headers,lookup:safe.lookup,timeout:timeoutMs},res=>{
+    const req=request(target,{method:'GET',headers,lookup:safe.lookup,timeout:timeoutMs,...tlsRequestOptions(target,safe.tls)},res=>{
       if(res.statusCode!==200||!String(res.headers['content-type']??'').toLowerCase().includes('text/event-stream')){
         res.resume();const error=new Error(`mcp_event_stream_http_${res.statusCode??0}`);error.statusCode=res.statusCode??502;reject(error);return;
       }
@@ -121,11 +154,12 @@ export async function openMcpEventStream(endpoint, {sessionId,protocolVersion=en
 }
 
 export async function discoverMcpTools(endpoint) {
-  const safe=await assertSafeMcpUrl(endpoint.url,{...(endpoint.networkPolicy??{}),allowHosts:endpoint.allowHosts??[]});
+  assertSupportedTransport(endpoint);
+  const safe=await assertSafeMcpUrl(endpoint.url,{...(endpoint.networkPolicy??{}),allowHosts:endpoint.allowHosts??[],tls:{ca:endpoint.ca,caFile:endpoint.caFile,rejectUnauthorized:endpoint.rejectUnauthorized}});
   const initializeId=`zc-init-${randomUUID()}`;
   const clientDir = String(process.env.MCP_CLIENT_DIR ?? '').trim();
   const extraHeaders = { ...(endpoint.headers ?? {}), ...(clientDir ? {'x-mcp-client-dir': clientDir} : {}) };
-  const init=await postJson(endpoint.url,{jsonrpc:'2.0',id:initializeId,method:'initialize',params:{protocolVersion:LATEST_MCP_PROTOCOL_VERSION,capabilities:{roots:{listChanged:false}},clientInfo:{name:'zombiecoder-runtime',version:RUNTIME_VERSION}}},{lookup:safe.lookup,protocolVersion:LATEST_MCP_PROTOCOL_VERSION,extraHeaders});
+  const init=await postJson(endpoint.url,{jsonrpc:'2.0',id:initializeId,method:'initialize',params:{protocolVersion:LATEST_MCP_PROTOCOL_VERSION,capabilities:{roots:{listChanged:false}},clientInfo:{name:'zombiecoder-runtime',version:RUNTIME_VERSION}}},{lookup:safe.lookup,tls:safe.tls,protocolVersion:LATEST_MCP_PROTOCOL_VERSION,extraHeaders});
   const initResult=assertRpcSuccess(init,'initialize');
   const requestedVersion=LATEST_MCP_PROTOCOL_VERSION;
   const negotiatedVersion=String(initResult.protocolVersion??init.protocolVersion??requestedVersion);
@@ -138,17 +172,18 @@ export async function discoverMcpTools(endpoint) {
     throw error;
   }
   const sessionId=init.sessionId??null;
-  await postJson(endpoint.url,{jsonrpc:'2.0',method:'notifications/initialized',params:{}},{sessionId,lookup:safe.lookup,protocolVersion:negotiatedVersion,notification:true,extraHeaders});
+  await postJson(endpoint.url,{jsonrpc:'2.0',method:'notifications/initialized',params:{}},{sessionId,lookup:safe.lookup,tls:safe.tls,protocolVersion:negotiatedVersion,notification:true,extraHeaders});
   const listId=`zc-list-${randomUUID()}`;
-  const listed=await postJson(endpoint.url,{jsonrpc:'2.0',id:listId,method:'tools/list',params:{}},{sessionId,lookup:safe.lookup,protocolVersion:negotiatedVersion,extraHeaders});
+  const listed=await postJson(endpoint.url,{jsonrpc:'2.0',id:listId,method:'tools/list',params:{}},{sessionId,lookup:safe.lookup,tls:safe.tls,protocolVersion:negotiatedVersion,extraHeaders});
   const result=assertRpcSuccess(listed,'tools_list');
   const tools=Array.isArray(result.tools)?result.tools:[];
   return {initialize:init.body,sessionId:listed.sessionId??sessionId,protocolVersion:listed.protocolVersion??negotiatedVersion,requestedProtocolVersion:requestedVersion,versionNegotiated:negotiatedVersion!==requestedVersion,tools};
 }
 
 export async function callMcpTool(endpoint,toolName,argumentsValue={}, {sessionId,protocolVersion}={}) {
-  const safe=await assertSafeMcpUrl(endpoint.url,{...(endpoint.networkPolicy??{}),allowHosts:endpoint.allowHosts??[]});
+  assertSupportedTransport(endpoint);
+  const safe=await assertSafeMcpUrl(endpoint.url,{...(endpoint.networkPolicy??{}),allowHosts:endpoint.allowHosts??[],tls:{ca:endpoint.ca,caFile:endpoint.caFile,rejectUnauthorized:endpoint.rejectUnauthorized}});
   const requestId=`zc-call-${randomUUID()}`;
-  const response=await postJson(endpoint.url,{jsonrpc:'2.0',id:requestId,method:'tools/call',params:{name:toolName,arguments:argumentsValue}},{sessionId:sessionId??endpoint.sessionId,lookup:safe.lookup,protocolVersion:protocolVersion??endpoint.protocolVersion??LATEST_MCP_PROTOCOL_VERSION,extraHeaders:endpoint.headers??{}});
+  const response=await postJson(endpoint.url,{jsonrpc:'2.0',id:requestId,method:'tools/call',params:{name:toolName,arguments:argumentsValue}},{sessionId:sessionId??endpoint.sessionId,lookup:safe.lookup,tls:safe.tls,protocolVersion:protocolVersion??endpoint.protocolVersion??LATEST_MCP_PROTOCOL_VERSION,extraHeaders:endpoint.headers??{}});
   return assertRpcSuccess(response,'tool_call');
 }
