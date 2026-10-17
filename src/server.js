@@ -77,6 +77,7 @@ import { ECOMMERCE_AGENT_TOOL_BOUNDARIES, getAgentToolBoundary } from './agents/
 import { TOOL_BOUNDARY_MODES, agentAccessRecord, isToolBoundaryMode, resolveAgentAccess } from './agents/access.js';
 import { configureOutboundCircuitLogger, configureOutboundCircuitBreaker, sharedOutboundCircuitBreaker } from './network/circuit-breaker.js';
 import { RUNTIME_VERSION, RUNTIME_PHASE } from './runtime/version.js';
+import { memorySnapshot, startMemoryMonitor } from './runtime/memory.js';
 import { auditAgentRuntime } from './agents/runtime-audit.js';
 import { AgentMetrics } from './agents/metrics.js';
 import { legacyModelList, legacyProviderModelList, legacyNormalizeList, legacyDomain, legacyPusherConfig } from './compatibility/legacy/frontend-contract.js';
@@ -910,7 +911,7 @@ const requestHandler = async (req,res) => {
     if (req.method==='GET' && url.pathname==='/v1/admin/metrics') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const [ps,as,apps,maps,auditEvents]=await Promise.all([providers.list(),agentsRegistry.list(),applications(),store.read('agentModelMappings',[]),store.read('mcp-audit',[])]);
-      return send(res,200,{generatedAt:new Date().toISOString(),providers:{total:ps.length,enabled:ps.filter(p=>p.enabled!==false).length},models:{total:ps.reduce((n,p)=>n+(p.models?.length??0),0)},agents:{total:as.length,mapped:maps.length},applications:{total:apps.length,active:apps.filter(a=>a.status==='active').length},auditEvents:auditEvents.length,executionMode:config.executionMode});
+      return send(res,200,{generatedAt:new Date().toISOString(),providers:{total:ps.length,enabled:ps.filter(p=>p.enabled!==false).length},models:{total:ps.reduce((n,p)=>n+(p.models?.length??0),0)},agents:{total:as.length,mapped:maps.length},applications:{total:apps.length,active:apps.filter(a=>a.status==='active').length},auditEvents:auditEvents.length,executionMode:config.executionMode,memory:memorySnapshot()});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/providers/sync') {
       if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -1671,6 +1672,9 @@ const SSE_DELIVERY_MODE = 'http-response-mode';
 // or failed transport is never reported as VERIFIED.
 await transportsRegistry.syncRuntimeState({servers:transportServers, config, sseMode:SSE_DELIVERY_MODE});
 await logger.info('runtime.started', {version:RUNTIME_VERSION,phase:RUNTIME_PHASE,runtimeId:runtimeIdentity.runtimeId,instanceId:runtimeIdentity.instanceId,transports:Object.fromEntries(Object.entries(transportServers).map(([key,server])=>[key,Boolean(server)])),sse:SSE_DELIVERY_MODE});
+// Memory is written at startup and then on an interval, so a leak has a history rather than
+// only a post-mortem. `MEMORY_LOG_INTERVAL_MS=0` keeps the startup line and stops the rest.
+const memoryMonitor = startMemoryMonitor({logger, intervalMs:config.memoryLogIntervalMs});
 
-process.on('SIGINT', async () => { await stopTransportServers(transportServers); await releaseRuntimeLock(); process.exit(0); });
-process.on('SIGTERM', async () => { await stopTransportServers(transportServers); await releaseRuntimeLock(); process.exit(0); });
+process.on('SIGINT', async () => { memoryMonitor.stop(); await stopTransportServers(transportServers); await releaseRuntimeLock(); process.exit(0); });
+process.on('SIGTERM', async () => { memoryMonitor.stop(); await stopTransportServers(transportServers); await releaseRuntimeLock(); process.exit(0); });

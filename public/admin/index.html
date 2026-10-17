@@ -1103,6 +1103,8 @@ VIEWS.metrics = { title: 'Metrics', sub: 'Live counters, graphs and circuit stat
       stat('Core modules', moduleUp + ' / ' + moduleTotal, downModules.length ? downModules.length + ' down' : 'all up') +
       stat('MCP audit events', m.auditEvents, '') +
       stat('Execution mode', m.executionMode, '') +
+      stat('Heap used', m.memory ? m.memory.heapUsedMb + ' MB' : '—', m.memory ? m.memory.heapUsedPct + '% of ' + m.memory.heapTotalMb + ' MB' : 'not reported') +
+      stat('RSS', m.memory ? m.memory.rssMb + ' MB' : '—', m.memory ? 'up ' + Math.round((m.memory.uptimeSeconds || 0) / 60) + ' min' : 'not reported') +
     '</div>' +
     panel('Requests over time', 'live · last 60s in 5s buckets',
       '<div class="panel-b">' +

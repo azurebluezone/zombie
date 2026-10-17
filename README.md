@@ -99,7 +99,7 @@ tools/common/            # the 25 runnable tool implementations
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 306 tests, run with node --test
+tests/                   # 311 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -333,6 +333,12 @@ External MCP tool calls are reachable through `POST /v1/mcp/tools/call` (applica
 authenticated) and through the execution boundary (`POST /v1/execution/run` with a
 `qualifiedName`), which returns the remote result plus evidence.
 
+No external endpoint ships configured. Two were removed because they are not ours and
+neither answers — `http://127.0.0.1:5400/mcp` (connect `ECONNREFUSED`) and
+`https://api.zombiecoder.my.id/mcp` (HTTP 530). Any `EXTERNAL_MCP_<NAME>_URL` key is picked
+up as an endpoint and discovered at startup, so declaring one in `.env` is all it takes to
+add a real server.
+
 ## 8. Sessions, memory, SSOT and context
 
 - **Sessions** hold messages, status and application-owned metadata. Client identity
@@ -522,7 +528,7 @@ the `COMPILED_CONTEXT_BYTES` budget, instead of pasting the whole file into the 
 | MCP | external endpoints, discovery, inbound server, inbound auth, network policy |
 | Tool / execution limits | tool root, tool-loop rounds, per-round call caps, repeat caps |
 | Session / context | message caps, context budget, compiled-context budget, memory entries |
-| Observability | log level, dir, file, rotation, payload logging |
+| Observability | log level, dir, file, rotation, payload logging, memory reporting interval |
 | Reliability | circuit breaker thresholds and timeouts |
 | Browser/CDP | optional browser automation endpoint |
 | Instance identity | runtime id, instance id |
@@ -535,6 +541,10 @@ Three switches worth knowing:
 - `TOOL_SURFACE_MODE` — `narrowed` (default) or `full`. What an agent is *offered*, never
   what it is *allowed*; see §5. `TOOL_SURFACE_MAX` (default 12) caps the optional tool
   families, and `COMPILED_CONTEXT_BYTES` (default 20 KB) bounds the compiled context; see §8.
+- `MEMORY_LOG_INTERVAL_MS` — how often the runtime writes a `runtime.memory` line (heap and
+  RSS, in bytes and MB). Default 60000. `0` keeps the startup line and turns the periodic
+  one off. The same snapshot is on `GET /v1/admin/metrics` under `memory` and is shown on
+  the admin **Metrics** page, so "it died overnight" has a history rather than a guess.
 
 Never commit `.env`, API keys, tunnel tokens or private keys.
 
@@ -610,7 +620,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **306 tests, 304 passing, 2 failing.** The two failures are known and
+Current baseline: **311 tests, 309 passing, 2 failing.** The two failures are known and
 pre-existing:
 
 - `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the

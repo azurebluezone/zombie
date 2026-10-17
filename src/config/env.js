@@ -144,6 +144,9 @@ export const config = {
   // every time the agent learns something.
   memoryMaxEntries: numberEnv('MEMORY_MAX_ENTRIES', 500, {min:10,max:100000}),
   notesMaxEntries: numberEnv('NOTES_MAX_ENTRIES', 500, {min:10,max:100000}),
+  // How often to write a `runtime.memory` line (heap + RSS). 0 keeps the startup snapshot
+  // and turns the periodic one off.
+  memoryLogIntervalMs: numberEnv('MEMORY_LOG_INTERVAL_MS', 60000, {min:0,max:3600000}),
   contextBudgetBytes: numberEnv('CONTEXT_BUDGET_BYTES', 1024 * 1024, {min:64 * 1024,max:4 * 1024 * 1024}),
   // The compiled context is embedded in the prompt, and the prompt can only carry about
   // 24,000 characters of it. This budget must therefore stay *below* that: when it was
