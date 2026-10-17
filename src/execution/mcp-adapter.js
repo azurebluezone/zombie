@@ -2,13 +2,18 @@ import { callMcpTool } from '../mcp/client.js';
 import { validateToolArguments } from '../mcp/schema.js';
 
 export class McpExecutionAdapter {
-  constructor({ registry, permissions, audit, connections, limits, logger=null }) {
+  constructor({ registry, permissions, audit, connections, limits, logger=null, applications=null }) {
     this.registry = registry;
     this.permissions = permissions;
     this.audit = audit;
     this.connections = connections;
     this.limits = limits;
     this.logger = logger;
+    // async (applicationId) => record|null. Only used to read this application's own
+    // ceiling; a missing record falls back to the runtime default rather than
+    // failing the call, because a limit lookup must never be the reason a tool did
+    // not run.
+    this.applications = applications;
   }
 
   async execute({ prepared, input = {}, applicationId, context } = {}) {
@@ -20,7 +25,8 @@ export class McpExecutionAdapter {
 
     let release;
     try {
-      release = this.limits?.acquire(applicationId) ?? (() => {});
+      const ceilingApplication = this.applications ? await this.applications(applicationId).catch(() => null) : null;
+      release = this.limits?.acquire(applicationId, ceilingApplication) ?? (() => {});
       const allowed = await this.permissions.allowed(applicationId, qualifiedName);
       const requestId = String(context?.requestId ?? input.requestId ?? `mcp-exec-${Date.now()}`);
       await this.logger?.info?.('mcp.execution.started', {requestId,applicationId,qualifiedName});

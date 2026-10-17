@@ -3,7 +3,7 @@ import path from 'node:path';
 import { config } from './config/env.js';
 import { PROJECT_ROOT, fromRoot } from './runtime/paths.js';
 import { createStore } from './storage/storage.js';
-import { createApiKey, hashSecret, authenticateApiKey } from './auth/application-auth.js';
+import { createApiKey, hashSecret, authenticateApiKey, isAdminApplication, roleOf } from './auth/application-auth.js';
 import { isAdminAuthorized } from './auth/admin-auth.js';
 import { id } from './core/ids.js';
 import { McpRegistry, redactEndpoint } from './mcp/registry.js';
@@ -25,6 +25,7 @@ import { EntityDoor } from './entities/entity-door.js';
 import { CanonicalResponseNormalizer } from './providers/normalizer/canonical-response.js';
 import { PersonaRegistry } from './agents/persona-registry.js';
 import { AdminService } from './admin/admin-service.js';
+import { createTokenVault } from './auth/token-vault.js';
 import { CORE_CONSTITUTION, CONSTITUTION_STATEMENTS } from './policy/constitution.js';
 import { send, body, bearer } from './http/json.js';
 import { applySecurityHeaders, isTlsRequest } from './http/security-headers.js';
@@ -48,6 +49,7 @@ import { buildSystemMessage } from './agents/system-prompt.js';
 import { SessionStateStore } from './session/state.js';
 import { ToolLoopExecutor } from './execution/tool-loop.js';
 import { SystemLogger } from './core/logger.js';
+import { publicErrorCode, REQUEST_FAILED } from './core/public-errors.js';
 import { envLoadResult } from './config/env.js';
 import { legacyFeatureReport } from './compatibility/legacy/feature-registry.js';
 import { reconciliationReport } from './compatibility/legacy/reconciliation.js';
@@ -138,7 +140,11 @@ const personas = new PersonaRegistry(store, logger);
 await personas.ensureDefaults();
 // Per-agent run counters for the admin console (see src/agents/metrics.js).
 const agentMetrics = new AgentMetrics(store);
-const admin = new AdminService(store);
+// The vault that seals user tokens at rest. Null when TOKEN_ENCRYPTION_KEY is unset,
+// which is a supported state, not an error: tokens are then hash-only and the admin
+// API reports `token_not_recoverable` instead of inventing one.
+const tokenVault = createTokenVault(config.tokenEncryptionKey);
+const admin = new AdminService(store, {vault:tokenVault});
 const toolsRegistry = new ToolRegistry(store);
 const skillsRegistry = new SkillRegistry(store);
 const agentsRegistry = new AgentRegistry(store);
@@ -166,7 +172,7 @@ const toolExecution = new ToolExecutionAdapter({registry:toolsRegistry, toolRoot
 // call to explain it. Read from `process.env` because that is the source the capability
 // resolver itself reads, so there is only one list.
 await warnAboutAllowlistExclusions({allowList:process.env.ZOMBIECODER_TOOLS,runnableToolIds:await runnableToolIds(),logger});
-const mcpExecution = new McpExecutionAdapter({registry:mcp, permissions, audit:mcpAudit, connections, limits, logger});
+const mcpExecution = new McpExecutionAdapter({registry:mcp, permissions, audit:mcpAudit, connections, limits, logger, applications:(appId)=>admin.application(appId).catch(()=>null)});
 const evidenceGate = new EvidenceGate({store, logger});
 const sessions = new SessionService(store);
 const executionLifecycle = new ExecutionLifecycle({sessions, evidenceGate, normalizer, logger, requireSystemPrompt:true});
@@ -182,8 +188,28 @@ function isLoopbackRequest(req) {
   const address = String(req.socket?.remoteAddress ?? '').replace(/^::ffff:/, '');
   return address === '127.0.0.1' || address === '::1';
 }
-const adminOk = (req) => isAdminAuthorized(bearer(req), config.adminToken) ||
-  (config.loopbackAuthBypass && !config.adminToken && isLoopbackRequest(req));
+const adminOk = async (req) => {
+  const raw = bearer(req);
+  if (isAdminAuthorized(raw, config.adminToken)) return true;
+  if (config.loopbackAuthBypass && !config.adminToken && isLoopbackRequest(req)) return true;
+  // An application the operator marked `admin` reaches the admin API with its own
+  // token. That is what the role is for: work from another machine, or from a
+  // client's own Laravel, without copying the global admin secret onto it.
+  //
+  // A token with no role, or with `user`, is refused here — which is precisely the
+  // behaviour every application had before roles existed, so the thirteen rows in
+  // the store today are unaffected.
+  return isAdminApplication(raw, await admin.stored());
+};
+// The status an application-credential failure deserves. A user that does not exist
+// is a `404`; a token that exists but cannot be shown is a `409`. Keeping the two
+// apart is invariant 14 — absent is not the same as switched off, and "I cannot show
+// you this" is not "this does not exist".
+const applicationErrorStatus = (code) => {
+  if (code === 'application_not_found') return 404;
+  if (code.startsWith('token_not_recoverable') || code.startsWith('token_vault_')) return 409;
+  return 400;
+};
 // The runnable native tool surface. An agent's access scope is "all", so this is
 // the surface every agent sees: registered tools that can actually execute.
 async function runnableToolIds() {
@@ -561,22 +587,73 @@ const requestHandler = async (req,res) => {
     if (req.method==='GET' && url.pathname==='/api/clients') return send(res,200,{clients:await connections.list(),count:(await connections.list()).length});
 
     if (req.method==='POST' && url.pathname==='/v1/admin/applications') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
-      return send(res,201,{...await admin.createApplication(await body(req, config.maxBodyBytes)),warning:'Store this key now; it will not be shown again.'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      // The notice travels with the record, so create and rotate cannot drift into
+      // telling the operator two different things about the same token.
+      return send(res,201,await admin.createApplication(await body(req, config.maxBodyBytes)));
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/applications') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
-      return send(res,200,{applications:await admin.applications() .then(xs=>xs.map(({apiKeyHash,...x})=>x))});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      // `publicApplication()` already drops the hash and the sealed copy, so this
+      // route no longer has to remember to.
+      const applications=await admin.applications();
+      return send(res,200,{
+        applications,
+        // Additive alias. The runtime's own word for a caller is "application"; the
+        // operator's word is "user". A client should not have to translate.
+        users:applications,
+        // The ceiling a user inherits when they have none of their own. The console
+        // shows it rather than hard-coding a number, so the screen and the runtime
+        // can never disagree about the default.
+        limitsDefault:{rateLimit:config.appRateLimit,concurrency:config.appConcurrency,windowMs:limits.windowMs},
+        tokenVault:{configured:Boolean(tokenVault),keyId:tokenVault?.keyId??null,note:tokenVault?'Tokens are sealed with AES-256-GCM under a key held in the environment; a copy of the store alone will not open them.':'No TOKEN_ENCRYPTION_KEY is set, so a token exists only as a hash and cannot be shown again.'}
+      });
+    }
+    if (req.method==='GET' && url.pathname.match(/^\/v1\/admin\/applications\/[^/]+\/token$/)) {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const appId=url.pathname.split('/')[4];
+      try {
+        const revealed=await admin.revealKey(appId);
+        // Reading a customer's credential is a privileged act, so it leaves a row.
+        await requestLog?.info?.('application.token.revealed',{applicationId:appId,role:revealed.role});
+        return send(res,200,{...revealed,tokenNotice:'Live credentials: anyone holding this token can use the API as this user. It is never written to a log.'});
+      } catch(error) {
+        const code=String(error?.message ?? 'token_not_recoverable');
+        return send(res,applicationErrorStatus(code),{error:code});
+      }
+    }
+    if (req.method==='PATCH' && url.pathname.match(/^\/v1\/admin\/applications\/[^/]+$/)) {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const appId=url.pathname.split('/')[4];
+      try {
+        return send(res,200,{application:await admin.updateApplication(appId,await body(req, config.maxBodyBytes))});
+      } catch(error) {
+        const code=String(error?.message ?? 'application_update_failed');
+        return send(res,applicationErrorStatus(code),{error:code});
+      }
     }
     if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/applications\/[^/]+\/rotate-key$/)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
-      const appId=url.pathname.split('/')[4]; return send(res,200,{...await admin.rotateKey(appId),warning:'Store this key now; it will not be shown again.'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const appId=url.pathname.split('/')[4]; return send(res,200,await admin.rotateKey(appId));
     }
     if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/applications\/[^/]+\/(revoke|extend)$/)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const appId=url.pathname.split('/')[4], action=url.pathname.split('/')[5], input=await body(req, config.maxBodyBytes);
       const patch=action==='revoke'?{status:'revoked'}:{expiresAt:input.expiresAt??null};
       return send(res,200,{application:await admin.updateApplication(appId,patch)});
+    }
+    // What a client's Laravel needs in order to trust the token it was handed: who
+    // this is, what it may do, and the ceiling it is under. This is the whole point
+    // of a per-user token — the shop verifies its own user against the runtime and
+    // then does everything else itself.
+    if (req.method==='GET' && url.pathname==='/v1/auth/verify') {
+      const app=await authenticateRequest(req, requestLog, requestState);
+      if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});
+      requestState.outcome='accepted';
+      // `limits` is the effective ceiling, not the stored override: a client asking
+      // "what am I allowed" must not have to know the runtime's defaults as well.
+      const ceiling=limits.ceilingFor(app);
+      return send(res,200,{verified:true,user:{id:app.id,name:app.name,role:roleOf(app)},limits:{rateLimit:ceiling.maxRequests,concurrency:ceiling.maxConcurrent,windowMs:limits.windowMs},expiresAt:app.expiresAt??null,issuedAt:app.createdAt??null});
     }
     if (req.method==='POST' && url.pathname==='/v1/sessions') {
       const app=await authenticateRequest(req, requestLog, requestState);
@@ -614,37 +691,37 @@ const requestHandler = async (req,res) => {
       return session ? send(res,200,{session}) : send(res,404,{error:'session_not_found'});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/compatibility/tools') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,toolParityReport(await toolsRegistry.list()));
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/compatibility/features') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,legacyFeatureReport());
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/task-profiles') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{profiles:(await import('./execution/task-policy.js')).getTaskProfiles()});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/compatibility/reconciliation') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,legacyReconciliation);
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/compatibility/routes') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,routeMapReport());
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/evidence') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{evidence:await store.read('evidence',[])});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/logs/stream') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const backfill=Math.max(0,Math.min(200,Number(url.searchParams.get('backfill')??40)||0));
       await streamJsonLines(req,res,{backfill});
       return;
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/logs') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const limit=Math.max(1,Math.min(500,Number(url.searchParams.get('limit')??200)||200));
       try { return send(res,200,{file:path.join(config.logDir,config.logFile),limit,events:await tailJsonLines(limit)}); }
       catch(error) { if(error?.code==='ENOENT') return send(res,200,{file:null,limit,events:[],note:'log file not created yet'}); throw error; }
@@ -727,54 +804,54 @@ const requestHandler = async (req,res) => {
       }
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/tools/permissions') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{permissions:await toolPolicy.list()});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/tools/permissions') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const input=await body(req,config.maxBodyBytes);
       const knownTools=await toolsRegistry.list();
       if (!input?.toolId || !knownTools.some(tool=>tool.id===String(input.toolId))) return send(res,400,{error:'tool_not_found',toolId:input?.toolId??null});
       return send(res,201,{permission:await toolPolicy.grant(input)});
     }
     if (req.method==='DELETE' && url.pathname==='/v1/admin/tools/permissions') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const input=await body(req,config.maxBodyBytes); return send(res,200,{revoked:await toolPolicy.revoke(input.applicationId,input.toolId)});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/registry/external-mcp') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{servers:await externalMcp.status(),endpoints:await mcp.list()});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/registry/external-mcp/sync') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{sync:await externalMcp.sync(),servers:await externalMcp.status()});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/applications/capabilities') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const applicationId=String(url.searchParams.get('applicationId') ?? '');
       if (!applicationId) return send(res,400,{error:'application_id_required'});
       const tools=await toolsRegistry.list();
       return send(res,200,{applicationId,tools:await capabilityConfig.snapshot(applicationId,tools.map(x=>x.id))});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/applications/capabilities/tools') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const input=await body(req,config.maxBodyBytes);
       const setting=await capabilityConfig.setToolSetting(input.applicationId,input.toolId,input.enabled);
       return send(res,200,{setting,decision:await toolPolicy.decision(input.applicationId,input.toolId)});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/registry/tools') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{components:await toolsRegistry.list()});
     }
     // The messaging channels the runtime is being built to serve. This reports a
     // declaration, not health: nothing here calls Meta yet, and `status` says so.
     // It exists so the operator can see the plan without reading the source.
     if (req.method==='GET' && url.pathname==='/v1/admin/channels') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,channelSummary());
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/registry/tools') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,201,{component:await toolsRegistry.register(await body(req, config.maxBodyBytes))});
     }
     // Global tool switch. Execution only accepts REGISTERED/ENABLED/VERIFIED
@@ -782,7 +859,7 @@ const requestHandler = async (req,res) => {
     // being runnable. Per-application switches live on
     // /v1/admin/applications/capabilities/tools.
     if (req.method==='PATCH' && /^\/v1\/admin\/registry\/tools\/[^/]+$/.test(url.pathname)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const toolId=decodeURIComponent(url.pathname.split('/')[5]);
       const current=(await toolsRegistry.list()).find(t=>t.id===toolId);
       if(!current) return send(res,404,{error:'tool_not_found'});
@@ -790,19 +867,19 @@ const requestHandler = async (req,res) => {
       return send(res,200,{component:await toolsRegistry.register({...current,...patch,id:toolId})});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/registry/skills') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{components:await skillsRegistry.list()});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/registry/skills') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,201,{component:await skillsRegistry.register(await body(req, config.maxBodyBytes))});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/registry/agents/tool-boundaries') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{boundaries:ECOMMERCE_AGENT_TOOL_BOUNDARIES});
     }
     if (req.method==='GET' && url.pathname.match(/^\/v1\/admin\/registry\/agents\/[^/]+\/tool-boundary$/)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const agentId=url.pathname.split('/')[5];
       const boundary=getAgentToolBoundary(agentId);
       if (!boundary) return send(res,404,{error:'agent_tool_boundary_not_found'});
@@ -812,7 +889,7 @@ const requestHandler = async (req,res) => {
     // directory it pins to. The legacy /tool-boundary route above is the static
     // ecommerce profile; this one is the operator-editable scope every agent has.
     if ((req.method==='GET'||req.method==='PATCH') && url.pathname.match(/^\/v1\/admin\/registry\/agents\/[^/]+\/boundary$/)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const agentId=decodeURIComponent(url.pathname.split('/')[5]);
       // `resolve()` throws for an unknown or disabled agent; the admin surface
       // wants a plain 404 for "no such agent", so look the record up directly.
@@ -836,17 +913,17 @@ const requestHandler = async (req,res) => {
       return send(res,200,{agentId,access,modes:TOOL_BOUNDARY_MODES,effective:effective(next)});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/registry/agents') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{components:await agentsRegistry.list()});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/registry/agents/runtime-audit') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,await auditAgentRuntime({registry:agentsRegistry,personas,boundaryResolver:getAgentToolBoundary}));
     }
     // Real observed run outcomes per agent (success/failure/incomplete), recorded
     // at the point each chat path actually completes or fails.
     if (req.method==='GET' && url.pathname==='/v1/admin/agents/metrics') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const metrics=await agentMetrics.list();
       const known=new Set((await agentsRegistry.list()).map(a=>a.id));
       return send(res,200,{metrics:metrics.map(m=>({...m,averageLatencyMs:m.runs&&m.totalLatencyMs?Math.round(m.totalLatencyMs/Math.max(1,m.success+m.failure+m.incomplete)):null,registered:known.has(m.agentId)})),total:metrics.length});
@@ -854,47 +931,47 @@ const requestHandler = async (req,res) => {
     // Counters are observations, not history: an operator reset is the only way
     // to clear them, and it is explicit rather than time-based.
     if (req.method==='DELETE' && url.pathname==='/v1/admin/agents/metrics') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       await store.write('agentMetrics',[]);
       return send(res,200,{reset:true});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/registry/agents') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,201,{component:await agentsRegistry.register(await body(req, config.maxBodyBytes))});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/registry/transports') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{components:await transportsRegistry.list()});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/registry/transports') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,201,{component:await transportsRegistry.register(await body(req, config.maxBodyBytes))});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/providers') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{providers:(await providers.list()).map(publicProvider)});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/providers/route') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const input=await body(req, config.maxBodyBytes);
       return send(res,200,{route:await smartRouter.route(input)});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/providers') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,201,{provider:publicProvider(await providers.register(await body(req, config.maxBodyBytes)))});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/masking-models') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{models:ZOMBIECODER_MODELS});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/models') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const filter=url.searchParams.get('provider');
       const list=(await providers.list()).filter(p=>!filter||p.id===filter);
       return send(res,200,{models:list.flatMap(p=>(p.models??[]).map(model=>({id:`${p.id}:${model}`,providerId:p.id,providerName:p.name,model,enabled:p.enabled!==false,defaultModel:p.defaultModel===model,priority:p.priority??10}))) });
     }
     if (req.method==='PATCH' && /^\/v1\/admin\/providers\/[^/]+$/.test(url.pathname)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const providerId=decodeURIComponent(url.pathname.split('/')[4]);
       const current=(await providers.list()).find(p=>p.id===providerId);
       if (!current) return send(res,404,{error:'provider_not_found'});
@@ -903,13 +980,13 @@ const requestHandler = async (req,res) => {
       return send(res,200,{provider:publicProvider(await providers.register(merged))});
     }
     if (req.method==='DELETE' && /^\/v1\/admin\/providers\/[^/]+$/.test(url.pathname)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const providerId=decodeURIComponent(url.pathname.split('/')[4]); const list=await providers.list();
       if(!list.some(p=>p.id===providerId)) return send(res,404,{error:'provider_not_found'});
       await store.write('providers',list.filter(p=>p.id!==providerId)); return send(res,200,{deleted:true,providerId});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/models/sync-all') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const results=[];
       for (const item of (await providers.list()).filter(p=>p.enabled!==false)) {
         try { const updated=await providers.refreshModels(item.id); results.push({providerId:item.id,status:'updated',modelCount:updated.models.length}); }
@@ -918,11 +995,11 @@ const requestHandler = async (req,res) => {
       return send(res,200,{results});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/agent-model-mappings') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{mappings:await store.read('agentModelMappings',[])});
     }
     if (req.method==='PUT' && /^\/v1\/admin\/agent-model-mappings\/[^/]+$/.test(url.pathname)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const agentId=decodeURIComponent(url.pathname.split('/')[4]);
       if (!(await agentsRegistry.list()).some(a=>a.id===agentId)) return send(res,404,{error:'agent_not_found'});
       const input=await body(req,config.maxBodyBytes); const model=String(input.model??'').trim();
@@ -931,23 +1008,23 @@ const requestHandler = async (req,res) => {
       await store.write('agentModelMappings',[...list.filter(x=>x.agentId!==agentId),item]); return send(res,200,{mapping:item});
     }
     if (req.method==='DELETE' && /^\/v1\/admin\/agent-model-mappings\/[^/]+$/.test(url.pathname)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const agentId=decodeURIComponent(url.pathname.split('/')[4]);
       await store.write('agentModelMappings',(await store.read('agentModelMappings',[])).filter(x=>x.agentId!==agentId));
       return send(res,200,{deleted:true,agentId});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/metrics') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const [ps,as,apps,maps,auditEvents]=await Promise.all([providers.list(),agentsRegistry.list(),applications(),store.read('agentModelMappings',[]),store.read('mcp-audit',[])]);
       return send(res,200,{generatedAt:new Date().toISOString(),providers:{total:ps.length,enabled:ps.filter(p=>p.enabled!==false).length},models:{total:ps.reduce((n,p)=>n+(p.models?.length??0),0)},agents:{total:as.length,mapped:maps.length},applications:{total:apps.length,active:apps.filter(a=>a.status==='active').length},auditEvents:auditEvents.length,executionMode:config.executionMode,memory:memorySnapshot()});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/providers/sync') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const input=await body(req, config.maxBodyBytes);
       return send(res,200,{sync:await providers.syncAll({syncUrl:input.syncUrl || config.providerCatalogSyncUrl, apiKey:input.apiKey || config.providerCatalogApiKey, timeoutMs:input.timeoutMs || config.providerSyncTimeoutMs})});
     }
     if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/providers\/[^/]+\/health$/)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const providerId=decodeURIComponent(url.pathname.split('/')[4]);
       const current=(await providers.list()).find(p=>p.id===providerId); if(!current) return send(res,404,{error:'provider_not_found'});
       const checkedAt=new Date().toISOString();
@@ -967,7 +1044,7 @@ const requestHandler = async (req,res) => {
     // real response, bypassing the masked agent path (which redacts upstream
     // identity). Loopback/admin-gated like the rest of /v1/admin.
     if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/providers\/[^/]+\/test$/)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const providerId=decodeURIComponent(url.pathname.split('/')[4]);
       const current=(await providers.list()).find(p=>p.id===providerId);
       if(!current) return send(res,404,{error:'provider_not_found'});
@@ -997,74 +1074,74 @@ const requestHandler = async (req,res) => {
       }
     }
     if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/providers\/[^/]+\/sync$/)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const providerId=url.pathname.split('/')[5];
       const input=await body(req, config.maxBodyBytes);
       return send(res,200,{sync:await providers.syncProvider(providerId,{syncUrl:input.syncUrl,timeoutMs:input.timeoutMs || config.providerSyncTimeoutMs})});
     }
     if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/providers\/[^/]+\/models\/refresh$/)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{provider:await providers.refreshModels(url.pathname.split('/')[4])});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/personas') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{personas:await personas.list()});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/personas') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,201,{persona:await personas.register(await body(req, config.maxBodyBytes))});
     }
     if (req.method==='PATCH' && /^\/v1\/admin\/personas\/[^/]+$/.test(url.pathname)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const personaId=decodeURIComponent(url.pathname.split('/')[4]);
       const current=(await personas.list()).find(p=>p.id===personaId); if(!current) return send(res,404,{error:'persona_not_found'});
       const patch=await body(req,config.maxBodyBytes);
       return send(res,200,{persona:await personas.register({...current,...patch,id:personaId})});
     }
     if (req.method==='DELETE' && /^\/v1\/admin\/personas\/[^/]+$/.test(url.pathname)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const personaId=decodeURIComponent(url.pathname.split('/')[4]);
       const current=await personas.list(); if(!current.some(p=>p.id===personaId)) return send(res,404,{error:'persona_not_found'});
       const item=current.find(p=>p.id===personaId);
       return send(res,200,{persona:await personas.register({...item,enabled:false})});
     }
     if (req.method==='PATCH' && /^\/v1\/admin\/registry\/agents\/[^/]+$/.test(url.pathname)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const agentId=decodeURIComponent(url.pathname.split('/')[5]);
       const current=(await agentsRegistry.list()).find(a=>a.id===agentId); if(!current) return send(res,404,{error:'agent_not_found'});
       const patch=await body(req,config.maxBodyBytes);
       return send(res,200,{component:await agentsRegistry.register({...current,...patch,id:agentId})});
     }
     if (req.method==='DELETE' && /^\/v1\/admin\/registry\/agents\/[^/]+$/.test(url.pathname)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const agentId=decodeURIComponent(url.pathname.split('/')[5]);
       const current=await agentsRegistry.list(); if(!current.some(a=>a.id===agentId)) return send(res,404,{error:'agent_not_found'});
       const agent=current.find(a=>a.id===agentId);
       return send(res,200,{component:await agentsRegistry.register({...agent,status:'DISABLED'})});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/constitution') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       // `constitution` keeps the short names it has always returned; `statements`
       // adds the rule each name stands for, which is what the agent is actually
       // given. Additive on purpose — an existing reader keeps working.
       return send(res,200,{constitution:CORE_CONSTITUTION,statements:CONSTITUTION_STATEMENTS});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/mcp/endpoints') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,201,{endpoint:redactEndpoint(await mcp.register(await body(req, config.maxBodyBytes)))});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/endpoints') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{endpoints:(await mcp.list()).map(redactEndpoint)});
     }
     if (req.method==='DELETE' && /^\/v1\/admin\/mcp\/endpoints\/[^/]+$/.test(url.pathname)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const endpointId=decodeURIComponent(url.pathname.split('/')[5]);
       try { const removed=await mcp.remove(endpointId); return send(res,200,{removed:redactEndpoint(removed)}); }
       catch (error) { return send(res,404,{error:String(error?.message??'mcp_endpoint_not_found')}); }
     }
     if (req.method==='POST' && url.pathname.startsWith('/v1/admin/mcp/endpoints/') && url.pathname.endsWith('/discover')) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const endpointId = url.pathname.split('/')[5];
       const input = await body(req, config.maxBodyBytes);
       const endpoint = await mcp.discover(endpointId);
@@ -1073,47 +1150,47 @@ const requestHandler = async (req,res) => {
       return send(res,200,{endpoint:redactEndpoint(endpoint),connection});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/mcp/permissions') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,201,{permission:await permissions.grant(await body(req, config.maxBodyBytes))});
     }
     if (req.method==='DELETE' && url.pathname==='/v1/admin/mcp/permissions') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const input=await body(req, config.maxBodyBytes);
       return send(res,200,{revoked:await permissions.revoke(input.applicationId,input.qualifiedName)});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/permissions') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{permissions:await permissions.list()});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/connections') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{connections:await connections.list()});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/mcp/connections') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{connection:await connections.upsert(await body(req, config.maxBodyBytes))});
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/mcp/reconcile') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,await reconciliation.reconcile());
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/incomplete') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{incomplete:await reconciliation.findIncomplete()});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/audit') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{events:await mcpAudit.list(url.searchParams.get('limit'))});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/tools') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{tools:await mcp.tools()});
     }
     // Inbound MCP authentication policy. The env var sets the default; an admin
     // override persisted in `mcp-settings` wins, so authentication can be turned
     // off from the console without editing .env or restarting.
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/auth') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const policy=await mcpServerAuth.policy();
       const autoApp=policy.requireAuth===false ? await mcpServerAuth.autoProvisionedApplication() : null;
       const autoAppView=autoApp?{id:autoApp.id,name:autoApp.name,createdAt:autoApp.createdAt,autoProvisioned:true}:null;
@@ -1133,7 +1210,7 @@ const requestHandler = async (req,res) => {
       });
     }
     if (req.method==='PATCH' && url.pathname==='/v1/admin/mcp/auth') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       let input;
       try { input=await body(req, config.maxBodyBytes); }
       catch (error) { return send(res,Number(error?.statusCode)||400,{error:'invalid_body'}); }
@@ -1145,14 +1222,14 @@ const requestHandler = async (req,res) => {
       return send(res,200,{requireAuth:policy.requireAuth,source:policy.source,envRequireAuth:policy.envRequireAuth,application:autoAppView,localApplication:autoAppView});
     }
     if (req.method==='DELETE' && url.pathname==='/v1/admin/mcp/auth') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const policy=await mcpServerAuth.clearOverride();
       await requestLog.info('mcp.server.auth_policy_reset',{requireAuth:policy.requireAuth,source:policy.source});
       return send(res,200,{requireAuth:policy.requireAuth,source:policy.source,envRequireAuth:policy.envRequireAuth});
     }
     // Inbound MCP server: what it advertises and who is connected to it.
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/server') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const enabled=config.mcpServerEnabled===true;
       const clients=await mcpClients.list();
       const authPolicy=await mcpServerAuth.policy();
@@ -1170,18 +1247,18 @@ const requestHandler = async (req,res) => {
       });
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/mcp/clients') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const clients=await mcpClients.list();
       return send(res,200,{clients,active:clients.filter(c=>c.active).length,total:clients.length,idleMs:Number(process.env.MCP_CLIENT_IDLE_MS ?? 120000)});
     }
     if (req.method==='DELETE' && /^\/v1\/admin\/mcp\/clients\/[^/]+$/.test(url.pathname)) {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const closed=await mcpClients.close(decodeURIComponent(url.pathname.split('/')[5]));
       if (!closed) return send(res,404,{error:'mcp_client_not_found'});
       return send(res,200,{client:closed});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/providers/models') {
-      if (!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const input = Object.fromEntries(url.searchParams.entries());
       if (!input.provider) return send(res,400,{error:'provider_required'});
       const provider = await providers.resolve(String(input.provider));
@@ -1196,7 +1273,7 @@ const requestHandler = async (req,res) => {
       const qualifiedName=String(input.qualifiedName ?? '');
       if (!qualifiedName) return send(res,400,{error:'qualified_tool_required'});
       let release;
-      try { release=limits.acquire(app.id); } catch(e) { const code=String(e?.message ?? 'application_limit'); return send(res,429,{error:code==='application_rate_limited'||code==='application_concurrency_limited'?code:'application_limit'}); }
+      try { release=limits.acquire(app.id,app); } catch(e) { const code=String(e?.message ?? 'application_limit'); return send(res,429,{error:code==='application_rate_limited'||code==='application_concurrency_limited'?code:'application_limit'}); }
       const allowed=await permissions.allowed(app.id,qualifiedName);
       if (!allowed) { release();
         await mcpAudit.append({requestId,applicationId:app.id,qualifiedName,action:'tool_call',stage:'permission',outcome:'denied'});
@@ -1689,13 +1766,12 @@ const requestHandler = async (req,res) => {
       return send(res,200,{status:'ok',response:canonical,content:canonical?.choices?.[0]?.message?.content??null,model:canonical?.model??result.identity?.model??null,session_id:input.sessionId||null,evidence:maskEvidenceForPublic(result.evidence),verified:false,legacyCompatibility:true});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/routes') {
-      if(!adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      if(!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,routeMapReport());
     }
     return send(res,404,{error:'not_found'});
   } catch (e) {
-    const publicErrors = new Set(['runtime_instance_already_locked','uds_path_already_exists','tool_not_permitted','tool_entry_outside_tool_root','tool_entry_symlink_escape','execution_path_outside_project_root','execution_working_directory_outside_project_root','execution_path_symlink_escape','project_root_required','invalid_json_body','request_body_too_large','application_unauthorized_or_expired','admin_unauthorized','provider_not_found_or_disabled','provider_model_required','provider_model_not_configured','no_provider_route_available','provider_streaming_not_supported','execution_consent_required','execution_contract_required','qualified_tool_required','mcp_tool_not_permitted','mcp_https_url_required','mcp_endpoint_not_found','mcp_tool_not_found','mcp_tool_arguments_must_be_object','mcp_response_too_large','mcp_invalid_response','mcp_timeout','project_root_not_allowed','project_root_not_found','application_id_required','application_not_found','application_id_and_tool_required','tool_disabled_by_configuration','outbound_circuit_open']);
-    const message = String(e?.message ?? 'request_failed');
+    const message = String(e?.message ?? REQUEST_FAILED);
     // A provider that answered 429 is not a generic failure: it is an instruction
     // to wait and retry, and the upstream `retry-after` is the only honest source
     // for how long. Collapsing it into `request_failed` (the old behaviour) told
@@ -1710,12 +1786,11 @@ const requestHandler = async (req,res) => {
     const headers = message === 'outbound_circuit_open'
       ? {'retry-after': String(Math.max(1, Math.ceil((Number(e?.retryAfterMs) || 0) / 1000)))}
       : (rateLimited && retryAfterMs !== null ? {'retry-after': String(Math.max(1, Math.ceil(retryAfterMs / 1000)))} : {});
-    // MCP failures are raised per stage (mcp_tools_list_failed, mcp_tool_call_failed,
-    // ...). Those codes are already stable and free of user data, so publish them
-    // instead of collapsing the real cause into a generic request_failed. The
-    // upstream message stays in the logs and audit trail, never in the response,
-    // because it can contain the remote server's filesystem layout.
-    const publicError = rateLimited ? 'provider_rate_limited' : (publicErrors.has(message) || /^mcp_[a-z0-9_]+$/.test(message) ? message : 'request_failed');
+    // Which internal codes may be published is decided by src/core/public-errors.js, so
+    // the rule is testable without booting a server and cannot drift entry by entry. The
+    // upstream message stays in the logs and audit trail, never in the response, because
+    // it can contain the remote server's filesystem layout.
+    const publicError = rateLimited ? 'provider_rate_limited' : publicErrorCode(message);
     // An agent-scoped request that threw before its completion hook is a failed
     // run for that agent; record it here so the counter cannot silently miss it.
     if (requestState.agentId) await recordAgentRun(requestState.agentId, 'failure', {latencyMs:Date.now()-startedAt, path:requestState.operation});

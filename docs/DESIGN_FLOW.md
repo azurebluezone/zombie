@@ -474,6 +474,48 @@ the reason it was made.
 
 ---
 
+### 3.21 Users, tokens, terms, and a console that decides nothing
+
+- **What:** the 13 rows that were already in `applications` became *users*, presented as
+  one Users view. A user carries `role` (`admin` | `user`), per-user `limits`
+  (`rateLimit`, `concurrency`; `null` means inherit `APP_RATE_LIMIT` /
+  `APP_CONCURRENCY`, and `null` is deliberately not `0`), and `expiresAt`. One token per
+  user: `GET /v1/admin/applications/:id/token` reveals it from an AES-256-GCM envelope
+  under `TOKEN_ENCRYPTION_KEY` and writes `application.token.revealed`; the hot path
+  still compares a SHA-256 hash, so nothing is decrypted to authenticate. The client's
+  own Laravel calls `GET /v1/auth/verify` to resolve the token to a user and its ceiling.
+- **Where:** `src/auth/token-vault.js`, `src/auth/application-auth.js`
+  (`normalizeRole`, `roleOf`, `normalizeLimits`, `normalizeExpiry`, `publicApplication`),
+  `src/admin/admin-service.js` (`PATCHABLE_APPLICATION_FIELDS`, `revealKey`,
+  `rotateKey`), `src/mcp/limits.js` (`ceilingFor`), `src/core/public-errors.js`,
+  `src/core/logger.js` (`redactSecrets`), `public/admin/index.html` (`VIEWS.users`).
+- **How:** the admin service keeps two views of a row — `stored()` (raw, for
+  authentication) and `applications()` (public, stripped of `apiKeyHash` and
+  `apiKeyVault`). `PATCH` is an allowlist; an unknown field throws
+  `application_patch_field_not_allowed:<field>` rather than being ignored, because a
+  silent no-op looks exactly like a successful edit. `expiresAt` is validated on write.
+- **Why:** the business is monthly, so the end date *is* the renewal date, and a token
+  that has already ended while the store still says `active` is a lie the operator would
+  act on. The second reason is structural: the operator's instruction is that the admin
+  panel must never be the thing that makes the system work. So every action in the page is
+  a route in `GET /v1/admin/routes`, the token modal hands over runnable `curl` commands
+  instead of expecting the operator to assemble them, and `publicErrorCode()` publishes a
+  refusal by shape so a real cause cannot be quietly downgraded to `request_failed`.
+- **Proof:** END_TO_END_TESTED — `tests/phase79-users-over-http.test.js` (4 tests) boots a
+  real server, creates a user with a term over HTTP, resolves it at `/v1/auth/verify`,
+  reads the token back while the listing leaks neither the token nor the hash, proves a
+  user-role token is refused by three admin routes, ends the term and watches the same
+  token die with nothing run, renews it, rotates it, and asserts four specific refusal
+  codes — all with no browser. It also proves a plain-http provider refusal reaches the
+  caller as `outbound_protocol_forbidden` rather than `request_failed`, and that a code
+  carrying free text stays closed. `tests/phase78-users.test.js` (29 tests) covers the
+  vault round-trip, wrong key, tampering, short key, role and limit normalisation, the
+  allowlist refusals, expiry enforcement, and redaction proven by writing a log and
+  reading it back. `tests/phase24-audit.test.js` pins the route inventory at 98 routes
+  and 10 notes.
+
+---
+
 ## 4. The map — where each concern lives
 
 ```
@@ -547,6 +589,22 @@ scripts/         bootstrap, OS runtime setup, deployment verification
     empty or silent response is never an option — success is success, failure is
     failure, off is off. The operator's standing instruction is that this has no
     exceptions.
+15. **A term has an end date, and the date is the truth.** `expiresAt` is the renewal
+    date. A token past its date stops authenticating on its own; the store keeps
+    `status: active`, so anything that reads only the status is wrong. A date the
+    runtime cannot read is refused, never stored — an unparseable date does not fail
+    loudly, it kills the token silently.
+16. **The console is a client of the API, never the door to it.** Every action the admin
+    page offers must exist as a route a terminal can call with no browser involved. A
+    capability that lives only in the page is a defect, not a convenience.
+17. **A refusal names the field that was wrong.** Publication of an internal code is
+    decided by shape in `src/core/public-errors.js`; a pure identifier in an owned family
+    is published, free text falls back to `request_failed`. An allowlist alone drifts —
+    `outbound_protocol_forbidden` reached callers as `request_failed` until the shape rule
+    replaced it.
+18. **A token never reaches a log.** Redaction applies inside values, not only under
+    suspicious key names, because a token can arrive in a URL, a query string or an
+    upstream error message.
 
 ---
 
@@ -561,13 +619,16 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 | `src/providers/manifest.js`, `src/providers/openai-compatible.js` | dead files | measured; not removed |
 | Stale `working_directory` on two agents | measured, not changed | frozen area |
 | `process.cwd()` in `projectAllowedRoots` | measured, not changed | too invasive for a frozen area |
-| `phase49` protocol-version test | failing | asserts `2025-06-18`; stale assertion |
-| `server-side PHP integration client` test | failing | no `php` on the build host |
+| `verifyUser()` in `integration/php/ZombieCoderClient.php` | not written | `GET /v1/auth/verify` exists, is documented and is covered over HTTP without PHP; the wrapper is convenience only, and with no `php` binary here it would ship NOT_TESTED |
 | `instances/zc-10001/.env` dead MCP keys | left in place | deliberately untouched |
 | Per-application MCP credentials | `NOT_IMPLEMENTED` | an external MCP endpoint carries one credential set on the endpoint (`endpoint.headers`, set at registration). Injecting each application's own token at call time is the next change; until then a per-shop token means a per-shop endpoint. Documented in `docs/LARAVEL_INTEGRATION.md` §18.7 |
 
-Regression baseline at the time of writing: **376 tests, 375 pass, 0 fail, 1 skipped** (the skip is the PHP syntax check: no `php` binary here, reported as NOT_TESTED)
-(both listed above). The two failures are left failing rather than silenced.
+Regression baseline at the time of writing: **409 tests, 408 pass, 0 fail, 1 skipped.**
+The skip is the PHP syntax check: no `php` binary here, reported as NOT_TESTED, and
+`ZC_REQUIRE_PHP=1` turns its absence into a failure where PHP is expected. The two
+failures that used to occupy this table are fixed rather than tolerated: the `phase49`
+assertion was stale and now pins the negotiation contract, and the PHP test always runs
+its file-shape assertions and skips only the syntax step.
 
 ---
 

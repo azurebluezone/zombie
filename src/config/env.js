@@ -163,6 +163,11 @@ export const config = {
   projectRoots: pathListEnv('PROJECT_ROOTS'),
   appRateLimit: numberEnv('APP_RATE_LIMIT', 60, {min:1,max:100000}),
   appConcurrency: numberEnv('APP_CONCURRENCY', 4, {min:1,max:1000}),
+  // The key that seals user tokens at rest, so the admin can show a token again
+  // without the store holding it in the clear. Empty means "no sealed copy": every
+  // route still works and the admin API says `token_not_recoverable` rather than
+  // pretending. See src/auth/token-vault.js and docs/FRESH_INSTALL.md §4.
+  tokenEncryptionKey: env('TOKEN_ENCRYPTION_KEY', ''),
   logLevel: env('LOG_LEVEL', 'info'),
   logDir: resolveRuntimePath(env('LOG_DIR', './logs')),
   logFile: env('LOG_FILE', 'runtime.jsonl'),

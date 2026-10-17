@@ -65,6 +65,9 @@ export const CURRENT_ROUTE_MAP = Object.freeze([
   ['POST','/v1/admin/applications/{id}/rotate-key','application key rotation'],
   ['POST','/v1/admin/applications/{id}/revoke','application revoke'],
   ['POST','/v1/admin/applications/{id}/extend','application expiry update'],
+  ['GET','/v1/admin/applications/{id}/token','application token reveal (audited)'],
+  ['PATCH','/v1/admin/applications/{id}','application update: role, ceilings, expiry, status'],
+  ['GET','/v1/auth/verify','token verification for a client application'],
   ['POST','/v1/sessions','session creation'],
   ['GET','/v1/sessions/{id}','session detail'],
   ['PATCH','/v1/sessions/{id}/metadata','session metadata'],
@@ -178,6 +181,7 @@ export function routeMapReport() {
       'The project-notes routes add one GET/POST/DELETE trio on /v1/context/notes, backed by src/notes/note.js and the agent-reachable note_store tool.',
       'The channel route adds one GET on /v1/admin/channels, backed by src/channels/catalog.js. It reports a declaration (the messaging-channel plan), not health: every channel is PLANNED and the response says so.',
       'currentHandlerBlocks is hand-maintained: no code derives it and no test can verify it. Either derive it or drop it; until then it is an inventory note, not a measurement.',
+      'Phase 78 adds the user/token routes: one GET that reveals a token (and is audited), one PATCH that sets role, ceilings, expiry and status, and one GET /v1/auth/verify that a client\'s own application calls to resolve a token to a user. These are the real API surface; the admin console is only a client of them and holds no capability of its own.',
       'Counts describe route inventory only; they do not claim legacy behavioral parity.'
     ],
     legacy: LEGACY_ROUTE_MAP,

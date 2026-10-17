@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.49.0 documentation follow-up — Phase 78/79 (users, tokens and terms)
+- Added per-user **roles** (`admin` | `user`) and per-user **ceilings** (`rateLimit`, `concurrency`; `null` inherits `APP_RATE_LIMIT` / `APP_CONCURRENCY`) on the existing `applications` rows, presented as one **Users** view. A row created before roles existed is a `user`, which is what it could already do.
+- Added a per-user **token vault** (`src/auth/token-vault.js`): AES-256-GCM under `TOKEN_ENCRYPTION_KEY`, revealed only by a deliberate `GET /v1/admin/applications/:id/token` that writes `application.token.revealed`. The hot path still compares a SHA-256 hash, so authentication decrypts nothing. Errors: `token_not_recoverable`, `token_vault_not_configured`, `token_vault_key_changed`, `token_vault_authentication_failed`.
+- Added **terms**: `expiresAt` is validated on write (`application_expiresAt_invalid:<value>`, because an unparseable date silently kills the token), enforced on every request, and reported by `GET /v1/auth/verify`. An ended token stops authenticating with nothing scheduled; the store keeps `status: active`, so the console renders an **Expires** column and shows the row as `EXPIRED`.
+- Added `GET /v1/auth/verify`, which a client's own Laravel calls to resolve a token to a user, a role and a ceiling. The runtime still holds no customer data.
+- Made the admin console a **client of the API**: every action is a route in `GET /v1/admin/routes`, the token modal hands over runnable `curl` commands, and `tests/phase79-users-over-http.test.js` drives the whole lifecycle over HTTP without reading the page.
+- Replaced the hand-maintained error-publication allowlist with a shape rule in `src/core/public-errors.js`. An allowlist drifts: `outbound_protocol_forbidden` reached callers as `request_failed`, which reads like a runtime bug instead of a policy refusal. The `outbound_*`, `provider_*`, `token_vault_*` and `mcp_*` families are now published when the message is a pure identifier; anything carrying free text stays closed.
+- Made `PATCH /v1/admin/applications/:id` an allowlist (`application_patch_field_not_allowed:<field>`), so an unknown field is refused rather than silently ignored.
+- Extended log redaction to secret-shaped values **inside** fields, not only under suspicious key names, so a token in a URL or an upstream message is written as `[REDACTED]`.
+- Regression suite: **409 tests, 408 pass, 0 fail, 1 skipped** (the skip is the PHP syntax check — no `php` binary here, reported as NOT_TESTED). Zero-dependency guard clean.
+- Not verified: the PHP/Laravel path cannot be executed on this host (no `php`, no `composer`), the runtime holds no Meta credentials by design, and the four external capabilities (`public-api`, `tts`, `ocr`, `facebook-ads`) remain UNVERIFIED.
+
 ## 0.44.0 — Provider contract and masking hardening
 - Added stable agent-facing ZombieCoder aliases (`zombie-mini`, `zombie-lite`, `zombie-classic`) while keeping upstream model IDs in the authenticated admin catalog.
 - Added provider-specific `modelAliases` mapping and 1–10 routing priority normalization, including ordering preservation for legacy priorities above 10.

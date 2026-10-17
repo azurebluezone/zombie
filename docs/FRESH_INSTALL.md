@@ -150,6 +150,7 @@ The keys that decide whether an agent's tools work at all:
 | `PORT` | `9999` | the single HTTP port |
 | `ADMIN_TOKEN` | empty | set a long random value unless you are on a machine you fully control |
 | `LOOPBACK_AUTH_BYPASS` | `false` | with `true` **and** an empty `ADMIN_TOKEN`, admin routes accept loopback requests without a token |
+| `TOKEN_ENCRYPTION_KEY` | empty | seals each client's token with AES-256-GCM so an operator can read it back later. **Set it before you create any user.** Without it, tokens are stored hash-only and cannot be revealed — the API answers `token_not_recoverable` rather than pretending. Changing it later does not recover older rows: it makes them unreadable on purpose (`token_vault_key_changed`), so rotate those users instead. Minimum 24 characters |
 | `ZOMBICODER_EXECUTION_MODE` | `chat-only` | **`tools-enabled` is required for any tool to run.** `chat-only` answers `503 tool_execution_not_verified` |
 | `TOOL_ACCESS_MODE` | `permissioned` | `unrestricted` lets a tool touch any path. This is the path boundary; choose it deliberately |
 | `DATA_DIR` | `./data` | storage, logs' sibling, and the default tool root (see §8.6) |

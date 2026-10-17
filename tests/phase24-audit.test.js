@@ -19,13 +19,15 @@ test('phase24 route map is explicit and matches the current inventory', () => {
   // live test, persona update/deletion, the inbound MCP server/client endpoints
   // plus endpoint removal, the inbound MCP auth policy GET/PATCH/DELETE, the
   // agent tool-access scope GET/PATCH pair, the project-notes GET/POST/DELETE trio,
-  // and the messaging-channel plan GET).
+  // the messaging-channel plan GET, and the user/token trio: one GET that reveals a
+  // token, one PATCH that sets role/ceilings/expiry/status, and one GET /v1/auth/verify
+  // that a client's own application calls to resolve a token to a user).
   // The pinned number is intentional: it must be raised deliberately whenever the
   // route inventory changes.
-  assert.equal(report.currentConcreteRoutes, 95);
+  assert.equal(report.currentConcreteRoutes, 98);
   // Hand-maintained, and recorded as such in the map's own notes: no code derives it.
   assert.equal(report.currentHandlerBlocks, 59);
-  assert.equal(report.notes.length, 9);
+  assert.equal(report.notes.length, 10);
 });
 
 test('phase24 default agent count matches the actual registry', () => {

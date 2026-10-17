@@ -206,7 +206,7 @@ const bool = v => v ? '<span class="tag ok">yes</span>' : '<span class="tag mute
 const statusTag = s => {
   const v = String(s ?? '').toUpperCase();
   const k = (v === 'ENABLED' || v === 'VERIFIED' || v === 'ACTIVE' || v === 'HEALTHY') ? 'ok'
-          : (v === 'DISABLED' || v === 'REVOKED' || v === 'ERROR' || v === 'NOT_IMPLEMENTED') ? 'off'
+          : (v === 'DISABLED' || v === 'REVOKED' || v === 'ERROR' || v === 'NOT_IMPLEMENTED' || v === 'EXPIRED') ? 'off'
           : (v === 'UNVERIFIED' || v === 'ERROR' || v === 'INCOMPLETE') ? 'warn' : 'mute';
   return '<span class="tag ' + k + '">' + esc(v || 'unknown') + '</span>';
 };
@@ -362,7 +362,8 @@ const ICONS = {
   chart: ICON('<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>'),
   cog: ICON('<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>'),
   sliders: ICON('<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>'),
-  test: ICON('<path d="M9 3h6M10 3v6l-5 9a2 2 0 001.8 3h10.4A2 2 0 0019 18l-5-9V3"/><path d="M7.5 14h9"/>')
+  test: ICON('<path d="M9 3h6M10 3v6l-5 9a2 2 0 001.8 3h10.4A2 2 0 0019 18l-5-9V3"/><path d="M7.5 14h9"/>'),
+  users: ICON('<circle cx="9" cy="8" r="3.3"/><path d="M3.2 20a6 6 0 0111.6 0"/><path d="M16.4 5.6a3.3 3.3 0 010 6.4M17.6 20a6 6 0 00-2.7-4.9"/>')
 };
 const ROUTES = [
   { id: 'dashboard', label: 'Dashboard', group: 'Overview', icon: 'grid' },
@@ -378,6 +379,7 @@ const ROUTES = [
   { id: 'logs', label: 'Logs', group: 'Operations', icon: 'file' },
   { id: 'metrics', label: 'Metrics', group: 'Operations', icon: 'chart' },
   { id: 'tester', label: 'Tester', group: 'Operations', icon: 'test' },
+  { id: 'users', label: 'Users', group: 'System', icon: 'users' },
   { id: 'runtime', label: 'Runtime', group: 'System', icon: 'cog' },
   { id: 'settings', label: 'Settings', group: 'System', icon: 'sliders' }
 ];
@@ -1443,24 +1445,232 @@ VIEWS.runtime = { title: 'Runtime', sub: 'Health, compatibility parity and task 
 } };
 
 /* settings */
+/* ---------------------------------------------------------------- users */
+
+/* The runtime calls a caller an "application" because that is what it authenticates.
+ * The operator calls it a user, because that is what they are handing a token to. Both
+ * are true; the screen follows the operator's word, and the store keeps its own.
+ *
+ * One token per user is the whole model. The admin hands it out, can read it back
+ * later (it is sealed, not plain, and every read is logged), and the client's Laravel
+ * checks it with `GET /v1/auth/verify` to find out which user it just let in. Nothing
+ * else about the client's shop passes through here.
+ */
+let userDirectory = [];
+
+/* Dates, said out loud.
+ *
+ * The store keeps `expiresAt`; the operator needs "when does this end", because the
+ * business is monthly and the end date *is* the renewal date. A bare ISO string
+ * answers neither question.
+ *
+ * The dangerous case is the quiet one: a user whose date has passed still carries
+ * `status: 'active'` in the store, so a screen that reads only the status says ACTIVE
+ * while the token has been dead for days. The effective status therefore comes from
+ * the date as well, not from the field alone.
+ */
+const MS_PER_DAY = 86400000;
+
+/* A date input gives YYYY-MM-DD, which is a calendar day in the operator's timezone,
+ * not an instant. Parsing it as UTC and rendering it back with toISOString() moves the
+ * day for anyone whose offset is not zero — the stored value is late in a local day, so
+ * west of UTC it renders as the next day. Both directions therefore go through the local
+ * clock, and "expires 17 November" is stored as the last moment of 17 November. */
+const isoToDateInput = iso => {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '';
+  const d = new Date(t);
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+};
+const dateInputToEndOfDay = value => {
+  const [y, m, d] = String(value ?? '').split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d, 23, 59, 59, 999).toISOString();
+};
+const daysUntil = iso => {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? null : Math.ceil((t - Date.now()) / MS_PER_DAY);
+};
+const effectiveStatus = u => {
+  if (u.status !== 'active') return u.status;
+  const d = daysUntil(u.expiresAt);
+  return d !== null && d <= 0 ? 'expired' : 'active';
+};
+const expiryCell = u => {
+  if (!u.expiresAt) return '<span class="muted">never</span>';
+  const d = daysUntil(u.expiresAt);
+  const date = isoToDateInput(u.expiresAt);
+  if (d === null || !date) return esc(u.expiresAt) + ' <span class="tag warn">unreadable</span>';
+  if (d <= 0) return esc(date) + '<div><span class="tag off">ended ' + Math.abs(d) + 'd ago</span></div>';
+  return esc(date) + '<div><span class="tag ' + (d <= 7 ? 'warn' : 'mute') + '">in ' + d + 'd</span></div>';
+};
+
+const roleTag = r => (r === 'admin'
+  ? '<span class="tag warn">admin</span>'
+  : '<span class="tag mute">user</span>');
+
+/* Each number is marked separately, because the two can differ. A single row-level
+ * badge called that case "own" — a small lie that only shows up the day the operator
+ * changes the runtime default and wonders why this user moved with it. */
+const limitText = (u, defaults) => {
+  const own = u.limits || {};
+  const part = (value, isOwn, suffix) => {
+    const tag = isOwn ? '<span class="tag">own</span>' : '<span class="tag mute">inherited</span>';
+    return (value == null ? '<span class="muted">—</span>' : esc(value) + suffix) + ' ' + tag;
+  };
+  return part(own.rateLimit ?? defaults?.rateLimit, own.rateLimit != null, '/min') +
+    '<span class="muted" style="padding:0 2px">·</span>' + part(own.concurrency ?? defaults?.concurrency, own.concurrency != null, ' at once');
+};
+
+/* A token is shown in a modal with copy buttons rather than in prompt().
+ * prompt() is hard to copy from on some browsers, cannot be re-read afterwards, and
+ * tells a non-expert operator nothing about what the string is for.
+ *
+ * The terminal commands are not decoration. The console is a client of the API and
+ * never the door to it, so everything this screen does has to be reproducible with no
+ * browser running — and the operator should not have to assemble a curl command by
+ * hand to prove that. The commands are built from location.origin, so they point at
+ * whatever address the console was opened on. */
+function showToken(user, apiKey, notice) {
+  const base = location.origin;
+  const verifyCmd = 'curl -s ' + base + '/v1/auth/verify \\\n' +
+    "  -H 'authorization: Bearer " + apiKey + "'";
+  const chatCmd = 'curl -s ' + base + '/v1/chat/completions \\\n' +
+    "  -H 'authorization: Bearer " + apiKey + "' \\\n" +
+    "  -H 'content-type: application/json' \\\n" +
+    '  -d \'{"messages":[{"role":"user","content":"hello"}],"stream":false}\'';
+  const block = (id, label, cmd) =>
+    '<div class="row" style="justify-content:space-between;align-items:center">' +
+      '<span class="muted" style="font-size:11.5px">' + esc(label) + '</span>' +
+      '<button class="btn tiny" data-act="copy" data-copy="' + esc(id) + '">Copy</button>' +
+    '</div>' +
+    '<pre class="blk" id="' + esc(id) + '" style="user-select:all">' + esc(cmd) + '</pre>';
+
+  openModal(
+    '<div class="modal-h"><h3>Token for ' + esc(user?.name || user?.id || 'user') + '</h3>' +
+      '<button class="x" data-act="modal-close" title="Close">×</button></div>' +
+    '<div class="modal-b">' +
+      '<p class="muted" style="font-size:12px;margin:0">' + esc(notice || '') + '</p>' +
+      '<div class="row" style="justify-content:space-between;align-items:center">' +
+        '<span class="muted" style="font-size:11.5px">The token</span>' +
+        '<button class="btn tiny" data-act="copy" data-copy="token-value">Copy</button>' +
+      '</div>' +
+      '<pre class="blk" id="token-value" style="user-select:all">' + esc(apiKey || '') + '</pre>' +
+      '<p class="muted" style="font-size:11.5px;margin:0">This goes into the client\'s own site — never into a chat, a ticket or a screenshot.</p>' +
+      '<p class="muted" style="font-size:11.5px;margin:4px 0 0"><strong>Test it from a terminal.</strong> No browser and no admin panel involved; if these work, the token works.</p>' +
+      block('cmd-verify', '1 · who is this token?', verifyCmd) +
+      block('cmd-chat', '2 · ask the runtime something', chatCmd) +
+    '</div>' +
+    '<div class="modal-f">' +
+      '<button class="btn" data-act="modal-close">Close</button>' +
+    '</div>'
+  );
+}
+
+function openEditUser(appId) {
+  const u = userDirectory.find(x => x.id === appId);
+  if (!u) return toast('User no longer in this list — refresh', true);
+  const own = u.limits || {};
+  const defaults = userDirectory.defaults || null;
+  openModal(
+    '<div class="modal-h"><h3>Edit ' + esc(u.name) + ' <span class="mono muted">' + esc(u.id) + '</span></h3>' +
+      '<button class="x" data-act="modal-close" title="Close">×</button></div>' +
+    '<div class="modal-b">' +
+      '<label class="f">name<input id="eu-name" value="' + esc(u.name) + '"></label>' +
+      '<label class="f">role<select id="eu-role">' +
+        '<option value="user"' + (u.role === 'admin' ? '' : ' selected') + '>user — can call the API, not the admin API</option>' +
+        '<option value="admin"' + (u.role === 'admin' ? ' selected' : '') + '>admin — can also open this admin panel</option>' +
+      '</select></label>' +
+      '<div class="row" style="gap:12px">' +
+        '<label class="f" style="flex:1">requests / minute<input id="eu-rate" type="number" min="1" value="' + esc(own.rateLimit ?? '') + '" placeholder="' + esc(defaults ? String(defaults.rateLimit) : 'runtime default') + '"></label>' +
+        '<label class="f" style="flex:1">at once<input id="eu-conc" type="number" min="1" value="' + esc(own.concurrency ?? '') + '" placeholder="' + esc(defaults ? String(defaults.concurrency) : 'runtime default') + '"></label>' +
+      '</div>' +
+      '<p class="muted" style="font-size:11.5px;margin:0">Empty means “use the runtime default”. A blank field is not zero: it inherits, so changing the default later still moves this user.</p>' +
+      '<label class="f">ends on<input id="eu-expires" type="date" value="' + esc(isoToDateInput(u.expiresAt)) + '"></label>' +
+      '<div class="row" style="gap:8px">' +
+        '<button class="btn tiny" data-act="date-quick" data-days="30">+30 days</button>' +
+        '<button class="btn tiny" data-act="date-quick" data-days="365">+1 year</button>' +
+        '<button class="btn tiny" data-act="date-never">never ends</button>' +
+      '</div>' +
+      '<p class="muted" style="font-size:11.5px;margin:0">Renewal is just this date. A token past its date stops authenticating by itself — nothing has to be run, and nothing has to be remembered.</p>' +
+    '</div>' +
+    '<div class="modal-f">' +
+      (u.tokenRecoverable ? '<button class="btn" data-act="user-token" data-id="' + esc(u.id) + '" style="margin-right:auto">Show token</button>' : '') +
+      '<button class="btn" data-act="app-rotate" data-id="' + esc(u.id) + '" data-name="' + esc(u.name) + '">New token</button>' +
+      '<button class="btn" data-act="modal-close">Cancel</button>' +
+      '<button class="btn primary" data-act="user-save" data-id="' + esc(u.id) + '">Save</button>' +
+    '</div>'
+  );
+}
+
+VIEWS.users = { title: 'Users', sub: 'Create a user, hand out one token, set their ceiling', render: async (v) => {
+  const { applications, tokenVault, limitsDefault } = await api('/v1/admin/applications');
+  userDirectory = applications;
+  userDirectory.defaults = limitsDefault || null;
+
+  const rows = applications.map(u => '<tr>' +
+    '<td><strong>' + esc(u.name) + '</strong><div class="sub mono">' + esc(u.id) + '</div></td>' +
+    '<td>' + roleTag(u.role) + '</td>' +
+    '<td>' + statusTag(effectiveStatus(u)) + '</td>' +
+    '<td class="muted">' + expiryCell(u) + '</td>' +
+    '<td class="muted">' + limitText(u, limitsDefault) + '</td>' +
+    '<td>' + (u.tokenRecoverable
+      ? '<span class="tag ok">showable</span>'
+      : '<span class="tag off" title="No TOKEN_ENCRYPTION_KEY is set, so only a hash was kept">hash only</span>') + '</td>' +
+    '<td><div class="row">' +
+      '<button class="btn tiny" data-act="user-token" data-id="' + esc(u.id) + '"' +
+        (u.tokenRecoverable ? '' : ' disabled title="Set TOKEN_ENCRYPTION_KEY and restart to be able to show this token"') + '>Show token</button>' +
+      '<button class="btn tiny" data-act="user-edit" data-id="' + esc(u.id) + '">Open</button>' +
+      (u.status === 'active'
+        ? '<button class="btn tiny danger" data-act="app-revoke" data-id="' + esc(u.id) + '" data-name="' + esc(u.name) + '">Revoke</button>'
+        : '<button class="btn tiny" data-act="user-enable" data-id="' + esc(u.id) + '" data-name="' + esc(u.name) + '">Activate</button>') +
+    '</div></td></tr>').join('');
+
+  const vaultNote = tokenVault?.configured
+    ? 'Tokens are sealed with AES-256-GCM under <span class="mono">TOKEN_ENCRYPTION_KEY</span>. “Show token” works, every reveal is written to the log, and a copy of the data file on its own will not open them.'
+    : '<strong>Tokens cannot be shown again.</strong> No <span class="mono">TOKEN_ENCRYPTION_KEY</span> is set, so each token was kept only as a hash. Set one in <span class="mono">.env</span> and restart to be able to read new tokens back; existing ones must be rotated.';
+
+  v.innerHTML =
+    panel('Users', applications.length + ' user(s)', table(
+      ['User', 'Role', 'Status', 'Expires', 'Ceiling', 'Token', 'Actions'], rows, 'No users yet.')) +
+    panel('Create a user', 'one token per user', '<div class="panel-b">' +
+      '<div class="row" style="gap:12px;align-items:flex-end">' +
+        '<label class="f" style="flex:2;min-width:180px">name<input id="user-name" placeholder="client or shop name"></label>' +
+        '<label class="f" style="flex:3;min-width:240px">role<select id="user-role">' +
+          '<option value="user">user — can call the API, not the admin API</option>' +
+          '<option value="admin">admin — can also open this admin panel</option>' +
+        '</select></label>' +
+        '<label class="f" style="width:130px">requests / minute<input id="user-rate" type="number" min="1" placeholder="' + esc(limitsDefault ? String(limitsDefault.rateLimit) : 'default') + '"></label>' +
+        '<label class="f" style="width:110px">at once<input id="user-conc" type="number" min="1" placeholder="' + esc(limitsDefault ? String(limitsDefault.concurrency) : 'default') + '"></label>' +
+        '<label class="f" style="width:150px">ends on<input id="user-expires" type="date" title="Leave empty to never end"></label>' +
+        '<button class="btn primary" data-act="user-create">Create + show token</button>' +
+      '</div>' +
+      '<p class="muted" style="font-size:11.5px;margin:10px 0 0">Leave the two numbers empty to use the runtime default. Both ceilings are per user: a busy client hits their own wall, not everyone else\'s.</p>' +
+      '<p class="muted" style="font-size:11.5px;margin:6px 0 0"><strong>Ends on</strong> is the renewal date — leave it empty and the token never expires. An expired token stops authenticating on its own, with no routine to run, and the list shows it as <strong>EXPIRED</strong> rather than ACTIVE.</p>' +
+      '<p class="muted" style="font-size:11.5px;margin:6px 0 0">' + vaultNote + '</p>' +
+    '</div>') +
+    panel('What the client does with it', '', '<div class="panel-b"><dl class="kv">' +
+      '<dt>Header</dt><dd class="mono">Authorization: Bearer zc_…</dd>' +
+      '<dt>Verify</dt><dd class="mono">GET /v1/auth/verify → {verified, user, limits}</dd>' +
+      '<dt>Talk</dt><dd class="mono">POST /v1/chat/completions</dd>' +
+      '</dl><p class="muted" style="font-size:11.5px;margin:8px 0 0">The client\'s own Laravel decides what the user may see and do; this runtime only answers whether the token is real and what ceiling it carries.</p></div>');
+} };
+
 VIEWS.settings = { title: 'Settings', sub: 'Runtime config, constitution and applications', render: async (v) => {
   const [cfg, domain, { constitution }, { applications }, pusher] = await Promise.all([
     api('/api/config'), api('/api/domain'), api('/v1/admin/constitution'), api('/v1/admin/applications'), api('/api/pusher-config').catch(() => null)
   ]);
-  const aRows = applications.map(a => '<tr><td><strong>' + esc(a.name) + '</strong><div class="sub mono">' + esc(a.id) + '</div></td>' +
-    '<td>' + statusTag(a.status) + '</td><td class="muted">' + esc(dash(a.expiresAt)) + '</td>' +
-    '<td><div class="row"><button class="btn tiny" data-act="app-rotate" data-id="' + esc(a.id) + '">Rotate key</button>' +
-    '<button class="btn tiny danger" data-act="app-revoke" data-id="' + esc(a.id) + '">Revoke</button></div></td></tr>').join('');
   v.innerHTML =
     '<div class="grid g2">' +
       panel('Runtime config', '', '<div class="panel-b">' + kv(cfg.config || cfg) + '</div>') +
       panel('Domain', '', '<div class="panel-b">' + jsonBlock(domain) + '</div>') +
     '</div>' +
-    panel('Applications', applications.length + ' app(s)', table(['Application', 'Status', 'Expires', 'Actions'], aRows, 'No applications.')) +
-    panel('Create application', '', '<div class="panel-b"><div class="row">' +
-      '<label class="f">name<input id="app-name" placeholder="application name"></label>' +
-      '<button class="btn primary" data-act="app-add">Create + show key</button></div>' +
-      '<p class="muted" style="font-size:11.5px;margin:10px 0 0">The key is shown once. Agents/tools that authenticate with it still need explicit tool permissions.</p></div>') +
+    panel('Users', applications.length + ' user(s)',
+      '<div class="panel-b"><p class="muted" style="font-size:12px;margin:0 0 10px">Users, tokens, roles and per-user ceilings have their own section — there is exactly one place where a token is shown, rotated or taken away.</p>' +
+      '<a class="btn primary" href="#users">Open Users</a></div>') +
     panel('Constitution', '', '<div class="panel-b">' + jsonBlock(constitution) + '</div>') +
     (pusher ? panel('Pusher config', '', '<div class="panel-b">' + jsonBlock(pusher) + '</div>') : '');
 } };
@@ -1715,9 +1925,87 @@ document.addEventListener('click', async (ev) => {
     }
     if (act === 'mcp-reconcile') { await api('/v1/admin/mcp/reconcile', { method: 'POST', body: {} }); return done('Reconciled ✓'); }
     if (act === 'mcp-sync') { await api('/v1/admin/registry/external-mcp/sync', { method: 'POST', body: {} }); return done('External MCP synced ✓'); }
-    if (act === 'app-add') { const name = el('app-name').value.trim() || 'application'; const r = await api('/v1/admin/applications', { method: 'POST', body: { name } }); prompt('Application key (copy now, shown once):', r.apiKey); return done('Application created'); }
-    if (act === 'app-rotate') { const r = await api('/v1/admin/applications/' + encodeURIComponent(b.dataset.id) + '/rotate-key', { method: 'POST', body: {} }); prompt('New application key (copy now):', r.apiKey); return done('Key rotated'); }
-    if (act === 'app-revoke') { if (!confirm('Revoke ' + b.dataset.id + '?')) return; await api('/v1/admin/applications/' + encodeURIComponent(b.dataset.id) + '/revoke', { method: 'POST', body: {} }); return done('Application revoked'); }
+    if (act === 'user-create') {
+      const role = el('user-role').value;
+      const rate = el('user-rate').value.trim();
+      const conc = el('user-conc').value.trim();
+      const body = { name: el('user-name').value.trim() || 'user', role };
+      // Only send `limits` when the operator actually chose one. An empty field means
+      // "inherit the runtime default", and normalizeLimits stores that as null.
+      if (rate || conc) body.limits = { rateLimit: rate ? Number(rate) : null, concurrency: conc ? Number(conc) : null };
+      // "Ends on 17 November" means the whole of 17 November, in the operator's own
+      // timezone — see dateInputToEndOfDay. Empty means the token never expires.
+      if (el('user-expires').value) body.expiresAt = dateInputToEndOfDay(el('user-expires').value);
+      const r = await api('/v1/admin/applications', { method: 'POST', body });
+      showToken(r.application, r.apiKey, r.tokenNotice);
+      return done('User created');
+    }
+    if (act === 'user-save') {
+      const rate = el('eu-rate').value.trim();
+      const conc = el('eu-conc').value.trim();
+      await api('/v1/admin/applications/' + encodeURIComponent(b.dataset.id), {
+        method: 'PATCH',
+        body: {
+          name: el('eu-name').value.trim() || undefined,
+          role: el('eu-role').value,
+          limits: { rateLimit: rate ? Number(rate) : null, concurrency: conc ? Number(conc) : null },
+          // An emptied date box is a deliberate "no end date", so it clears the field
+          // rather than being skipped as unchanged.
+          expiresAt: el('eu-expires').value ? dateInputToEndOfDay(el('eu-expires').value) : null
+        }
+      });
+      closeModal();
+      return done('User saved ✓');
+    }
+    if (act === 'date-quick' || act === 'date-never') {
+      const input = el('eu-expires');
+      if (act === 'date-never') { input.value = ''; return; }
+      const target = new Date();
+      target.setDate(target.getDate() + (Number(b.dataset.days) || 0));
+      const p = n => String(n).padStart(2, '0');
+      input.value = target.getFullYear() + '-' + p(target.getMonth() + 1) + '-' + p(target.getDate());
+      return;
+    }
+    if (act === 'user-token') {
+      const r = await api('/v1/admin/applications/' + encodeURIComponent(b.dataset.id) + '/token');
+      showToken({ name: r.name, id: r.id }, r.apiKey, r.tokenNotice);
+      return;
+    }
+    if (act === 'user-edit') { openEditUser(b.dataset.id); return; }
+    if (act === 'user-enable') {
+      await api('/v1/admin/applications/' + encodeURIComponent(b.dataset.id), { method: 'PATCH', body: { status: 'active' } });
+      return done('User activated ✓');
+    }
+    if (act === 'copy') {
+      const node = el(b.dataset.copy);
+      const text = node ? node.textContent : '';
+      // navigator.clipboard needs a secure context, and the admin panel is often
+      // opened over plain http on loopback, so the older route is a real fallback
+      // rather than a formality.
+      try { await navigator.clipboard.writeText(text); toast('Copied'); }
+      catch {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        let ok = false; try { ok = document.execCommand('copy'); } catch {}
+        document.body.removeChild(ta);
+        toast(ok ? 'Copied' : 'Copy was blocked — select the text and copy it by hand', !ok);
+      }
+      return;
+    }
+    if (act === 'app-rotate') {
+      // Rotation kills a token that is working right now, and from inside the edit modal
+      // it is one stray click away, so it asks first and names the user it will break.
+      if (!confirm('Issue a new token for the user ' + (b.dataset.name || b.dataset.id) + '? Their current token stops working on the very next request, and the new one is shown only once.')) return;
+      const r = await api('/v1/admin/applications/' + encodeURIComponent(b.dataset.id) + '/rotate-key', { method: 'POST', body: {} });
+      showToken(r.application, r.apiKey, r.tokenNotice);
+      return done('New token issued — the previous one stopped working');
+    }
+    if (act === 'app-revoke') {
+      if (!confirm('Revoke “' + (b.dataset.name || b.dataset.id) + '”?\nTheir token stops working on the very next request. This can be undone with Activate.')) return;
+      await api('/v1/admin/applications/' + encodeURIComponent(b.dataset.id) + '/revoke', { method: 'POST', body: {} });
+      return done('User revoked');
+    }
   } catch (e) { toast(act + ' failed: ' + e.message, true); }
 });
 

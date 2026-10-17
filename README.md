@@ -99,7 +99,7 @@ tools/common/            # the runnable tool implementations (26 tools in 5 modu
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 376 tests, run with node --test
+tests/                   # 409 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -468,7 +468,7 @@ are hand-rolled inline SVG). Views:
 | Agents | Agents, Agent Mappings |
 | Tools & MCP | Tools, MCP |
 | Operations | Requests, Logs, Metrics, Tester |
-| System | Runtime, Settings |
+| System | Users, Runtime, Settings |
 
 Highlights: per-provider **Test** (pick a model, see request → response), provider
 priority editing, masking-model mapping display, per-agent persona editing and access
@@ -476,6 +476,76 @@ scope, tool enable/disable, the MCP page (connected clients, client IDs, which c
 working now, endpoint auth, new endpoint by URL + discovery), live request/log streaming
 with browser-side filtering, metric cards and graphs, and a **Tester** page whose route
 catalog is read from `GET /v1/admin/routes` so it cannot drift.
+
+### 10.1 Users and tokens
+
+One token per client, and the **Users** view is the only place a token is created, shown,
+rotated or withdrawn. The word in the console is *user* because that is what the operator
+is handing a token to; the store still calls the row an application, and both names are
+returned by the API.
+
+| Action | What happens |
+| --- | --- |
+| Create | `POST /v1/admin/applications` with `role`, optional `limits` and `expiresAt` → the token is shown in a modal with copy buttons and the commands below |
+| Show token | `GET /v1/admin/applications/:id/token` → the same token again; **every reveal is written to the log** as `application.token.revealed` |
+| Edit | `PATCH /v1/admin/applications/:id` → name, role, status, expiry, ceilings |
+| New token | `POST /v1/admin/applications/:id/rotate-key` → a new token; the previous one stops working on the next request |
+| Revoke | `POST /v1/admin/applications/:id/revoke` → `status: revoked`; **Activate** undoes it |
+
+- **Role.** `admin` or `user`, nothing else. A `user` token can call the API but not the
+  admin API; an `admin` token can also open this console, which is how an operator works
+  from another machine without copying the global `ADMIN_TOKEN` onto it. A row created
+  before roles existed has no role and is therefore a `user` — exactly what it could do
+  before.
+- **Ceilings are per user.** `limits.rateLimit` and `limits.concurrency` override
+  `APP_RATE_LIMIT` / `APP_CONCURRENCY` for that one token. Empty means *inherit*, which is
+  stored as `null` and stays different from `0`; the console labels each of the two
+  numbers `own` or `inherited` separately, because they can differ.
+- **The token is sealed at rest** with AES-256-GCM under `TOKEN_ENCRYPTION_KEY`. The hot
+  path still compares a SHA-256 hash, so nothing is decrypted to authenticate a request —
+  only a deliberate *Show token* call decrypts anything. A stolen data file, backup or
+  support bundle yields ciphertext. Without the key, tokens are hash-only and the API says
+  `token_not_recoverable` rather than pretending.
+- **A term has an end date, and the date is what counts.** `expiresAt` is the renewal date.
+  `GET /v1/auth/verify` reports it, and a token past its date stops authenticating on the
+  next request with nothing scheduled and nothing to run. The store deliberately keeps
+  `status: active`, so a list that read only the status would show a working user whose
+  token is already dead — which is why the console renders an **Expires** column and shows
+  the row as `EXPIRED`. A date the runtime cannot read is refused
+  (`application_expiresAt_invalid:<value>`) instead of being stored, because an
+  unparseable date does not fail loudly: `new Date('whenever') > new Date()` is `false`, so
+  it would silently kill the token. `expiresAt: null` means *never ends*.
+- **The console is a client of the API, never the door to it.** Every action above is a
+  route in the inventory (`GET /v1/admin/routes`), so a user who never opens a browser can
+  do all of it from a terminal, and `tests/phase79-users-over-http.test.js` drives the whole
+  lifecycle over HTTP without reading the page. If a capability existed only in the console,
+  that test could not pass. The token modal hands over the commands rather than expecting
+  the operator to assemble them:
+
+  ```bash
+  # who is this token, and when does the term end?
+  curl -s http://127.0.0.1:9999/v1/auth/verify \
+    -H 'authorization: Bearer zc_...'
+
+  # and the same token can actually do work
+  curl -s http://127.0.0.1:9999/v1/chat/completions \
+    -H 'authorization: Bearer zc_...' \
+    -H 'content-type: application/json' \
+    -d '{"messages":[{"role":"user","content":"hello"}],"stream":false}'
+  ```
+- **A refusal names the field that was wrong.** Publication of internal codes is decided by
+  shape in `src/core/public-errors.js`: the `outbound_*`, `provider_*`, `token_vault_*` and
+  `mcp_*` families are published when the message is a pure identifier, and anything
+  carrying free text falls back to `request_failed`. An allowlist alone drifts —
+  `outbound_protocol_forbidden` reached callers as `request_failed` until this rule replaced
+  it — so the rule is a shape, and the four application write codes that echo the caller's
+  own value (`application_expiresAt_invalid:whenever`) are named explicitly.
+- **The runtime is not the door to the client's shop.** The client's own Laravel calls
+  `GET /v1/auth/verify` with the token to learn *who* it just let in and *what ceiling*
+  they carry; everything else happens there. The runtime holds no customer data.
+- **No token reaches a log.** The request logger redacts secret-shaped values inside
+  fields, not only fields with a suspicious name, so a token that lands in a URL, a query
+  string, a provider key or an upstream error message is written as `[REDACTED]`.
 
 The browser chat client lives at `/` (also `/chat`). It streams over SSE using `fetch` +
 `ReadableStream` and keeps its key in `localStorage` under `zc_chat_key`. Both pages share
@@ -706,7 +776,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **376 tests, 375 passing, 0 failing, 1 skipped.** The skip is honest
+Current baseline: **409 tests, 408 passing, 0 failing, 1 skipped.** The skip is honest
 rather than hidden: `php -l` needs a `php` binary, and this machine has none, so the
 syntax check is reported as `NOT_TESTED` with the reason. Set `ZC_REQUIRE_PHP=1` where
 PHP is expected and its absence becomes a failure instead of a skip.
