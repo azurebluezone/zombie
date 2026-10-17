@@ -99,7 +99,7 @@ tools/common/            # the 25 runnable tool implementations
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 248 tests, run with node --test
+tests/                   # 253 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -277,7 +277,12 @@ authenticated) and through the execution boundary (`POST /v1/execution/run` with
 - **Syllabus** records what was learned per project; **memory** holds recent entries.
 - **Entities** model domain objects.
 - **Context compiler** assembles the minimum relevant context under a configurable byte
-  budget (`COMPILED_CONTEXT_BYTES`) and a recent-message window.
+  budget (`COMPILED_CONTEXT_BYTES`) and a recent-message window. Which SSOT sections it
+  selects is decided by how much of the request they actually match: a section whose
+  **title** matches (or one the runtime always wants) is included in full, while a section
+  matched only somewhere in its body gets a budget proportional to the number of distinct
+  words it matched. Without that rule one ordinary word could pull a whole file listing
+  into the prompt — see the note in `src/context/compiler.js`.
 
 ## 9. Evidence and verification
 
@@ -514,7 +519,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **248 tests, 246 passing, 2 failing.** The two failures are known and
+Current baseline: **253 tests, 251 passing, 2 failing.** The two failures are known and
 pre-existing:
 
 - `tests/phase49-mcp-streamable-http.test.js` — asserts an older protocol version than the

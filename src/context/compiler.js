@@ -5,17 +5,39 @@ const DEFAULT_RECENT = 10;
 const DEFAULT_SYLLABUS_ENTRIES = 6;
 const DEFAULT_MEMORY_ENTRIES = 8;
 const MAX_SECTION_CHARS = 6000;
+// A section selected only because a query word appears somewhere in its body used to
+// arrive whole. The SSOT's "Project Structure" section is a ~6 KB file listing, so one
+// ordinary word that happens to appear in a filename ("evidence" matching
+// src/context/evidence.js) added ~1,800 tokens to the prompt of every round. The budget
+// now scales with how much of the query the section actually matched.
+const MAX_BODY_SECTION_CHARS = 800;
 
 const textOf = value => value == null ? '' : typeof value === 'string' ? value : JSON.stringify(value);
 const normalize = value => String(value ?? '').toLowerCase();
 
 function words(query) {
-  return normalize(query).split(/[^a-z0-9_\-./]+/).filter(x => x.length > 2).slice(0, 48);
+  // Distinct, in first-seen order. Repeating a word in the message must not change
+  // which sections count as relevant, and must not let a repeated word outrank a
+  // section that genuinely matches more of the query.
+  const seen = new Set();
+  for (const word of normalize(query).split(/[^a-z0-9_\-./]+/)) {
+    if (word.length > 2) seen.add(word);
+    if (seen.size >= 48) break;
+  }
+  return [...seen];
 }
 
 function scoreText(text, queryWords) {
   const source = normalize(text);
   return queryWords.reduce((score, word) => score + (source.includes(word) ? 1 : 0), 0);
+}
+
+// How much of a section a match is allowed to contribute. A title match (or a section
+// the caller always wants) is real evidence of relevance, so it keeps the full budget.
+// A body-only match is not, so it gets MAX_BODY_SECTION_CHARS per distinct word cleared.
+function sectionBudget({titleMatched = false, score = 0} = {}) {
+  if (titleMatched) return MAX_SECTION_CHARS;
+  return Math.min(MAX_SECTION_CHARS, MAX_BODY_SECTION_CHARS * Math.max(1, score));
 }
 
 function parseMarkdownSections(markdown = '') {
@@ -52,17 +74,18 @@ function selectSections(markdown, query, {always = [], maxSections = 8} = {}) {
   const selected = [];
   for (const section of sections) {
     const title = normalize(section.title);
-    if (always.some(x => title.includes(normalize(x)))) selected.push({...section, score: 1000});
+    if (always.some(x => title.includes(normalize(x)))) selected.push({...section, score: 1000, titleMatched: true});
   }
   for (const section of sections) {
     if (selected.some(x => x.title === section.title)) continue;
+    const titleMatched = scoreText(section.title, queryWords) > 0;
     const score = scoreText(`${section.title}\n${section.content}`, queryWords);
-    if (score > 0) selected.push({...section, score});
+    if (score > 0) selected.push({...section, score, titleMatched});
   }
   return selected.sort((a, b) => b.score - a.score || a.level - b.level).slice(0, maxSections).map(section => ({
     title: section.title,
     level: section.level,
-    content: section.content.slice(0, MAX_SECTION_CHARS)
+    content: section.content.slice(0, sectionBudget(section))
   }));
 }
 
