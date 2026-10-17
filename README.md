@@ -227,6 +227,34 @@ so installing dependencies is an explicit operator action rather than something 
 decide. `execute_bash` is the broader tool and is governed by the same consent, path and
 execution-mode gates.
 
+**The offer is narrowed to the request; the permission is not.** A tool loop used to send
+all 25 tool definitions on every round — measured at **1,927 tokens** of prompt, re-sent
+every round, which on its own can exceed a free tier's per-minute input budget and gives
+the model a manual to read instead of a job to do. The runtime now offers only the tools
+the request has a reason to use:
+
+- an always-on core so the agent can always look around: `read_file`, `list_directory`,
+  `grep_search`, `file_search`;
+- one whole family per detected purpose — *change* adds the write family, *run/verify*
+  adds the terminal, *version control* adds git, *plan* adds the planners, *structure or
+  symbols* adds the explorer tools;
+- anything the caller names in `toolIds`, and anything the task policy hints at.
+
+Measured effect: a read-only question offers **4 of 25** tools (`reason: core_only`), a
+change request **9 of 25** (`purpose:write`), a run-and-verify request **6 of 25**
+(`purpose:run`). A tool named explicitly in the request is always offered, the always-on
+core always survives the cap, and the agent's own earlier tool output can never widen the
+surface — only the user's words are read. `meta.toolSurface` reports `count`, `toolIds`,
+`allowedCount`, `mode`, `reason`, `groups` and `dropped`, so the choice is auditable rather
+than implicit.
+
+Narrowing is an offer, never a grant: permission, consent, the path boundary, the task
+policy and the execution mode are all enforced downstream and unchanged. Set
+`TOOL_SURFACE_MODE=full` (or send `toolSurface:"full"`, or name `toolIds`) to keep the whole
+allowed surface; `TOOL_SURFACE_MAX` (default 12) caps only the optional families. If the
+narrowed surface somehow contains no runnable tool, the request falls back to the full
+allowed surface rather than failing.
+
 ## 6. Providers and model masking
 
 Providers are declared in `PROVIDER_CONFIG_JSON`; keys are read from
@@ -277,12 +305,21 @@ authenticated) and through the execution boundary (`POST /v1/execution/run` with
 - **Syllabus** records what was learned per project; **memory** holds recent entries.
 - **Entities** model domain objects.
 - **Context compiler** assembles the minimum relevant context under a configurable byte
-  budget (`COMPILED_CONTEXT_BYTES`) and a recent-message window. Which SSOT sections it
-  selects is decided by how much of the request they actually match: a section whose
-  **title** matches (or one the runtime always wants) is included in full, while a section
-  matched only somewhere in its body gets a budget proportional to the number of distinct
-  words it matched. Without that rule one ordinary word could pull a whole file listing
-  into the prompt — see the note in `src/context/compiler.js`.
+  budget (`COMPILED_CONTEXT_BYTES`, default 20 KB) and a recent-message window. Which SSOT
+  sections it selects is decided by how much of the request they actually match: a section
+  whose **title** matches (or one the runtime always wants) is included in full, while a
+  section matched only somewhere in its body gets a budget proportional to the number of
+  distinct words it matched. Without that rule one ordinary word could pull a whole file
+  listing into the prompt — see the note in `src/context/compiler.js`.
+
+  The budget has to stay **below** the prompt's own limit on the compiled context
+  (`COMPILED_CONTEXT_PROMPT_CHARS`, 24,000 characters). When it did not — the default was
+  192 KB — a long conversation compiled to ~60 KB, the prompt cut the JSON at the character
+  limit, and the model was handed a document that does not parse. Below the limit the
+  compiler's own reduction runs instead, and it shrinks *structurally*: syllabus first, then
+  memory, then SSOT sections, then the oldest messages — so what survives is always valid
+  JSON and always the most recent part. Measured: a 4 KB budget keeps 10 recent messages,
+  8 KB keeps 22, 20 KB keeps 56.
 
 ## 9. Evidence and verification
 
@@ -441,11 +478,14 @@ the `COMPILED_CONTEXT_BYTES` budget, instead of pasting the whole file into the 
 | Browser/CDP | optional browser automation endpoint |
 | Instance identity | runtime id, instance id |
 
-Two switches worth knowing:
+Three switches worth knowing:
 
 - `ZOMBIECODER_EXECUTION_MODE` — `chat-only` (default) or `tools-enabled`. Tool execution
   routes answer `503 tool_execution_not_verified` until this is `tools-enabled`.
 - `TOOL_ACCESS_MODE` — `permissioned` (default) or `unrestricted`.
+- `TOOL_SURFACE_MODE` — `narrowed` (default) or `full`. What an agent is *offered*, never
+  what it is *allowed*; see §5. `TOOL_SURFACE_MAX` (default 12) caps the optional tool
+  families, and `COMPILED_CONTEXT_BYTES` (default 20 KB) bounds the compiled context; see §8.
 
 Never commit `.env`, API keys, tunnel tokens or private keys.
 

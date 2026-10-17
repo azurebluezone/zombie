@@ -167,7 +167,14 @@ export function compileContext({
       effectiveToolIds: Array.isArray(taskPolicy.effectiveToolIds) ? taskPolicy.effectiveToolIds.slice(0, 50) : []
     } : null
   };
-  const bounded = truncateToBytes(compiled, Math.max(32 * 1024, Number(maxBytes) || DEFAULT_MAX_BYTES));
+  // Honour the caller's budget. This used to be `Math.max(32*1024, maxBytes)`, which
+  // silently floored every budget at 32 KB: an operator who set COMPILED_CONTEXT_BYTES
+  // to 20 KB got 32 KB, the prompt then cut the JSON at its own character limit, and the
+  // model received a document that does not parse. The default is only a fallback for a
+  // missing or unusable value, not a floor.
+  const requestedBudget = Number(maxBytes);
+  const budget = Number.isFinite(requestedBudget) && requestedBudget > 0 ? requestedBudget : DEFAULT_MAX_BYTES;
+  const bounded = truncateToBytes(compiled, budget);
   validateCompiledContext(bounded);
   return bounded;
 }

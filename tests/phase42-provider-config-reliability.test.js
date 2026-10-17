@@ -115,3 +115,29 @@ test('phase42 Gemini adapter sends native generateContent request and canonicali
     assert.equal(canonical.usage.total_tokens,5);
   } finally { await new Promise(resolve=>server.close(resolve)); }
 });
+
+// A provider the operator turned off in the admin console used to come back on the next
+// restart, because the boot seed re-declared `enabled: true` and the carry-forward step
+// did not preserve the stored value. The seed still wins when it speaks; it just has to
+// stop overwriting a decision it never made.
+test('phase42 an operator-disabled provider stays disabled when the seed is silent', async () => {
+  const { carryForwardProviderState } = await import('../src/startup/provider-bootstrap.js');
+  const stored = { id: 'gemini', enabled: false, models: ['gemini-3.8-flash'], defaultModel: 'gemini-3.8-flash' };
+  const seedWithoutEnabled = { id: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', driver: 'gemini' };
+  const merged = carryForwardProviderState(stored, seedWithoutEnabled);
+  assert.equal(merged.enabled, false, 'the stored disable must survive a silent seed');
+});
+
+test('phase42 a seed that declares enabled still wins over the stored value', async () => {
+  const { carryForwardProviderState } = await import('../src/startup/provider-bootstrap.js');
+  const stored = { id: 'gemini', enabled: false };
+  const merged = carryForwardProviderState(stored, { id: 'gemini', enabled: true });
+  assert.equal(merged.enabled, true, 'the seed is the authority when it declares the field');
+  const mergedOff = carryForwardProviderState({ id: 'groq', enabled: true }, { id: 'groq', enabled: false });
+  assert.equal(mergedOff.enabled, false);
+});
+
+test('phase42 a first boot with no stored row takes the seed as-is', async () => {
+  const { carryForwardProviderState } = await import('../src/startup/provider-bootstrap.js');
+  assert.deepEqual(carryForwardProviderState(undefined, { id: 'gemini', enabled: true }), { id: 'gemini', enabled: true });
+});

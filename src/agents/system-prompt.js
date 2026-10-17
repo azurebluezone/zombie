@@ -1,5 +1,16 @@
 import { formatSharedPersona } from '../policy/shared-persona.js';
 
+/**
+ * How much of the compiled context the prompt may carry.
+ *
+ * `COMPILED_CONTEXT_BYTES` in src/config/env.js must stay *below* this. If the compiler
+ * is allowed to produce more than the prompt can hold, the prompt cuts the JSON at a
+ * character limit and the model is handed a broken document — which is exactly what a
+ * 192 KB budget did to a long conversation. Kept here (not inline) so the relationship
+ * between the two numbers is one testable constant instead of two loose literals.
+ */
+export const COMPILED_CONTEXT_PROMPT_CHARS = 24000;
+
 function clean(value, max = 4000) {
   const text = value == null ? '' : String(value);
   return text.length > max ? `${text.slice(0, max)}\n[truncated]` : text;
@@ -121,7 +132,7 @@ export function buildAgentSystemPrompt({
     `Working directory: ${clean(compiledContext?.facts?.workingDirectory || projectRoot || 'Not supplied', 1000)}`,
     'The runtime has compiled the minimum relevant context before this prompt. Do not assume omitted project data is absent; request/resolve it through runtime boundaries when necessary.',
     compiledContext
-      ? `COMPILED CONTEXT (JSON)\n${clean(JSON.stringify(compiledContext), 24000)}`
+      ? `COMPILED CONTEXT (JSON)\n${clean(JSON.stringify(compiledContext), COMPILED_CONTEXT_PROMPT_CHARS)}`
       : contextBlock('SSOT', ssot?.content ?? ssot, 14000),
     compiledContext ? '' : contextBlock('SYLLABUS', syllabus?.content ?? syllabus, 10000),
     compiledContext ? '' : `RECENT MEMORY:\n${serializeMemory(memory)}`,

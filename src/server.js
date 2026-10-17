@@ -30,6 +30,7 @@ import { applySecurityHeaders, isTlsRequest } from './http/security-headers.js';
 import { providerErrorDetail, retryAfterMsFrom } from './providers/adapters/request-shape.js';
 import { ExecutionOrchestrator } from './execution/orchestrator.js';
 import { ToolRegistry } from './tools/registry.js';
+import { selectToolSurface, selectionText } from './tools/selection.js';
 import { SkillRegistry } from './skills/registry.js';
 import { AgentRegistry } from './agents/registry.js';
 import { TransportRegistry } from './transport/registry.js';
@@ -1286,14 +1287,39 @@ const requestHandler = async (req,res) => {
         // input tokens per minute). A request that names no tools still gets the full
         // surface, so "unrestricted by default" is unchanged.
         const fullSurface=agentScope.access.toolSurface==='all'?await runnableToolIds():input.toolIds;
-        const agentToolIds=requestedChatTools.length?fullSurface.filter(id=>requestedChatTools.includes(id)):fullSurface;
+        // `fullSurface` is what the agent is *allowed* to use. Offer only the part of it
+        // this request has a reason to use: a tool loop used to send all 25 definitions
+        // (~1,900 tokens) on every round, which distracts the model and on its own can
+        // exceed a free tier's per-minute input budget. A request that names tools keeps
+        // its own narrowing, and `toolSurface:'full'` opts out entirely.
+        const surfaceSelection=requestedChatTools.length||input.toolSurface==='full'
+          ? null
+          : selectToolSurface({
+              text:selectionText({goal:chatGoal,expectedOutcome:input.expectedOutcome,messages:input.messages}),
+              availableToolIds:fullSurface,
+              requestedToolIds:Array.isArray(input.toolIds)?input.toolIds.map(String):[],
+              profileToolIds:taskPolicy.allowedToolHints??[],
+              mode:config.toolSurfaceMode,
+              maxTools:config.toolSurfaceMax
+            });
+        const agentToolIds=requestedChatTools.length?fullSurface.filter(id=>requestedChatTools.includes(id)):(surfaceSelection?.toolIds??fullSurface);
         input={...input,toolIds:agentToolIds,allowedToolIds:agentToolIds};
+        if(surfaceSelection) await requestLog.debug('tool.surface.selected',{agentId,offered:surfaceSelection.toolIds.length,allowed:fullSurface.length,mode:surfaceSelection.mode,groups:surfaceSelection.groups,reason:surfaceSelection.reason,dropped:surfaceSelection.dropped});
         // The persisted scope, not the task-policy profile, decided this surface, so
         // the reported policy must not claim a tool was denied while the run offers it.
         const reportedTaskPolicy=agentScope.access.toolSurface==='all'
           ? {...taskPolicy,toolSurfaceMinimal:false,effectiveToolIds:agentToolIds,deniedRequestedTools:[]}
           : taskPolicy;
-        const registeredNativeTools=(await toolsRegistry.list()).filter(t=>input.toolIds.includes(t.id)&&t.entry&&['ENABLED','VERIFIED'].includes(t.status));
+        const runnableFrom=async(ids)=>(await toolsRegistry.list()).filter(t=>ids.includes(t.id)&&t.entry&&['ENABLED','VERIFIED'].includes(t.status));
+        let registeredNativeTools=await runnableFrom(input.toolIds);
+        // A narrowed offer that happens to contain only disabled tools must not turn a
+        // request that used to work into a 400. Narrowing is an optimisation; the full
+        // allowed surface stays the floor.
+        if(!registeredNativeTools.length&&surfaceSelection){
+          await requestLog.warn('tool.surface.fallback_full',{agentId,offered:input.toolIds.length,reason:'no_runnable_tool_in_narrowed_surface'});
+          input={...input,toolIds:fullSurface,allowedToolIds:fullSurface};
+          registeredNativeTools=await runnableFrom(fullSurface);
+        }
         if (!registeredNativeTools.length) return send(res,400,{error:'no_registered_tool_allowed_for_task',taskProfile:taskPolicy.profileId,requestedToolIds:requestedChatTools});
         const toolDefinitions=registeredNativeTools.map(t=>({type:'function',function:{name:t.id,description:t.description??t.name,parameters:t.metadata?.toolSchema??{type:'object',properties:{}}}}));
         const toolBindings={...(input.toolBindings??{}),...Object.fromEntries(registeredNativeTools.map(t=>[t.id,{toolId:t.id}]))};
@@ -1350,7 +1376,7 @@ const requestHandler = async (req,res) => {
         // tool.execution.*).
         const toolLoopPublicModel=result.response?.model ?? route.publicModel ?? null;
         const toolLoopRoute={routeId:route.routeId,providerId:'masked',model:route.publicModel || toolLoopPublicModel,publicModel:route.publicModel || toolLoopPublicModel,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status};
-        return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,agentAccess:agentScope.access,toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id)},evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy:reportedTaskPolicy}});
+        return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,agentAccess:agentScope.access,toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id),allowedCount:fullSurface.length,mode:surfaceSelection?.mode??'full',reason:surfaceSelection?.reason??(requestedChatTools.length?'request_named_tools':'full_surface'),groups:surfaceSelection?.groups??[],dropped:surfaceSelection?.dropped??[]},evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy:reportedTaskPolicy}});
       }
       if (input.stream === true) {
         const streamContext = await contexts.resolve(input);

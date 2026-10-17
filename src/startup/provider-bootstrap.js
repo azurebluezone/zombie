@@ -46,6 +46,13 @@ export function carryForwardProviderState(existing, incoming = {}) {
     merged.modelAliases = existing.modelAliases;
   }
 
+  // `enabled` is a deployment decision an operator makes either in the seed or through
+  // the admin API. When the seed declares it, the seed wins — that is what a seed is
+  // for. When the seed is silent, the stored value survives: without this, disabling a
+  // provider from the admin console lasted exactly until the next restart, which is a
+  // trap rather than a policy.
+  if (incoming.enabled === undefined && existing.enabled !== undefined) merged.enabled = existing.enabled;
+
   for (const field of RUNTIME_OWNED_FIELDS) {
     if (merged[field] === undefined && existing[field] !== undefined) merged[field] = existing[field];
   }

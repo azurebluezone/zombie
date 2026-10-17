@@ -140,7 +140,14 @@ export const config = {
   toolLoopMaxRepeatedCalls: numberEnv('TOOL_LOOP_MAX_REPEATED_CALLS', 2, {min:1,max:100}),
   sessionMaxMessages: numberEnv('SESSION_MAX_MESSAGES', 100, {min:1,max:10000}),
   contextBudgetBytes: numberEnv('CONTEXT_BUDGET_BYTES', 1024 * 1024, {min:64 * 1024,max:4 * 1024 * 1024}),
-  compiledContextBytes: numberEnv('COMPILED_CONTEXT_BYTES', 192 * 1024, {min:32 * 1024,max:1024 * 1024}),
+  // The compiled context is embedded in the prompt, and the prompt can only carry about
+  // 24,000 characters of it. This budget must therefore stay *below* that: when it was
+  // 192 KB a long conversation compiled to ~60 KB, the prompt cut it at the character
+  // limit, and the model was handed invalid JSON. At 20 KB the compiler's own
+  // `truncateToBytes` does the bounding instead — and it shrinks structurally (drops
+  // syllabus, then memory, then SSOT sections, then the oldest messages), so what
+  // remains is always valid and always the most recent part.
+  compiledContextBytes: numberEnv('COMPILED_CONTEXT_BYTES', 20 * 1024, {min:4 * 1024,max:1024 * 1024}),
   contextRecentMessages: numberEnv('CONTEXT_RECENT_MESSAGES', 10, {min:1,max:50}),
   memoryMaxEntries: numberEnv('MEMORY_MAX_ENTRIES', 500, {min:1,max:100000}),
   maxBodyBytes: numberEnv('MAX_BODY_BYTES', 4 * 1024 * 1024, {min:1024,max:32 * 1024 * 1024}),
@@ -191,6 +198,15 @@ export const config = {
   // configuration is still refused, and the agent's own path scope still bounds
   // where those tools may operate.
   toolAccessMode: env('TOOL_ACCESS_MODE', 'permissioned') === 'unrestricted' ? 'unrestricted' : 'permissioned',
+  // What the runtime *offers* an agent, not what it *allows*. `narrowed` shows only the
+  // tools the request's purpose needs, plus a small always-on set: that removes roughly
+  // 1,900 tokens of tool definitions from every round of a tool loop. `full` shows every
+  // allowed tool, which is what happened before. Permission, consent, the path boundary,
+  // the task policy and the execution mode are unaffected either way — narrowing the
+  // offer can only ever hide a tool, never grant one. A request that names `toolIds`
+  // explicitly, or sends `toolSurface:'full'`, keeps the full allowed surface.
+  toolSurfaceMode: env('TOOL_SURFACE_MODE', 'narrowed') === 'full' ? 'full' : 'narrowed',
+  toolSurfaceMax: numberEnv('TOOL_SURFACE_MAX', 12, {min:4,max:64}),
   // Explicit browser CORS allowlist. Empty means same-origin only (no CORS headers).
   corsAllowOrigins: env('CORS_ALLOW_ORIGINS', '').split(',').map(x => x.trim()).filter(Boolean),
   providerNetworkPolicy: {
