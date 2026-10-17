@@ -230,3 +230,89 @@ Execution lifecycle binds system prompt, session metadata, evidence gate, normal
 - Optional GET SSE event stream is exposed by `openMcpEventStream()` and requires explicit lifecycle ownership/close.
 - Discovery failures persist sanitized endpoint error status; successful discovery persists protocol version and session ID.
 - `npm test`: local fixture suite verifies MCP protocol behavior; no live third-party MCP endpoint has been verified.
+
+> **A gap in this record, stated rather than hidden.** The per-phase entries below resume at
+> phase 73. Phases 50–72 have test files (`tests/phase50-*.test.js` … `tests/phase72-*.test.js`)
+> and commits, but no entry was written here at the time, so this manifest is **not** a
+> complete history. Do not read a missing phase as a missing feature, and do not read this
+> file as the source of truth for behaviour: the code and the test suite are. Reconstructing
+> 50–72 from the commit log is a known, named task (see `docs/JOURNEY.md` §5, journey 5).
+
+## Phase 73 — Web and context tools that the runtime can actually run (v0.49.0)
+- A listed tool is now one the runtime can actually execute; `web_search` answers
+  `search_backend_not_configured` when no SearXNG-compatible endpoint is set instead of
+  pretending to search, and `fetch_web_page` refuses a private address, a non-standard port
+  and a non-https protocol, re-validating every redirect hop and stopping a loop.
+- HTML is reduced to text without losing Bengali script, and entity forms (named, decimal,
+  hex) decode; the byte ceiling truncates rather than buffering without limit, and a non-2xx
+  answer is an error code rather than an empty success.
+- Registry reconciliation: a code-owned tool removed from the code is retired on read, and a
+  code-owned status is refreshed from code while an operator status (`DISABLED`) is kept.
+- `tests/phase73-web-tools.test.js` (11 tests). The web tools are real in shape; no live
+  third-party search backend was available here, so a live search remains NOT_TESTED.
+
+## Phase 74 — One error envelope, the one an OpenAI client reads (v0.49.0)
+- Every 4xx/5xx body carrying a string `error` is rewritten into
+  `{error:{message,type,param,code}}`; a 5xx becomes `server_error`, a 429 becomes
+  `rate_limit_error`, sibling fields survive, a string `param` names the offending field,
+  and a success body is never touched.
+- `test/phase74-openai-compat.test.js` (8 tests) pins each of those, including the two
+  bodies that must be left alone (an object `error`, a non-object body).
+
+## Phase 75 — The channel plan is data, not prose (v0.49.0)
+- `src/channels/catalog.js` declares the four channels with the Meta windows and limits as
+  Meta documents them, the credential model as client-owned, and `Path A` (the client owns
+  the app) as the standing decision. Facebook Ads is declared read-only.
+- A boundary channel id must exist in the catalog and a boundary tool id must be a runnable
+  runtime tool, so the plan cannot reference a capability that does not exist.
+- `tests/phase75-channels.test.js` (8 tests). Every channel is `PLANNED`: no webhook
+  receiver, no Graph call and no reply exists.
+
+## Phase 76 — The zero-dependency rule is enforced, not assumed (v0.49.0)
+- `scripts/check-zero-deps.mjs` fails on a dependency, a lockfile or a `node_modules`
+  (including an empty one), and checks every lockfile an installer could leave.
+- `package.json` declares no dependency field at all, and `node --test` is the only test
+  runner.
+- `tests/phase76-zero-deps.test.js` (7 tests).
+
+## Phase 77 — The constitution is policy, so it is written down and checked (v0.49.0)
+- Every rule name has a statement (`statementFor(name)` → `name — statement`), and
+  `constitutionRules()` maps through it, so all five prompt call sites benefit from one
+  change. With no constitution passed, the prompt falls back to the real rules rather than
+  to a shorter paraphrase, because a paraphrase is a copy and a copy drifts.
+- A caller that writes its own rule keeps it untouched, and the block stays inside a prompt
+  budget (<= 1600 chars) because it goes into every system message.
+- `tests/phase77-constitution.test.js` (8 tests). `GET /v1/admin/constitution` gained
+  `statements` additively, and `Path A` was recorded in the same change.
+
+## Phase 78 — Users, tokens and terms (v0.49.0)
+- The existing `applications` rows became *users*: a `role` (`admin` | `user`), per-user
+  `limits` (`null` means inherit, and `null` is deliberately not `0`), and `expiresAt`.
+  A row created before roles existed is a `user`, which is what it could already do.
+- `src/auth/token-vault.js` seals each token with AES-256-GCM under `TOKEN_ENCRYPTION_KEY`
+  so an operator can read it back with an audited reveal; authentication still compares a
+  SHA-256 hash, so nothing is decrypted to let a request in.
+- `expiresAt` is validated on write (`application_expiresAt_invalid:<value>`) because an
+  unparseable date does not fail loudly — `new Date('whenever') > new Date()` is `false`, so
+  it would silently kill the token. `PATCH` is an allowlist
+  (`application_patch_field_not_allowed:<field>`), so an unknown field is refused rather
+  than silently ignored.
+- `src/core/public-errors.js`: error publication moved from a hand-maintained allowlist to a
+  shape rule, because the allowlist drifted and a refused plain-http endpoint reached callers
+  as `request_failed`. Log redaction now applies inside values, not only under suspicious key
+  names.
+- `tests/phase78-users.test.js` (29 tests), including redaction proven by writing a log and
+  reading it back.
+
+## Phase 79 — The whole lifecycle over HTTP, with no browser (v0.49.0)
+- `tests/phase79-users-over-http.test.js` (4 tests) boots a real server and drives create →
+  `auth/verify` → reveal → term ends → renew → rotate → revoke entirely over HTTP, and never
+  reads `public/admin/index.html`. A capability that lived only in the console would fail
+  this file, which is what makes "the console is a client of the API" a check rather than a
+  slogan.
+- It also proves a refused plain-http outbound endpoint reaches the caller as
+  `outbound_protocol_forbidden` rather than `request_failed`, and that a code carrying free
+  text stays closed.
+- `tests/phase24-audit.test.js` was raised deliberately to the new inventory: 98 concrete
+  routes and 10 notes.
+

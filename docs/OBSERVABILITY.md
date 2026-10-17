@@ -59,16 +59,68 @@ Use `trace` only when necessary because it can produce more records. Restore
 
 Keep `LOG_PAYLOADS=false` in normal use. The default logger omits fields named
 like conversation content, prompts, tool arguments, request bodies, and
-payloads; redacts values under secret-like field names; and replaces strings
-longer than 2,000 characters with a length marker. This is not a substitute for
-reviewing diagnostic text: do not put credentials, private user content, or
-secrets into fields intended for short explanations.
+payloads; replaces strings longer than 2,000 characters with a length marker; and
+redacts secret-shaped material.
+
+Redaction applies **inside values, not only under secret-like key names**. That
+distinction matters: a credential can arrive in a URL path, a query string, a
+provider key, or an upstream error message, where the field name says nothing
+about the content. Those matches are replaced with `[REDACTED]`, and the patterns
+cover `zc_…` application keys, `sk-`/`pk-`/`rk-` prefixes, Facebook `EAA…` tokens,
+JWTs, and `?token=`/`api_key=`/`secret=` style query parameters.
+
+This is still not a substitute for care: do not put credentials, private user
+content, or secrets into fields intended for short explanations. Redaction is a
+backstop, not a licence.
 
 If a log file cannot be created, rotated, or appended, the logger writes a
 `logger.write_failed` JSON record to stderr with the failing target, source
 event, and error code. A logging storage failure should therefore be visible
 through stderr or the service manager rather than silently discarding file
 logs.
+
+## Who called, and what the log cannot tell you
+
+Attribution comes from `applicationId`, `path` and `method` on `http.request`,
+`http.response`, `application.auth.succeeded` and `application.auth.failed`.
+Those are enough to answer "which token was used, for what, and how often".
+
+**The log does not record a user-agent or a client address.** Two callers using
+the same token are therefore indistinguishable, and "was this my terminal or the
+shop's server?" cannot be answered from the log alone. When that question
+matters, issue a separate user per caller rather than a shared token — one token
+per client is both the billing model and the only thing that makes the log
+readable later. This limitation is recorded here because it was hit while
+answering exactly that question.
+
+## Events worth watching
+
+| Event | Means |
+| --- | --- |
+| `application.token.revealed` | someone opened the admin console and displayed a token. Carries `applicationId` and `role`. Rare on a healthy deployment; investigate a burst |
+| `application.auth.failed` | a key was missing, malformed, expired or revoked (`reason`) |
+| `mcp.server.auth_failed` | an inbound MCP client presented an unacceptable credential |
+| `outbound.circuit.opened` | the runtime stopped calling an upstream after repeated failures |
+| `logger.write_failed` | logs are not reaching the file (written to stderr) |
+
+## Which errors reach the caller
+
+Internal errors are published to callers by shape, decided in
+`src/core/public-errors.js`. The `outbound_*`, `provider_*`, `token_vault_*` and
+`mcp_*` families are published when the message is a pure identifier; anything
+carrying free text falls back to `request_failed`. Four application
+write-validation codes are named explicitly and echo the caller's own value
+(`application_expiresAt_invalid:whenever`).
+
+The reason this is a shape rather than a hand-maintained list: a list drifts, and
+a drifted list is a silent lie. `outbound_protocol_forbidden` — a precise policy
+refusal about an endpoint scheme — reached callers as `request_failed` until the
+shape rule replaced the list, which reads like a runtime bug and gives an
+operator nothing to act on.
+
+The full message is still written to the log and the audit trail even when it is
+not published, so a `request_failed` in a response is not a dead end: find the
+`http.error` record by `requestId` and read the real cause there.
 
 ## What logs do not prove
 

@@ -80,29 +80,52 @@ Two credential kinds exist.
 
 | Credential | Header | Used for |
 | --- | --- | --- |
-| **Application key** | `Authorization: Bearer zc_…` | Every `/v1/*` route an application calls (chat, sessions, context, execution, MCP call) |
-| **Admin token** | `Authorization: Bearer <ADMIN_TOKEN>` | `/v1/admin/*` routes only |
+| **Application key** | `Authorization: Bearer zc_…` | Every `/v1/*` route an application calls (chat, sessions, context, execution, MCP call, `auth/verify`) — and `/v1/admin/*` as well, **only** when its role is `admin` |
+| **Admin token** | `Authorization: Bearer <ADMIN_TOKEN>` | `/v1/admin/*` routes only. The only credential that can mint or change another credential |
 
-An application key is created by an administrator:
+An application key is created by an administrator, and the creation carries the term
+(`expiresAt`), the role and the per-user ceilings in the same call:
 
 ```bash
 curl -sX POST http://127.0.0.1:9999/v1/admin/applications \
   -H 'Authorization: Bearer '"$ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"laravel-store"}'
+  -d '{"name":"laravel-store","role":"user","limits":{"rateLimit":25},"expiresAt":"2026-12-01"}'
 ```
 
-The response contains the key **once** and the runtime says so explicitly:
+The response is `{ application, apiKey, tokenNotice }`:
 
 ```json
-{ "application": { "id": "app_…", "name": "laravel-store" },
+{ "application": { "id": "app_…", "name": "laravel-store", "status": "active",
+                   "role": "user",
+                   "expiresAt": "2026-12-01T00:00:00.000Z",
+                   "limits": { "rateLimit": 25, "concurrency": null },
+                   "tokenRecoverable": true },
   "apiKey": "zc_…",
-  "warning": "Store this key now; it will not be shown again." }
+  "tokenNotice": "This token is stored encrypted, so the admin console can show it again later. It is never written to a log." }
 ```
 
-The key is stored only as a hash. To replace it use
-`POST /v1/admin/applications/{id}/rotate-key`; to disable it use
-`POST /v1/admin/applications/{id}/revoke`.
+`limits: { "rateLimit": 25, "concurrency": null }` means 25 requests per minute and the
+runtime default concurrency. **`null` means inherit, not zero** — see §13.
+
+**The key is stored twice, and the two copies have different jobs.** Authentication
+compares a SHA-256 hash, so nothing is decrypted to let a request in. A second copy is
+sealed with AES-256-GCM under `TOKEN_ENCRYPTION_KEY`, so the operator can read the key
+back later with `GET /v1/admin/applications/{id}/token` (every reveal is logged as
+`application.token.revealed`). If that key is not configured, `tokenRecoverable` is
+`false` and the reveal call answers `token_not_recoverable` instead of pretending.
+
+The application key itself carries one of two roles, and the role is what separates them:
+
+| Role | Can call | Cannot call |
+| --- | --- | --- |
+| `user` (the default) | every `/v1/*` route an application uses — chat, sessions, context, execution, MCP call, `auth/verify` | every `/v1/admin/*` route |
+| `admin` | the above **and** `/v1/admin/*` | — |
+
+A row created before roles existed has no role and is therefore a `user`, which is exactly
+what it could do before. To replace a key use
+`POST /v1/admin/applications/{id}/rotate-key` — the previous one stops working on the very
+next request; to disable one use `POST /v1/admin/applications/{id}/revoke`.
 
 A missing, malformed, expired, or revoked key returns:
 
@@ -112,6 +135,12 @@ A missing, malformed, expired, or revoked key returns:
              "param": null,
              "code": "application_unauthorized_or_expired" } }
 ```
+
+The same answer is given to a token whose term has ended, because a caller who is not
+allowed in must not be able to tell *why* from the shape of the refusal.
+
+To find out **who** a key belongs to — and when their term ends — the shop's own Laravel
+calls `GET /v1/auth/verify`; that is §18.8.
 
 > On a loopback deployment with `LOOPBACK_AUTH_BYPASS=true` and an empty
 > `ADMIN_TOKEN`, admin routes accept requests from `127.0.0.1` without a token.
@@ -758,13 +787,18 @@ Operator control plane   ─┘   HTTPS + the ADMIN token                ├─ 
 
 | Credential | Who holds it | What it can do |
 | --- | --- | --- |
-| **Application key** (`zc_…`) | the shop's `.env`, server-side only | chat, stream, sessions — **only for its own application** |
-| **Admin token** (`ADMIN_TOKEN`) | the operator only | create/revoke/extend applications, set feature switches, grant tools and MCP endpoints |
+| **Application key** (`zc_…`), role `user` | the shop's `.env`, server-side only | chat, stream, sessions, `auth/verify` — **only for its own application** |
+| **Application key** (`zc_…`), role `admin` | the operator | the above, **and** `/v1/admin/*` |
+| **Admin token** (`ADMIN_TOKEN`) | the operator only | `/v1/admin/*`, and the only credential that can mint or change another credential |
 
-Every `/v1/admin/*` route is authorised by the admin token
-(`isAdminAuthorized(bearer(req), config.adminToken)`), so an application key
-cannot reach it. **Never ship the admin token to a shop.** If a shop needs a
-feature turned on, the operator turns it on.
+A shop's key must always be role `user`. The `admin` role exists for one reason: so the
+operator can work from another machine without copying the global `ADMIN_TOKEN` onto it.
+Everything reached with the admin token is also reachable with an `admin`-role key; the
+reverse is not true, and the two must not be mixed up when issuing a key.
+
+An application key with role `user` is refused by every `/v1/admin/*` route (probed: three
+admin routes, all `401`). **Never ship the admin token to a shop**, and never give a shop's
+key the `admin` role — a key that reaches the admin API can mint further keys.
 
 `integration/php/ZombieCoderClient.php` is the shop's client.
 `integration/php/ZombieCoderAdminClient.php` is the operator's client.
@@ -776,8 +810,11 @@ All of these are operator calls and were probed live.
 ```php
 $admin = new ZombieCoderAdminClient('http://127.0.0.1:9999/v1', getenv('ZOMBIECODER_ADMIN_TOKEN'));
 
-// 1. Create the shop and get its key. The key is shown ONCE.
+// 1. Create the shop with its term. `expiresAt` is the billing date.
 $created = $admin->createApplication('Rahim Store', '2026-11-17T00:00:00.000Z');
+//                                                                  ^ the term ends here.
+// Renewing a monthly plan means moving this date forward, not recreating anything.
+// `null` means the term never ends.
 $applicationId = $created['application']['id'];
 $shopKey       = $created['apiKey'];          // hand this to the shop securely
 
@@ -793,10 +830,15 @@ $admin->grantMcpTool($applicationId, 'mcp_facebook-ads_create_campaign');
 $admin->grantMcpTool($applicationId, 'mcp_whatsapp_send_message');
 ```
 
-The runtime keeps only a **hash** of the key (`apiKeyHash`); the plaintext key
-is returned once and never stored. If it is lost, rotate it:
-`$admin->rotateApplicationKey($applicationId)` — the old key stops working
-immediately.
+The runtime keeps a **hash** of the key for authentication, plus a copy sealed with
+AES-256-GCM under `TOKEN_ENCRYPTION_KEY` so the operator can read it back later with
+`GET /v1/admin/applications/{id}/token` (logged as `application.token.revealed`). Do not
+treat "it can be shown again" as licence to email it around: it is still a live
+credential. To replace it use `$admin->rotateApplicationKey($applicationId)` — the old key
+stops working immediately.
+
+A term that has ended refuses every call on its own, with nothing scheduled and nothing to
+run. §18.5 has the enforcement rule, the renewal call, and what `null` means.
 
 ### 18.4 Feature entitlement — the "5 features for 700 BDT" switch
 
@@ -833,9 +875,38 @@ a.status === 'active' && (!a.expiresAt || new Date(a.expiresAt) > new Date())
 ```
 
 A shop whose period ended gets `401 application_unauthorized_or_expired` on
-every call — including chat. `POST /v1/admin/applications/{id}/extend` moves the
-date; `…/revoke` stops it immediately. Drive this from the operator's billing,
-not from the shop.
+every call — including chat.
+
+`expiresAt` is **validated when written**, not accepted as typed. An unparseable date is
+refused with `application_expiresAt_invalid:<value>`, because it would not fail loudly —
+`new Date('whenever') > new Date()` is `false`, so a typo would silently kill the token
+while nothing in the store looked wrong. `null` (or an empty field) means the term never
+ends, which is different from a date far in the future.
+
+Moving the date is the whole renewal. Either call works, and the effect is visible on the
+very next request, with the shop's token unchanged:
+
+```bash
+# the date, directly
+curl -sX PATCH http://127.0.0.1:9999/v1/admin/applications/$APP_ID \
+  -H 'Authorization: Bearer '"$ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"expiresAt":"2026-12-17T00:00:00.000Z"}'
+
+# or the purpose-built route
+curl -sX POST http://127.0.0.1:9999/v1/admin/applications/$APP_ID/extend \
+  -H 'Authorization: Bearer '"$ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"expiresAt":"2026-12-17T00:00:00.000Z"}'
+
+# revoke stops it immediately; `{"status":"active"}` on the PATCH restores it
+curl -sX POST http://127.0.0.1:9999/v1/admin/applications/$APP_ID/revoke \
+  -H 'Authorization: Bearer '"$ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{}'
+```
+
+Drive this from the operator's billing, not from the shop. One warning worth writing down:
+the store deliberately keeps `status: active` after the date passes, because the date is
+the truth and the status is not. A screen that renders only `status` will show a working
+shop whose token is already dead — the admin console renders the date and shows such a row
+as `EXPIRED` for exactly this reason.
 
 ### 18.6 The support PIN — the runtime never learns who the customer is
 
@@ -875,11 +946,74 @@ endpoint currently carries **one** credential set on the endpoint itself
 shop's own token is injected at call time — are **NOT_IMPLEMENTED** and are the
 next change; until then, a per-shop token means a per-shop endpoint.
 
-### 18.8 What is verified
+### 18.8 The runtime verifies your user — `GET /v1/auth/verify`
+
+This is the call the shop's Laravel makes when it needs to know *who* it just let in. It
+never has to keep its own copy of what the runtime thinks a client is; it asks, on the
+request that matters, and gets three answers at once: the user, the ceiling, and the term.
+
+```bash
+curl -s http://127.0.0.1:9999/v1/auth/verify \
+  -H 'Authorization: Bearer zc_...'
+```
+
+Probed live, verbatim:
+
+```json
+{ "verified": true,
+  "user": { "id": "app_f6899f0d-d5f9-49a2-84f0-5547bb0e8764", "name": "doc-probe", "role": "user" },
+  "limits": { "rateLimit": 25, "concurrency": 4, "windowMs": 60000 },
+  "expiresAt": "2026-12-01T00:00:00.000Z",
+  "issuedAt": "2026-10-17T07:07:40.886Z" }
+```
+
+How to read it:
+
+- `verified: true` means the token authenticated **and** its term has not ended. Every
+  other outcome is `401 application_unauthorized_or_expired` — a token that was never
+  valid, a revoked one, an expired one, and one the runtime cannot parse are deliberately
+  indistinguishable to the caller.
+- `user.role` is `user` or `admin` (see §4). Use it if your application wants to show the
+  operator a screen the shop's customers must not get.
+- `limits.rateLimit` is the **effective** ceiling: the per-user value when one is set,
+  otherwise `APP_RATE_LIMIT`. `concurrency` is resolved the same way, so it is never `null`
+  here even when the stored value is. `windowMs` is the window those numbers apply to.
+- `expiresAt` is `null` when the term never ends. Otherwise it is the renewal date — the
+  shop can warn a client *before* the term lapses instead of discovering it after.
+
+A worked use, in the shop's own Laravel:
+
+```php
+$response = Http::withToken($token)->get('http://127.0.0.1:9999/v1/auth/verify');
+
+if ($response->status() === 401) {
+    // The token is dead: unknown, revoked, or past its term. Do not ask the runtime
+    // which one — it will not say, and it should not.
+    abort(403, 'This support key is no longer active.');
+}
+
+$verify = $response->json();
+$shopId = $verify['user']['id'];       // which client this is
+$role   = $verify['user']['role'];     // 'user' or 'admin'
+$endsAt = $verify['expiresAt'];        // null, or an ISO-8601 instant
+```
+
+Then call `POST /v1/chat/completions` with the same `$token` (§6).
+
+> Do not verify on every request if the answer cannot change in between. It is a cheap
+> call, but a token's role and term do not change during a page load, so caching the answer
+> for the life of one request is enough. The runtime enforces the term itself on every
+> call, so a stale cache can only be too optimistic for the length of that request.
+
+### 18.9 What is verified
 
 | Claim | Status | Basis |
 | --- | --- | --- |
 | The admin routes and their shapes in §18.3–§18.5 | **LIVE_PROBE_PASSED** | probed against a running instance |
+| `GET /v1/auth/verify` shape and refusals (§18.8) | **LIVE_PROBE_PASSED** | probed: a live token returned `user`/`limits`/`expiresAt`; a made-up token returned `401 application_unauthorized_or_expired` |
+| A token is sealed at rest and readable back (§4) | **LIVE_PROBE_PASSED** | probed: create → `GET .../token` returned the *same* token, and the log recorded `application.token.revealed` |
+| The user/token lifecycle without a browser (§18.3–§18.5, §18.8) | **END_TO_END_TESTED** | `tests/phase79-users-over-http.test.js` boots a real server and drives create → verify → reveal → term ends → renew → rotate → revoke over HTTP |
+| The term is enforced at authentication (§18.5) | **END_TO_END_TESTED** | `tests/phase78-users.test.js`, and probed live: the same token returned 401 past its date and 200 again after the date moved |
 | Session `userId` round-trip (§18.6) | **LIVE_PROBE_PASSED** | probed: `PIN-0005` stored and returned |
 | Streaming `data:`-only contract (§6.3) | **LIVE_PROBE_PASSED** | re-probed after the phase-72 fix |
 | The PHP clients in §18.3 | **NOT_TESTED** | no `php` on the build host |
