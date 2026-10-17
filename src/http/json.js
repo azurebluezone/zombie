@@ -1,7 +1,51 @@
+/*
+ * OpenAI-shaped error bodies.
+ *
+ * The runtime writes an error as `{error:'some_code'}`. An OpenAI-compatible
+ * client does not read that shape: it looks for `error.message`, and when the
+ * shape is wrong it gives up and shows "Error code: 401" with no reason at all.
+ * (The OpenAI SDKs guard the lookup with a bare `except`, so a string `error`
+ * degrades silently rather than crashing — which is exactly why the problem is
+ * easy to miss.)
+ *
+ * So every 4xx/5xx body carrying a string `error` is rewritten on the way out:
+ *
+ *   { "error": { "message": "<code>", "type": "<type>", "param": null, "code": "<code>" } }
+ *
+ * The code is carried twice on purpose. `message` is what a human or a log line
+ * shows; `code` is what a client matches on. Any other body field survives
+ * untouched, so a response like `{error:'x',executionMode:'y'}` keeps `executionMode`.
+ *
+ * `param` is taken from the body only when the caller passed a string, which is
+ * how a validation error names the offending field.
+ */
+const ERROR_TYPES = { 429: 'rate_limit_error' };
+
+function errorType(status) {
+  if (ERROR_TYPES[status]) return ERROR_TYPES[status];
+  return status >= 500 ? 'server_error' : 'invalid_request_error';
+}
+
+function openAiErrorBody(status, code, param = null) {
+  return { error: { message: String(code), type: errorType(status), param: param ?? null, code: String(code) } };
+}
+
+function normalizeErrorBody(status, bodyValue) {
+  if (status < 400) return bodyValue;
+  if (!bodyValue || typeof bodyValue !== 'object' || Array.isArray(bodyValue)) return bodyValue;
+  if (typeof bodyValue.error !== 'string' || !bodyValue.error) return bodyValue;
+  const rest = { ...bodyValue };
+  const code = rest.error;
+  const param = typeof rest.param === 'string' ? rest.param : null;
+  delete rest.error;
+  delete rest.param;
+  return { ...openAiErrorBody(status, code, param), ...rest };
+}
+
 export function send(res, status, bodyValue, headers = {}) {
   if (res.headersSent) return false;
   res.writeHead(status, {'content-type':'application/json; charset=utf-8', ...headers});
-  res.end(JSON.stringify(bodyValue));
+  res.end(JSON.stringify(normalizeErrorBody(status, bodyValue)));
   return true;
 }
 

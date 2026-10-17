@@ -107,7 +107,10 @@ The key is stored only as a hash. To replace it use
 A missing, malformed, expired, or revoked key returns:
 
 ```json
-{ "error": "application_unauthorized_or_expired" }
+{ "error": { "message": "application_unauthorized_or_expired",
+             "type": "invalid_request_error",
+             "param": null,
+             "code": "application_unauthorized_or_expired" } }
 ```
 
 > On a loopback deployment with `LOOPBACK_AUTH_BYPASS=true` and an empty
@@ -160,7 +163,7 @@ Standard OpenAI fields:
 | Field | Type | Notes |
 | --- | --- | --- |
 | `model` | string | a ZombieCoder alias (required) |
-| `messages` | array | OpenAI-style `{role, content}` list (required) |
+| `messages` | array | OpenAI-style `{role, content}` list. Required unless `goal` is given (the runtime's own `goal`-only call drives a tool loop without a conversation) |
 | `stream` | boolean | `false` (default) or `true` |
 
 Orchestration fields the runtime understands (all optional):
@@ -322,7 +325,9 @@ They require `ZOMBICODER_EXECUTION_MODE=tools-enabled`; otherwise they return
 A consent-gated tool refuses to run without `"consent": true`:
 
 ```json
-{ "error": "execution_consent_required" }
+{ "error": { "message": "execution_consent_required",
+             "type": "invalid_request_error", "param": null,
+             "code": "execution_consent_required" } }
 ```
 
 Consent-gated tools in this build: `write_file`, `create_file`, `edit_file`,
@@ -418,7 +423,37 @@ allowlist → unconfigured.
 
 ## 12. Errors
 
-Errors are returned as `{ "error": "<code>" }`, usually with HTTP 4xx/5xx.
+Every 4xx/5xx response carries the OpenAI error envelope:
+
+```json
+{ "error": { "message": "<code>", "type": "<type>", "param": null, "code": "<code>" } }
+```
+
+`code` and `message` hold the same value. `message` is what a human or a log line
+shows; `code` is what a client matches on. `type` is `invalid_request_error` for a
+4xx, `rate_limit_error` for a 429, and `server_error` for a 5xx. `param` names the
+offending request field when the failure is a validation error (for example
+`"messages"`), otherwise it is `null`. Any sibling field the handler added (for
+example `executionMode`) is preserved next to `error`.
+
+> **This shape changed.** An older build answered `{ "error": "<code>" }`, which an
+> OpenAI SDK cannot read: it looks for `error.message`, finds a string, and falls
+> back to showing only "Error code: 401". Both PHP clients in `integration/php/`
+> accept either shape, so they keep working across the change.
+
+### 12.1 OpenAI wire contract
+
+| Surface | Shape | Status |
+| --- | --- | --- |
+| `POST /v1/chat/completions` (non-stream) | `{id, object:"chat.completion", created, model, choices:[{index, message:{role, content}, finish_reason, logprobs}], usage}` | verified against a live instance |
+| `POST /v1/chat/completions` (`stream:true`) | `data: {id, object:"chat.completion.chunk", created, model, choices:[{index, delta, finish_reason}]}` … `data: [DONE]` | verified against a live instance |
+| `GET /v1/models` | `{object:"list", data:[{id, object:"model", created, owned_by}]}` | verified against a live instance |
+| 4xx / 5xx | `{error:{message, type, param, code}}` | verified against a live instance |
+
+Two additive fields are not part of the OpenAI schema and are safe to ignore:
+`provider` (always `"ZombieCoder"`, the masked identity) and `applicationId`.
+A `meta` object is added to chat responses and is documented in §6.4.
+
 The codes an application will actually see:
 
 | Code | HTTP | Meaning |
@@ -427,6 +462,7 @@ The codes an application will actually see:
 | `application_rate_limited` | 429 | per-application rate limit hit |
 | `application_concurrency_limited` | 429 | too many in-flight requests |
 | `invalid_body` | 400 | body was not valid JSON |
+| `messages_required` | 400 | neither a non-empty `messages` array nor a `goal` was sent (`param:"messages"`) |
 | `model_required` | 400 | `model` missing |
 | `provider_required` / `provider_not_found` | 400 / 404 | routing constraint invalid |
 | `agent_not_found` | 404 | unknown agent id |
@@ -486,6 +522,8 @@ Honest labels for this document and the runtime behaviour it describes.
 | Sessions / context / notes shapes | **LIVE_PROBE_PASSED** | probed against a running instance |
 | Streaming SSE frames + ttfb | **LIVE_PROBE_PASSED** | measured: ttfb ≈ 0.7–1.5 s; re-probed after the phase-72 fix — a token now travels on one channel only (7 `data:` frames, 0 mirrored tokens) |
 | Tool execution end-to-end | **END_TO_END_TESTED** | the full suite exercises the tool loop with real registered tools |
+| OpenAI success shapes (chat non-stream, chat stream, `/v1/models`) | **LIVE_PROBE_PASSED** | probed: `chat.completion` with `logprobs:null`, `chat.completion.chunk` frames ending in `data: [DONE]`, `{object:"list",data:[{object:"model",…}]}` |
+| OpenAI error envelope | **LIVE_PROBE_PASSED** | probed: 400 `messages_required` (with `param:"messages"`), 401 `application_unauthorized_or_expired`, 404 `not_found` — all `{error:{message,type,param,code}}` |
 | `fetch_web_page` | **LIVE_PROBE_PASSED** | called through the chat tool loop; fetched `https://example.com` and returned `Example Domain` |
 | `web_search` without a backend | **LIVE_PROBE_PASSED** | returns `search_backend_not_configured` rather than an empty success |
 | `web_search` with a backend | **LIVE_PROBE_PASSED** | with `WEB_SEARCH_ENDPOINT` set it returned normalized title/url/snippet results |

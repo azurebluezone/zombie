@@ -1340,6 +1340,14 @@ const requestHandler = async (req,res) => {
     }
     if (req.method==='POST' && url.pathname==='/v1/chat/completions') {
       let input=await body(req, config.maxBodyBytes);
+      // OpenAI requires a non-empty `messages` array. The runtime also accepts a
+      // `goal`-only call — that is how the chat page and /v1/execution/run drive a
+      // tool loop — so the rule is "at least one of the two". A request with
+      // neither used to be answered with a completion about the literal string
+      // "chat request", which hides a client bug instead of reporting it.
+      const hasMessages=Array.isArray(input.messages)&&input.messages.length>0;
+      const hasGoal=String(input.goal??'').trim().length>0;
+      if(!hasMessages&&!hasGoal) return send(res,400,{error:'messages_required',param:'messages'});
       if (input.autoToolLoop === true && config.executionMode !== 'tools-enabled') return send(res,503,{error:'tool_execution_not_verified',executionMode:config.executionMode,required:'tools-enabled'});
       const app=await authenticateRequest(req, requestLog, requestState);
       if (!app) return send(res,401,{error:'application_unauthorized_or_expired'});

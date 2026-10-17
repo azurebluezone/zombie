@@ -73,7 +73,7 @@ test('phase55 the mcp compatibility surface never advertises a server endpoint',
   const mcp = await fetch(`${base}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) });
   assert.equal(mcp.status, 501, 'the runtime must not pretend to serve MCP');
   const mcpBody = await mcp.json();
-  assert.equal(mcpBody.error, 'mcp_server_not_implemented');
+  assert.equal(mcpBody.error.code, 'mcp_server_not_implemented');
   assert.equal(mcpBody.role, 'mcp-client');
   assert.deepEqual(mcpBody.supported_protocol_versions, ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']);
 
@@ -97,7 +97,7 @@ test('phase55 the mcp compatibility surface never advertises a server endpoint',
 
   const bogus = await fetch(`${base}/v1/admin/tools/permissions`, { method: 'POST', headers: admin, body: JSON.stringify({ applicationId: 'app_phase55', toolId: 'not_a_real_tool' }) });
   assert.equal(bogus.status, 400);
-  assert.deepEqual(await bogus.json(), { error: 'tool_not_found', toolId: 'not_a_real_tool' });
+  assert.deepEqual(await bogus.json(), { error: { message: 'tool_not_found', type: 'invalid_request_error', param: null, code: 'tool_not_found' }, toolId: 'not_a_real_tool' });
 
   const real = await fetch(`${base}/v1/admin/tools/permissions`, { method: 'POST', headers: admin, body: JSON.stringify({ applicationId: 'app_phase55', toolId: 'create_file' }) });
   assert.equal(real.status, 201);

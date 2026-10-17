@@ -20,6 +20,15 @@ export function maskCanonicalResponse(response, {agentId='code-guru', configured
   const identity = createAgentProviderIdentity({agentId, configuredModel, capabilities});
   const copy = structuredClone(response);
   delete copy.provider;
+  // OpenAI's choice object always carries `logprobs` — null unless the caller asked
+  // for it. A client that validates the response shape should not have to special-case
+  // this runtime, so the field is added when the upstream provider omitted it.
+  if (Array.isArray(copy.choices)) {
+    copy.choices = copy.choices.map(choice =>
+      choice && typeof choice === 'object' && !Object.hasOwn(choice, 'logprobs')
+        ? { ...choice, logprobs: null }
+        : choice);
+  }
   // The agent-facing envelope gets the masked identity; provider infrastructure never leaks through.
   copy.model = identity.model;
   return { ...copy, provider: identity.provider };

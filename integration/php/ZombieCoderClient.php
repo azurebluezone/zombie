@@ -231,10 +231,9 @@ final class ZombieCoderClient
         }
 
         if ($status !== $expectedStatus) {
-            $error = is_array($data) ? ($data['error'] ?? 'request_failed') : 'request_failed';
             throw new RuntimeException(sprintf(
                 'zombiecoder_request_failed:%s:http_%d:request_id=%s:trace_id=%s',
-                (string) $error,
+                self::errorCode($data),
                 $status,
                 $requestId,
                 $traceId,
@@ -247,5 +246,32 @@ final class ZombieCoderClient
             'trace_id' => $traceId,
             'http_status' => $status,
         ];
+    }
+
+    /**
+     * The runtime answers with an OpenAI-shaped error body:
+     *   {"error":{"message":"…","type":"…","param":null,"code":"…"}}
+     * An older build answered {"error":"code"}. Both shapes are read, so a client
+     * keeps working across the change, and the machine code is what lands in the
+     * exception message.
+     *
+     * @param mixed $data
+     */
+    private static function errorCode($data): string
+    {
+        if (!is_array($data) || !array_key_exists('error', $data)) {
+            return 'request_failed';
+        }
+        $error = $data['error'];
+        if (is_string($error) && $error !== '') {
+            return $error;
+        }
+        if (is_array($error)) {
+            $code = $error['code'] ?? $error['message'] ?? null;
+            if (is_string($code) && $code !== '') {
+                return $code;
+            }
+        }
+        return 'request_failed';
     }
 }

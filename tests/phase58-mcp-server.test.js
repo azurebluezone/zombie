@@ -209,5 +209,5 @@ test('phase58 when the flag is off the endpoint stays honest (501)', async t => 
   const base = `http://127.0.0.1:${port}`;
   const mcp = await fetch(`${base}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) });
   assert.equal(mcp.status, 501);
-  assert.equal((await mcp.json()).error, 'mcp_server_not_implemented');
+  assert.equal((await mcp.json()).error.code, 'mcp_server_not_implemented');
 });

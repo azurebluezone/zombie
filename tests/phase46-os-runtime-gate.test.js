@@ -52,6 +52,11 @@ test('phase45 defaults to chat-only and blocks tool execution routes until expli
   ]) {
     const response = await fetch(`http://127.0.0.1:${port}${route}`, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
     assert.equal(response.status, 503, `${route} should be gated before auth/execution`);
-    assert.equal((await response.json()).error, 'tool_execution_not_verified');
+    // Errors are OpenAI-shaped: `error.code` carries the machine code, `error.message`
+    // carries the same value for a human or a log line.
+    const gate = await response.json();
+    assert.equal(gate.error.code, 'tool_execution_not_verified');
+    assert.equal(gate.error.type, 'server_error');
+    assert.equal(gate.executionMode, 'chat-only');
   }
 });

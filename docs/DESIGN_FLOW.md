@@ -326,6 +326,30 @@ the reason it was made.
   returned `Example Domain`. `web_search` reported `search_backend_not_configured`
   with no backend and returned normalized results with one.
 
+### 3.16 One error shape, and it is the one clients actually read
+
+- **Where:** `src/http/json.js` (`send`), `src/server.js` (the chat route),
+  `src/providers/masking/provider-mask.js` (`logprobs`).
+- **What:** every 4xx/5xx body is the OpenAI error envelope
+  `{error:{message,type,param,code}}`. The success shapes — `chat.completion`,
+  `chat.completion.chunk`, `/v1/models` — were already correct.
+- **How:** `send` rewrites a string `error` into the envelope on the way out, so
+  none of the 144 call sites had to change. `code` and `message` carry the same
+  value, `type` is derived from the status (`invalid_request_error` /
+  `rate_limit_error` / `server_error`), and `param` is taken from the body when
+  the caller passed a string. A success body is never touched. Sibling fields the
+  handler added (`executionMode`, `required`, `toolId`) survive next to `error`.
+- **Why:** an OpenAI SDK reads `error.message` and guards the lookup with a bare
+  `except`, so a string `error` degraded silently to "Error code: 401" with no
+  reason — easy to miss, impossible for a client to act on. The chat route also
+  accepted a request with neither `messages` nor `goal` and answered it with a
+  completion about the literal string "chat request", hiding a client bug.
+- **Proof:** live — 400 `messages_required` (with `param:"messages"`), 401
+  `application_unauthorized_or_expired` and 404 `not_found` all carry the
+  envelope; a 200 chat response still carries `choices[0].logprobs = null`.
+  `tests/phase74-openai-compat.test.js` (8 tests) pins the envelope, the status
+  mapping and the `logprobs` rule.
+
 ---
 
 ## 4. The map — where each concern lives
@@ -411,7 +435,7 @@ scripts/         bootstrap, OS runtime setup, deployment verification
 | `instances/zc-10001/.env` dead MCP keys | left in place | deliberately untouched |
 | Per-application MCP credentials | `NOT_IMPLEMENTED` | an external MCP endpoint carries one credential set on the endpoint (`endpoint.headers`, set at registration). Injecting each application's own token at call time is the next change; until then a per-shop token means a per-shop endpoint. Documented in `docs/LARAVEL_INTEGRATION.md` §18.7 |
 
-Regression baseline at the time of writing: **342 tests, 340 pass, 2 fail**
+Regression baseline at the time of writing: **350 tests, 348 pass, 2 fail**
 (both listed above). The two failures are left failing rather than silenced.
 
 ---
