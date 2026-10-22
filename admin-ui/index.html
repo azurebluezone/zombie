@@ -566,7 +566,12 @@ the router's candidate list and priority</div>
           <input type="text" id="pfDefaultModel" placeholder="pick a model below" readonly></label>
       </div>
       <div class="field" style="margin-bottom:10px">
-        <span style="display:block;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:5px;font-weight:600">Models <i class="muted" style="text-transform:none">(server catalog — never typed by hand)</i></span>
+        <div class="inline" style="margin-bottom:5px">
+          <span style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600">Models <i class="muted" style="text-transform:none">(server catalog — never typed by hand)</i></span>
+          <span class="spacer" style="flex:1"></span>
+          <button type="button" class="btn ghost sm" id="pfSelectAll">Select all</button>
+          <button type="button" class="btn ghost sm" id="pfSelectClear">Clear</button>
+        </div>
         <div class="models-grid" id="pfModels"><div class="empty" style="padding:14px">Press Connection to load the vendor's model list.</div></div>
       </div>
       <div class="inline">
@@ -704,7 +709,8 @@ function showResponse({title,ok,latencyMs,meta,view,data}){
 
 /* ───────────────────────── provider add / edit ───────────────────────── */
 let editingProvider=null;
-let providerDraftModels=[];
+let providerDraftModels=[];      // full catalog returned by the probe
+let providerSelectedModels=[];   // the subset that belongs to this provider
 
 function lowestFreePriority(excludeId){
   const used=new Set(state.providers.filter(p=>p.id!==excludeId).map(p=>Number(p.priority)));
@@ -720,18 +726,54 @@ function priorityOptions(current){
   }
   return html;
 }
-function renderModelPicker(selected){
+function pickerCount(){
+  $('#pfModelsCount').textContent=providerSelectedModels.length+' of '+providerDraftModels.length+' selected';
+}
+function pickerSync(selectedDefault){
+  const box=$('#pfModels');
+  const chosen=new Set(providerSelectedModels);
+  box.querySelectorAll('.model-pick').forEach(pick=>{
+    const cb=pick.querySelector('input[type=checkbox]');
+    const radio=pick.querySelector('input[type=radio]');
+    const on=chosen.has(cb.value);
+    cb.checked=on;
+    pick.classList.toggle('sel',on);
+    radio.disabled=!on;
+    radio.checked=on && cb.value===selectedDefault;
+  });
+  pickerCount();
+}
+function renderModelPicker(selectedDefault){
   const box=$('#pfModels');
   if(!providerDraftModels.length){
-    box.innerHTML='<div class="empty" style="padding:14px">Press Connection to load the vendor&rsquo;s model list.</div>';
+    box.innerHTML='<div class="empty" style="padding:14px">Press Connection to load the vendor\u2019s model list.</div>';
     $('#pfModelsCount').textContent=''; return;
   }
-  box.innerHTML=providerDraftModels.map(m=>`<label class="model-pick ${m===selected?'sel':''}"><input type="radio" name="pfModelPick" value="${esc(m)}" ${m===selected?'checked':''}><span>${esc(m)}</span></label>`).join('');
-  $('#pfModelsCount').textContent=providerDraftModels.length+' models';
-  box.querySelectorAll('input[type=radio]').forEach(r=>r.addEventListener('change',()=>{
-    $('#pfDefaultModel').value=r.value;
-    box.querySelectorAll('.model-pick').forEach(x=>x.classList.toggle('sel',x.querySelector('input').checked));
+  const chosen=new Set(providerSelectedModels);
+  box.innerHTML=providerDraftModels.map(m=>{
+    const on=chosen.has(m);
+    return `<label class="model-pick ${on?'sel':''}"><input type="checkbox" value="${esc(m)}" ${on?'checked':''}><span style="flex:1">${esc(m)}</span><input type="radio" name="pfModelDefault" value="${esc(m)}" title="default model" aria-label="default model" ${on?'':'disabled'} ${m===selectedDefault?'checked':''}></label>`;
+  }).join('');
+  box.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.addEventListener('change',()=>{
+    const model=cb.value;
+    if(cb.checked){ if(!providerSelectedModels.includes(model)) providerSelectedModels.push(model); }
+    else providerSelectedModels=providerSelectedModels.filter(x=>x!==model);
+    let def=$('#pfDefaultModel').value.trim();
+    if(!providerSelectedModels.includes(def)) def=providerSelectedModels[0]||'';
+    $('#pfDefaultModel').value=def;
+    pickerSync(def);
   }));
+  box.querySelectorAll('input[type=radio]').forEach(r=>r.addEventListener('change',()=>{
+    if(r.checked) $('#pfDefaultModel').value=r.value;
+  }));
+  pickerCount();
+}
+function pickerSelectAll(all){
+  providerSelectedModels=all?[...providerDraftModels]:[];
+  let def=$('#pfDefaultModel').value.trim();
+  if(!providerSelectedModels.includes(def)) def=providerSelectedModels[0]||'';
+  $('#pfDefaultModel').value=def;
+  pickerSync(def);
 }
 function openProviderModal(id){
   editingProvider=id||null;
@@ -749,10 +791,11 @@ function openProviderModal(id){
   $('#pfEnabled').checked=p?p.enabled!==false:true;
   $('#pfKeyHint').value=p?.keyEnvVar||('PROVIDER_KEY_'+String(p?.id||'').toUpperCase().replace(/[^A-Z0-9]+/g,'_'));
   providerDraftModels=[...(p?.models||[])];
+  providerSelectedModels=[...providerDraftModels];
   renderModelPicker(p?.defaultModel||providerDraftModels[0]||'');
   const st=$('#pfConnState'); st.style.color='var(--muted)';
   st.textContent=p
-    ? `${p.baseUrlEnv?'Base URL is seeded from '+p.baseUrlEnv+'. ':''}${providerDraftModels.length} model(s) already stored. Press Connection to verify; a success is cached for 6 hours.`
+    ? `${p.baseUrlEnv?'Base URL is seeded from '+p.baseUrlEnv+'. ':''}${providerDraftModels.length} model(s) stored. Tick every model this provider should serve; the radio marks the default. Press Connection to refresh the catalog (cached 6h).`
     : 'Connection asks the endpoint for its own model list. A success is cached for 6 hours, so the form does not flip unverified on re-open. The API key stays in the runtime environment.';
   $('#pfFoot').textContent='';
   openModal('providerModal');
@@ -777,10 +820,13 @@ async function probeConnection(){
       st.textContent='Connection failed: '+(d.error||'unknown')+(d.latencyMs!=null?' · '+fmtMs(d.latencyMs):'')+' — the model list stays empty; nothing is invented.';
       return;
     }
+    const previous=new Set(providerSelectedModels);
     providerDraftModels=[...new Set(d.models||[])];
     if(!providerDraftModels.length){ st.style.color='var(--warn)'; st.textContent='The endpoint answered but reported no models.'; return; }
+    providerSelectedModels=providerDraftModels.filter(m=>previous.has(m));
     const keep=$('#pfDefaultModel').value;
-    const pick=providerDraftModels.includes(keep)?keep:(d.defaultModel||providerDraftModels[0]);
+    const pick=providerSelectedModels.includes(keep)?keep:(providerSelectedModels[0]||(providerDraftModels.includes(d.defaultModel)?d.defaultModel:providerDraftModels[0]));
+    if(!providerSelectedModels.length) providerSelectedModels=[pick];
     $('#pfDefaultModel').value=pick;
     renderModelPicker(pick);
     st.style.color='var(--brand)';
@@ -797,14 +843,15 @@ async function saveProvider(){
     baseUrl:$('#pfBaseUrl').value.trim(),
     driver:$('#pfDriver').value,
     protocol:$('#pfDriver').value,
-    defaultModel:$('#pfDefaultModel').value.trim()||providerDraftModels[0]||'',
+    defaultModel:$('#pfDefaultModel').value.trim()||providerSelectedModels[0]||'',
     priority:Number($('#pfPriority').value||lowestFreePriority(editingProvider)),
-    models:providerDraftModels,
+    models:[...providerSelectedModels],
     enabled:$('#pfEnabled').checked
   };
   const st=$('#pfConnState');
   if(!body.baseUrl){ st.style.color='var(--danger)'; st.textContent='baseUrl is required.'; return; }
-  if(!body.models.length){ st.style.color='var(--danger)'; st.textContent='Press Connection first — the model list must come from the provider.'; return; }
+  if(!body.models.length){ st.style.color='var(--danger)'; st.textContent='Select at least one model from the server catalog.'; return; }
+  if(!body.models.includes(body.defaultModel)) body.defaultModel=body.models[0];
   const btn=$('#pfSave'); btn.disabled=true; btn.textContent='Saving…';
   try{
     let d;
@@ -1542,6 +1589,8 @@ $('#btnDisconnect').addEventListener('click',()=>{ disconnect(); toast('disconne
 $('#btnRefreshProviders').addEventListener('click',()=>refreshAll());
 $('#btnRefreshModels').addEventListener('click',()=>refreshAll());
 $('#btnAddProvider').addEventListener('click',()=>openProviderModal(null));
+$('#pfSelectAll').addEventListener('click',()=>pickerSelectAll(true));
+$('#pfSelectClear').addEventListener('click',()=>pickerSelectAll(false));
 $('#pfConnect').addEventListener('click',probeConnection);
 $('#pfBaseUrl').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); probeConnection(); }});
 $('#pfSave').addEventListener('click',saveProvider);
