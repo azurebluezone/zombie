@@ -4,7 +4,7 @@
 > কোড আর টেস্ট চালিয়ে সংখ্যাগুলো মিলিয়ে নাও। কোড আর এই ডকুমেন্টের মধ্যে
 > অমিল থাকলে **কোড জেতে** — এই ফাইল তখন ভুল, ঠিক করে নিতে হবে।
 >
-> Baseline: code HEAD `596b1ff` + এই commit-এর tool-access change.
+> Baseline: code HEAD `596b1ff`; tool-access change + this document: `4fa1946`.
 > Runtime: `/home/xubuntu/zombie`, v0.49.0, API `127.0.0.1:9999`.
 > Admin UI (dev): `http://127.0.0.1:8088`; nginx edge: `https://192.168.1.144:8443`.
 
@@ -307,6 +307,7 @@ journalctl -u zombiecoder-runtime -n 50 --no-pager
 | `4bcd255` | multi-select provider model picker |
 | `f2c7daf` | declarative SQLite schema, env base URL, generic custom provider |
 | `99472d7` | admin UI redesign, provider modal/probe, agent/tool tests |
+| `4fa1946` | tool access default `unrestricted`; status doc, changelog, docs |
 | `1a5fce8` | storage durability + consistent backups |
 | `8f42425` | nginx edge TLS + control-plane rate limit |
 
