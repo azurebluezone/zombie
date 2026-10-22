@@ -632,6 +632,15 @@ the router's candidate list and priority</div>
         </select>
         <div class="hint">Tool mode sends live tool definitions. A reply that only <i>says</i> it would call a tool is not a call and is counted as 0.</div>
       </label>
+      <div class="grid c2">
+        <label class="field"><span>Project root <i class="muted" style="text-transform:none">(optional)</i></span>
+          <input type="text" id="atProjectRoot" placeholder="/path/to/the/project" autocomplete="off" spellcheck="false">
+          <div class="hint">The same path scope the chat path uses. Empty means the agent has no project context.</div></label>
+        <div class="field"><span>Tool surface</span>
+          <label class="inline" style="gap:6px"><input type="checkbox" id="atAllTools" style="width:auto"><span class="hint" style="margin:0">offer every runnable tool</span></label>
+          <div class="hint">Unchecked: the runtime selects tools from this prompt (context-aware). Checked: every runnable tool with a schema is offered, so any agent can reach any tool for the test.</div>
+        </div>
+      </div>
       <label class="field"><span>Prompt</span>
         <textarea id="atPrompt" style="min-height:110px">Reply with the single word: ok</textarea></label>
     </div>
@@ -1342,6 +1351,8 @@ function openAgentTest(agentId){
   $('#atRoute').textContent=a.mappedModel||'not mapped';
   $('#atMode').value='chat';
   $('#atPrompt').value='Reply with the single word: ok';
+  $('#atProjectRoot').value=a.workingDirectory||'';
+  $('#atAllTools').checked=false;
   openModal('agentTestModal');
 }
 async function runAgentTest(){
@@ -1350,21 +1361,32 @@ async function runAgentTest(){
   const prompt=$('#atPrompt').value.trim()||(mode==='tool'?'Call a tool that can echo a value, then report the result.':'hello');
   const btn=$('#atRun'); btn.disabled=true; btn.textContent='Sending…';
   try{
-    const d=await api('/v1/admin/agents/'+encodeURIComponent(agentId)+'/test',{method:'POST',body:{mode,prompt}});
+    const d=await api('/v1/admin/agents/'+encodeURIComponent(agentId)+'/test',{method:'POST',body:{mode,prompt,projectRoot:$('#atProjectRoot').value.trim(),allTools:$('#atAllTools').checked}});
     const calls=d.toolCalls||[];
+    const ctx=d.context||{};
+    const ctxLine=ctx.available?('context: '+ctx.bytes+' bytes · SSOT '+ctx.ssotSections+' section(s) · syllabus '+ctx.syllabusEntries+' · memory '+ctx.memoryEntries+' · recent '+ctx.recentCount)
+      :'context: unavailable';
+    const toolLine=ctx.toolSurface?('tools: '+ctx.toolSurface.count+' offered / '+ctx.toolSurface.allowedCount+' allowed ('+ctx.toolSurface.mode+')'):'';
     let view;
     if(!d.ok){
       view='request failed\n\nerror: '+(d.error||'agent_test_failed');
     }else if(mode==='tool'){
-      view=['mode: tool','provider route: '+(d.providerId||'?')+' · '+(d.model||'?'),'','tool calls: '+d.toolCallCount,]
+      view=['mode: tool','provider route: '+(d.providerId||'?')+' · '+(d.model||'?'),
+        ctxLine, ...(ctx.projectRoot?['project root: '+ctx.projectRoot]:['project root: not supplied']),
+        ...(ctx.persona?['persona: '+(ctx.persona.name||ctx.persona.id)]:[]),
+        ...(ctx.systemPromptBytes?['system prompt: '+ctx.systemPromptBytes+' bytes']:[]),
+        ...(toolLine?[toolLine]:[]),'','tool calls: '+d.toolCallCount,]
         .concat(calls.length?calls.map(c=>`${c.function?.name}(${c.function?.arguments||''})`):['(none — the model did not emit a tool_call; prose is not counted)'])
         .concat(['','content:',String(d.content||'(empty)')]).join('\n');
     }else{
-      view=['mode: chat','provider route: '+(d.providerId||'?')+' · '+(d.model||'?'),'','answer:',String(d.content||'(empty content)')].join('\n');
+      view=['mode: chat','provider route: '+(d.providerId||'?')+' · '+(d.model||'?'),
+        ctxLine, ...(ctx.projectRoot?['project root: '+ctx.projectRoot]:['project root: not supplied']),
+        ...(ctx.persona?['persona: '+(ctx.persona.name||ctx.persona.id)]:[]),
+        ...(ctx.systemPromptBytes?['system prompt: '+ctx.systemPromptBytes+' bytes']:[]),'','answer:',String(d.content||'(empty content)')].join('\n');
     }
     closeModal('agentTestModal');
     showResponse({title:'Agent test · '+agentId,ok:d.ok,latencyMs:d.latencyMs,
-      meta:[['public',d.publicModel||('zombiecoder/'+agentId)],['route',(d.providerId||'?')+' / '+(d.model||'?')],['mode',mode],['finish',d.finishReason||'—']],
+      meta:[['public',d.publicModel||('zombiecoder/'+agentId)],['route',(d.providerId||'?')+' / '+(d.model||'?')],['mode',mode],['context',ctx.available?(ctx.bytes+' bytes'):'—'],['tools',ctx.toolSurface?(ctx.toolSurface.count+' / '+ctx.toolSurface.allowedCount):'—'],['finish',d.finishReason||'—']],
       view,data:d});
     await refreshAll({silent:true});
   }catch(e){

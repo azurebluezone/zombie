@@ -482,6 +482,26 @@ function boundedConversation(inputMessages, recentSession, archiveSession, userI
   return {messages:out, archiveSelected:bounded.archive.length, bytes:Buffer.byteLength(JSON.stringify(out)), maxBytes:config.contextBudgetBytes};
 }
 
+// The compiled context is the document the model actually received. The response
+// used to expose only the context *refs* (contextId/evidence), so a client saw an
+// empty `context` object even when SSOT/syllabus/memory had been compiled into the
+// prompt. This summary is bounded and carries no prompt text.
+function compiledContextSummary(compiled, extra = {}) {
+  if (!compiled) return { available: false, ...extra };
+  return {
+    available: true,
+    bytes: Buffer.byteLength(JSON.stringify(compiled)),
+    projectRoot: compiled.facts?.projectRoot ?? null,
+    workingDirectory: compiled.facts?.workingDirectory ?? null,
+    sessionId: compiled.facts?.sessionId ?? null,
+    ssotSections: compiled.ssot?.sections?.length ?? 0,
+    syllabusEntries: compiled.syllabus?.length ?? 0,
+    memoryEntries: compiled.memory?.length ?? 0,
+    recentCount: compiled.recent?.length ?? 0,
+    ...extra
+  };
+}
+
 function latestUserMessage(messages = [], fallback = '') {
   const user = Array.isArray(messages) ? messages.filter(m => m?.role === 'user').at(-1) : null;
   return user ? {role:'user', content:user.content ?? ''} : {role:'user', content:fallback};
@@ -1188,29 +1208,87 @@ const requestHandler = async (req,res) => {
       const prompt=String(input?.prompt ?? (mode==='tool'?'Call a tool that can echo a value, then report the result.':'Reply with the single word: ok')).slice(0,4000);
       const mapping=(await store.read('agentModelMappings',[])).find(m=>m.agentId===agentId);
       if (!mapping?.model) return send(res,400,{error:'agent_model_not_mapped',agentId,message:'Assign an upstream model to this agent first (PUT /v1/admin/agent-model-mappings/{agentId}).'});
-      const persona=(await personas.list()).find(p=>p.id===agentId);
-      const system=String(persona?.persona ?? '').trim();
-      const messages=[...(system?[{role:'system',content:system}]:[]),{role:'user',content:prompt}];
-      let tools;
-      if (mode==='tool') {
-        const rows=await toolsRegistry.list();
-        tools=rows.filter(t=>t.status!=='DISABLED' && t.metadata?.toolSchema).slice(0,8).map(t=>({
-          type:'function',
-          function:{name:t.id,description:String(t.description||t.name||t.id),parameters:t.metadata.toolSchema}
-        }));
-        if (!tools.length) return send(res,400,{error:'no_tool_schema_available'});
+      // Run the same context pipeline as /v1/chat/completions. A test that sent only
+      // the persona text proved the route answered, not that this agent's identity,
+      // path scope, SSOT, syllabus and memory reached the model. That is why the
+      // console reported an empty context for a working tool call.
+      const scope=await resolveAgentScope(agentId,{requestedRoot:input?.projectRoot,requestedWorkingDirectory:input?.workingDirectory});
+      const projectRoot=scope.projectRoot;
+      if (projectRoot) await autoSetup.ensure(projectRoot);
+      const project=projectRoot?await ssot.read(projectRoot):null;
+      const memoryDoc=projectRoot?await memory.recent(projectRoot,10):null;
+      const syllabusDoc=projectRoot?await syllabus.read(projectRoot):null;
+      const rows=await toolsRegistry.list();
+      const allowedSurface=await runnableToolIds();
+      const schemaIds=rows.filter(t=>t.status!=='DISABLED'&&t.metadata?.toolSchema).map(t=>t.id);
+      const requestedTools=Array.isArray(input?.toolIds)?input.toolIds.map(String).filter(id=>allowedSurface.includes(id)):[];
+      if (Array.isArray(input?.toolIds)&&input.toolIds.length&&!requestedTools.length) {
+        return send(res,400,{error:'requested_tool_not_runnable',agentId,toolIds:input.toolIds});
       }
-      // Same router the chat path uses, so a public alias (zombie-mini) resolves
-      // exactly as it would for a client instead of being treated as a literal id.
-      const route=await smartRouter.candidates({model:mapping.model,...(tools?{tools,allowJsonToolFallback:true}:{})});
+      const selection=requestedTools.length?null:selectToolSurface({
+        text:selectionText({goal:prompt,expectedOutcome:input?.expectedOutcome,messages:[{role:'user',content:prompt}]}),
+        availableToolIds:allowedSurface,
+        requestedToolIds:[],
+        profileToolIds:[],
+        mode:config.toolSurfaceMode,
+        maxTools:config.toolSurfaceMax
+      });
+      let surfaceMode='full_surface';
+      let toolIds=[];
+      if (mode==='tool') {
+        if (requestedTools.length) { toolIds=requestedTools; surfaceMode='request_named_tools'; }
+        else if (input?.allTools===true) { toolIds=allowedSurface.filter(id=>schemaIds.includes(id)); surfaceMode='all_runnable'; }
+        else { toolIds=(selection?.toolIds??allowedSurface); surfaceMode='context_selected'; }
+        // Offer only tools that carry a schema; a name without one cannot be called.
+        toolIds=toolIds.filter(id=>schemaIds.includes(id));
+        // The console's default prompt asks for an echo. The selection optimises for
+        // work tools, so keep the echo fixture reachable for exactly that prompt.
+        if (/echo/i.test(prompt)&&schemaIds.includes('runtime_echo')) toolIds=['runtime_echo',...toolIds.filter(id=>id!=='runtime_echo')];
+        if (!toolIds.length) toolIds=schemaIds.slice(0,config.toolSurfaceMax);
+        if (!input?.allTools) toolIds=[...new Set(toolIds)].slice(0,config.toolSurfaceMax);
+        if (!toolIds.length) return send(res,400,{error:'no_tool_schema_available'});
+      }
+      const taskPolicy=buildTaskPolicy({...input,goal:prompt,toolIds:mode==='tool'?toolIds:[]});
+      const compiledContext=compileContext({
+        goal:prompt,userInput:prompt,
+        recent:[{role:'user',content:prompt}],
+        memory:memoryDoc??[],ssot:project,syllabus:syllabusDoc,
+        projectRoot,workingDirectory:input?.workingDirectory??projectRoot,
+        sessionId:input?.sessionId??null,taskPolicy,
+        maxBytes:config.compiledContextBytes,recentLimit:config.contextRecentMessages
+      });
+      const agentPrepared=await agentRunner.prepare({agentId,personaId:agentId,goal:prompt,expectedOutcome:input?.expectedOutcome,tools:toolIds});
+      const persona=agentPrepared.persona;
+      const toolCatalog=rows.filter(t=>toolIds.includes(t.id)&&t.metadata?.toolSchema);
+      const tools=mode==='tool'?toolCatalog.map(t=>({
+        type:'function',
+        function:{name:t.id,description:String(t.description||t.name||t.id),parameters:t.metadata.toolSchema}
+      })):[];
+      const route=await smartRouter.candidates({model:mapping.model,...(tools.length?{tools,allowJsonToolFallback:true}:{})});
       const candidates=route.candidates;
       if (!candidates.length) return send(res,400,{error:'agent_model_unroutable',agentId,model:mapping.model});
+      const systemMessage=buildSystemMessage({
+        constitution:CORE_CONSTITUTION,agent:agentPrepared.agent,persona,goal:prompt,
+        expectedOutcome:input?.expectedOutcome,projectRoot,ssot:project,syllabus:syllabusDoc,
+        memory:memoryDoc,session:null,route,tools:toolIds,toolCatalog,compiledContext
+      });
+      const messages=[systemMessage,{role:'user',content:prompt}];
+      const contextView={
+        ...compiledContextSummary(compiledContext,{
+          persona:{id:persona?.id??agentId,name:persona?.name??null},
+          toolSurface:{count:toolIds.length,toolIds,allowedCount:allowedSurface.length,mode:surfaceMode},
+          systemPromptBytes:Buffer.byteLength(String(systemMessage.content)),
+          systemPromptPreview:String(systemMessage.content).slice(0,1200),
+          taskPolicy:{profileId:taskPolicy.profileId,decision:taskPolicy.decision,consentRequired:taskPolicy.consentRequired}
+        }),
+        compiled:compiledContext
+      };
       const startedAt=Date.now();
       const providerId=candidates[0].providerId;
       try {
         const provider=await providers.resolve(providerId);
         const model=await providers.resolveModel(providerId,candidates[0].model);
-        const raw=await provider.chatCompletions({model,messages,stream:false,...(tools?{tools,tool_choice:'auto'}:{})});
+        const raw=await provider.chatCompletions({model,messages,stream:false,...(tools.length?{tools,tool_choice:'auto'}:{})});
         const canonicalInput=typeof provider.toCanonical==='function'?provider.toCanonical(raw):raw;
         const canonical=normalizer.normalize(canonicalInput,{model,providerId:provider.id});
         const message=canonical?.choices?.[0]?.message??{};
@@ -1221,11 +1299,11 @@ const requestHandler = async (req,res) => {
           toolCalls:Array.isArray(toolCalls)&&toolCalls.length?toolCalls:null,
           toolCallCount:Array.isArray(toolCalls)?toolCalls.length:0,
           finishReason:canonical?.choices?.[0]?.finish_reason??null,
-          response:canonical
+          response:canonical,context:contextView
         });
       } catch (error) {
         const code=String(error?.message??'agent_test_failed').replace(/[^a-zA-Z0-9_.:-]/g,'_').slice(0,100);
-        return send(res,200,{ok:false,agentId,mode,providerId,model:mapping.model,latencyMs:Date.now()-startedAt,error:code});
+        return send(res,200,{ok:false,agentId,mode,providerId,model:mapping.model,latencyMs:Date.now()-startedAt,error:code,context:contextView});
       }
     }
     // Join the three records an operator otherwise has to assemble by hand: the
@@ -1833,7 +1911,7 @@ const requestHandler = async (req,res) => {
         // tool.execution.*).
         const toolLoopPublicModel=result.response?.model ?? route.publicModel ?? null;
         const toolLoopRoute={routeId:route.routeId,providerId:'masked',model:route.publicModel || toolLoopPublicModel,publicModel:route.publicModel || toolLoopPublicModel,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status};
-        return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,agentAccess:agentScope.access,toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id),allowedCount:fullSurface.length,mode:surfaceSelection?.mode??'full',reason:surfaceSelection?.reason??(requestedChatTools.length?'request_named_tools':'full_surface'),groups:surfaceSelection?.groups??[],dropped:surfaceSelection?.dropped??[],external:{count:externalSurface.entries.length,endpoints:externalSurface.endpointIds,tools:externalSurface.entries.map(e=>e.qualifiedName),dropped:externalSurface.dropped}},evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy:reportedTaskPolicy}});
+        return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,agentAccess:agentScope.access,context:compiledContextSummary(toolLoopCompiledContext,{persona:{id:agentPrepared.persona?.id??agentId,name:agentPrepared.persona?.name??null},toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id),allowedCount:fullSurface.length,mode:surfaceSelection?.mode??'full',reason:surfaceSelection?.reason??(requestedChatTools.length?'request_named_tools':'full_surface')}}),toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id),allowedCount:fullSurface.length,mode:surfaceSelection?.mode??'full',reason:surfaceSelection?.reason??(requestedChatTools.length?'request_named_tools':'full_surface'),groups:surfaceSelection?.groups??[],dropped:surfaceSelection?.dropped??[],external:{count:externalSurface.entries.length,endpoints:externalSurface.endpointIds,tools:externalSurface.entries.map(e=>e.qualifiedName),dropped:externalSurface.dropped}},evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy:reportedTaskPolicy}});
       }
       if (input.stream === true) {
         const streamContext = await contexts.resolve(input);
@@ -2001,7 +2079,7 @@ const requestHandler = async (req,res) => {
       requestState.agentId=agentPrepared.agent?.id ?? null;
       await recordAgentRun(agentPrepared.agent?.id, 'success', {latencyMs:Date.now()-startedAt, model, providerId:provider.id, path:'chat'});
       await requestLog.info('chat.completed',{applicationId:app.id,agentId:agentPrepared.agent?.id,personaId:agentPrepared.persona?.id,providerId:provider.id,model,sessionId:currentSession?.id ?? null,evidenceStatus:'observed',verified:false,routeId:route.routeId,contextInjected:true});
-      return send(res,200,{...masked,applicationId:app.id,meta:{phase:RUNTIME_PHASE,taskPolicy,agentAccess:plainScope.access,route:{routeId:route.routeId,providerId:'masked',model:route.publicModel || masked.model,publicModel:route.publicModel || masked.model,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status},provider:{name:'ZombieCoder',id:'masked'},model:masked.model,session:currentSession,context,project,syllabus:syllabusDoc,memory:memoryDoc,entities,agent:agentPrepared.agent,persona:agentPrepared.persona,constitution:CORE_CONSTITUTION,sessionMetadata:currentSession?.metadata ?? incomingMetadata,systemPrompt:{injected:true,visibleToClient:false,contextCompiled:true},receivedMessages:Array.isArray(input.messages)?input.messages.length:0,evidence:maskEvidenceForPublic(evidence),verified:false,verificationRequired}});
+      return send(res,200,{...masked,applicationId:app.id,context:{...context,compiled:compiledContextSummary(compiledContext,{persona:{id:personaId,name:agentPrepared.persona?.name??null},toolSurface:{count:requestedToolIds.length,toolIds:requestedToolIds,allowedCount:allToolDefinitions.length}})},meta:{phase:RUNTIME_PHASE,taskPolicy,agentAccess:plainScope.access,route:{routeId:route.routeId,providerId:'masked',model:route.publicModel || masked.model,publicModel:route.publicModel || masked.model,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status},provider:{name:'ZombieCoder',id:'masked'},model:masked.model,session:currentSession,context:{...context,compiled:compiledContextSummary(compiledContext,{persona:{id:personaId,name:agentPrepared.persona?.name??null},toolSurface:{count:requestedToolIds.length,toolIds:requestedToolIds,allowedCount:allToolDefinitions.length}})},project,syllabus:syllabusDoc,memory:memoryDoc,entities,agent:agentPrepared.agent,persona:agentPrepared.persona,constitution:CORE_CONSTITUTION,sessionMetadata:currentSession?.metadata ?? incomingMetadata,systemPrompt:{injected:true,visibleToClient:false,contextCompiled:true},receivedMessages:Array.isArray(input.messages)?input.messages.length:0,evidence:maskEvidenceForPublic(evidence),verified:false,verificationRequired}});
     }
     if (req.method==='GET' && url.pathname==='/api/syllabus') {
       const root=url.searchParams.get('projectRoot')||config.dataDir; await autoSetup.ensure(root); const doc=await syllabus.read(root);
