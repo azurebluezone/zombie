@@ -62,6 +62,9 @@ export class SmartRouter {
         if (models.length && !models.includes(targetModel)) continue;
       } else if (requestedModel && models.length && !models.includes(requestedModel) && provider.defaultModel !== requestedModel) continue;
       else if (!requestedModel) targetModel = provider.defaultModel || models[0] || '';
+      // A model switched off in the console stays in the catalog but must never be
+      // routed to. Checked here as well as in provider routeCandidates().
+      if (Array.isArray(provider.disabledModels) && provider.disabledModels.includes(targetModel)) continue;
       const candidate = {
         providerId: provider.id,
         provider,

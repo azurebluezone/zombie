@@ -73,6 +73,9 @@ export class ProviderRegistry {
       modelAliases: input.modelAliases && typeof input.modelAliases === 'object' && !Array.isArray(input.modelAliases) ? Object.fromEntries(Object.entries(input.modelAliases).map(([k,v]) => [String(k).toLowerCase(), String(v)])) : {},
       syncUrl: input.syncUrl ? String(input.syncUrl) : undefined,
       modelsUpdatedAt: input.modelsUpdatedAt ?? null,
+      // A disabled model stays in the catalog (the vendor still serves it) but is
+      // skipped by routing. Stored as ids, so it survives a refresh of the catalog.
+      disabledModels: Array.isArray(input.disabledModels) ? [...new Set(input.disabledModels.map(String))] : [],
       // Persisted health surface. Without these the admin console could only
       // ever render "unknown": register() rebuilds the record from a fixed
       // field list, so anything not listed here was silently dropped.
@@ -156,6 +159,7 @@ export class ProviderRegistry {
     const requestedModel = String(input.model ?? '').trim();
     return list
       .filter(p => p.enabled !== false && (!requestedProvider || p.id === requestedProvider))
+      .filter(p => !requestedModel || !(Array.isArray(p.disabledModels) && p.disabledModels.includes(requestedModel)))
       .filter(p => !requestedModel || !Array.isArray(p.models) || !p.models.length || p.models.includes(requestedModel) || p.defaultModel === requestedModel)
       .sort((a,b) => (Number(a.priority ?? 999) - Number(b.priority ?? 999)) || String(a.id).localeCompare(String(b.id)));
   }
@@ -165,6 +169,7 @@ export class ProviderRegistry {
     const item = list.find((p) => p.id === id);
     if (!item || item.enabled === false) throw new Error('provider_not_found_or_disabled');
     const requested = String(requestedModel ?? '').trim();
+    if (requested && Array.isArray(item.disabledModels) && item.disabledModels.includes(requested)) throw new Error('model_disabled');
     if (requested) return requested;
     // A shipped placeholder such as REPLACE_WITH_SUPPORTED_GEMINI_MODEL is not a model
     // id. Sending it upstream answered with an opaque provider_http_error that said

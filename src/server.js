@@ -10,6 +10,8 @@ import { id } from './core/ids.js';
 import { McpRegistry, redactEndpoint } from './mcp/registry.js';
 import { buildExternalToolSurface, boundaryEndpointIds } from './mcp/external-surface.js';
 import { ProviderRegistry } from './providers/registry.js';
+import { createProviderAdapter } from './providers/adapters/factory.js';
+import { extractModelIds, pickDefaultModel } from './providers/model-catalog.js';
 import { ContextResolver } from './context/resolver.js';
 import { McpPermissions } from './mcp/permissions.js';
 import { McpAudit } from './mcp/audit.js';
@@ -380,6 +382,55 @@ export function providerKeyFacts(provider, apiKeys = config.providerApiKeys ?? {
 function publicProvider(provider) {
   const {apiKey, api_key, secret, token, ...safe} = provider ?? {};
   return {...safe, baseUrl:maskUrlSecrets(safe.baseUrl), syncUrl:maskUrlSecrets(safe.syncUrl), ...providerKeyFacts(provider)};
+}
+
+// "Test the connection before saving" has to be cheap to press. A successful
+// probe is cached for six hours per (id, baseUrl, driver) so the form does not
+// flip verified → unverified on every keystroke or re-open. Failures are never
+// cached: fixing the env var or URL must take effect on the next click.
+const PROVIDER_PROBE_TTL_MS = 6 * 60 * 60 * 1000;
+const providerProbeCache = new Map();
+function providerKeyEnvName(id) {
+  return `PROVIDER_KEY_${String(id ?? '').toUpperCase().replace(/[^A-Z0-9]+/g,'_')}`;
+}
+async function probeProviderConnection({id, baseUrl, driver, protocol, refresh=false}) {
+  const key = `${id}|${baseUrl}|${driver}`;
+  const cached = providerProbeCache.get(key);
+  if (!refresh && cached && Date.now() - cached.at < PROVIDER_PROBE_TTL_MS) {
+    return {...cached.result, cached: true, checkedAt: new Date(cached.at).toISOString()};
+  }
+  const startedAt = Date.now();
+  const envKey = String(config.providerApiKeys?.[id] ?? '');
+  const facts = {keyPresent:Boolean(envKey), keySource:envKey ? 'env' : 'none', keyEnvVar:providerKeyEnvName(id)};
+  try {
+    const adapter = createProviderAdapter({id, baseUrl, driver:driver || 'openai-compatible', protocol:protocol || driver || 'openai-compatible'}, config);
+    const raw = await adapter.listModels();
+    const models = extractModelIds(raw);
+    const result = {
+      ok:true, models, defaultModel:pickDefaultModel(models, ''),
+      modelCount:models.length, latencyMs:Date.now() - startedAt, ...facts
+    };
+    providerProbeCache.set(key, {at:Date.now(), result});
+    return {...result, cached:false, checkedAt:new Date().toISOString()};
+  } catch (error) {
+    return {
+      ok:false,
+      error:String(error?.message ?? 'provider_probe_failed').replace(/[^a-zA-Z0-9_.:-]/g,'_').slice(0,100),
+      latencyMs:Date.now() - startedAt, ...facts, cached:false, checkedAt:new Date().toISOString()
+    };
+  }
+}
+async function providerPriorityState(id, requested) {
+  const list = await providers.list();
+  const used = new Map(list.filter(p=>p.id!==id).map(p=>[Number(p.priority), p.id]));
+  if (requested !== undefined) {
+    const value = Number(requested);
+    if (!Number.isInteger(value) || value < 1 || value > 10) return {error:'provider_priority_out_of_range'};
+    if (used.has(value)) return {error:'provider_priority_in_use', priority:value, holder:used.get(value)};
+    return {priority:value};
+  }
+  for (let value = 1; value <= 10; value += 1) if (!used.has(value)) return {priority:value};
+  return {error:'provider_priorities_full'};
 }
 // Probe history. A latency number that only lives in a toast is not evidence, so
 // every admin probe is appended to SQLite and can be read back after a restart.
@@ -1003,7 +1054,33 @@ const requestHandler = async (req,res) => {
         const providerId=String(input.id ?? '').toUpperCase().replace(/[^A-Z0-9]+/g,'_');
         return send(res,400,{error:'provider_keys_are_env_only',message:'Set PROVIDER_KEY_'+providerId+' in the runtime environment; provider secrets are never accepted over HTTP or stored in SQLite.'});
       }
-      return send(res,201,{provider:publicProvider(await providers.register(input))});
+      const priorityState=await providerPriorityState(input?.id, input?.priority);
+      if (priorityState.error) return send(res, priorityState.error==='provider_priority_in_use'?409:400, priorityState);
+      return send(res,201,{provider:publicProvider(await providers.register({...input,priority:priorityState.priority}))});
+    }
+    // Connection-first onboarding: probe the endpoint and return the vendor's own
+    // model list, so the operator never types a model id from memory. A success is
+    // cached for six hours (per id+baseUrl+driver); failures are not cached.
+    if (req.method==='POST' && url.pathname==='/v1/admin/providers/probe') {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const input=await body(req,config.maxBodyBytes);
+      const providerId=String(input?.id??'').trim();
+      if (!/^[a-zA-Z0-9._-]{1,64}$/.test(providerId)) return send(res,400,{error:'provider_id_invalid',message:'Use letters, digits, dot, dash or underscore (this becomes PROVIDER_KEY_<ID>).'});
+      const existing=(await providers.list()).find(p=>p.id===providerId);
+      const baseUrl=String(input?.baseUrl??existing?.baseUrl??'').trim();
+      if (!/^https?:\/\//.test(baseUrl)) return send(res,400,{error:'provider_baseUrl_required'});
+      const driver=String(input?.driver??existing?.driver??'openai-compatible');
+      const result=await probeProviderConnection({id:providerId,baseUrl,driver,protocol:String(input?.protocol??existing?.protocol??driver),refresh:input?.refresh===true});
+      return send(res,200,result);
+    }
+    // Re-read PROVIDER_CONFIG_JSON / PROVIDER_KEY_* and refresh the model catalog of
+    // every provider that comes out active. This is the same bootstrap the process
+    // runs at start, exposed so an operator does not have to restart to pick up an
+    // env change.
+    if (req.method==='POST' && url.pathname==='/v1/admin/providers/sync-env') {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const result=await bootstrapProviders({registry:providers,config,logger});
+      return send(res,200,{ok:true,...result});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/masking-models') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -1044,7 +1121,10 @@ const requestHandler = async (req,res) => {
         const previous=latest.get(key);
         if(!previous || String(run.checkedAt)>String(previous.checkedAt)) latest.set(key,run);
       }
-      return send(res,200,{models:list.flatMap(p=>(p.models??[]).map(model=>({id:`${p.id}:${model}`,providerId:p.id,providerName:p.name,model,enabled:p.enabled!==false,defaultModel:p.defaultModel===model,priority:p.priority??10,lastTest:latest.get(`${p.id}::${model}`) ?? null}))) });
+      return send(res,200,{models:list.flatMap(p=>(p.models??[]).map(model=>{
+        const disabled=Array.isArray(p.disabledModels)&&p.disabledModels.includes(model);
+        return {id:`${p.id}:${model}`,providerId:p.id,providerName:p.name,model,enabled:p.enabled!==false&&!disabled,disabled,defaultModel:p.defaultModel===model,priority:p.priority??10,lastTest:latest.get(`${p.id}::${model}`) ?? null};
+      })) });
     }
     if (req.method==='PATCH' && /^\/v1\/admin\/providers\/[^/]+$/.test(url.pathname)) {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -1057,8 +1137,29 @@ const requestHandler = async (req,res) => {
       }
       // apiKey is stripped as defence in depth: even an old row that somehow holds
       // one must not survive a config edit.
-      const merged={...current,...patch,id:providerId}; delete merged.apiKey; delete merged.api_key;
+      const priorityState=patch?.priority===undefined
+        ? {priority:current.priority ?? 10}
+        : await providerPriorityState(providerId, patch.priority);
+      if (priorityState.error) return send(res, priorityState.error==='provider_priority_in_use'?409:400, priorityState);
+      const merged={...current,...patch,id:providerId,priority:priorityState.priority}; delete merged.apiKey; delete merged.api_key;
       return send(res,200,{provider:publicProvider(await providers.register(merged))});
+    }
+    // Per-model switch. Stored on the provider row (disabledModels) so it survives a
+    // restart and is visible to routing, unlike a checkbox in this page.
+    if (req.method==='PATCH' && /^\/v1\/admin\/providers\/[^/]+\/models\/[^/]+$/.test(url.pathname)) {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const parts=url.pathname.split('/');
+      const providerId=decodeURIComponent(parts[4]);
+      const model=decodeURIComponent(parts[6]);
+      const current=(await providers.list()).find(p=>p.id===providerId);
+      if (!current) return send(res,404,{error:'provider_not_found'});
+      if (!(current.models??[]).includes(model)) return send(res,404,{error:'model_not_found',model});
+      const input=await body(req,config.maxBodyBytes);
+      const enabled=input?.enabled!==false;
+      const disabled=new Set(current.disabledModels??[]);
+      if (enabled) disabled.delete(model); else disabled.add(model);
+      const updated=await providers.register({...current,disabledModels:[...disabled]});
+      return send(res,200,{provider:publicProvider(updated),model,enabled});
     }
     if (req.method==='DELETE' && /^\/v1\/admin\/providers\/[^/]+$/.test(url.pathname)) {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -1075,6 +1176,58 @@ const requestHandler = async (req,res) => {
       }
       return send(res,200,{results});
     }
+    // One real request through an agent's persona and mapping, from the console.
+    // mode=chat proves the route answers; mode=tool sends real tool definitions and
+    // reports whether the model actually emitted tool_calls (a chat reply saying
+    // "I would call X" is not evidence and is not counted as one).
+    if (req.method==='POST' && /^\/v1\/admin\/agents\/[^/]+\/test$/.test(url.pathname)) {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const agentId=decodeURIComponent(url.pathname.split('/')[4]);
+      const input=await body(req,config.maxBodyBytes);
+      const mode=input?.mode==='tool'?'tool':'chat';
+      const prompt=String(input?.prompt ?? (mode==='tool'?'Call a tool that can echo a value, then report the result.':'Reply with the single word: ok')).slice(0,4000);
+      const mapping=(await store.read('agentModelMappings',[])).find(m=>m.agentId===agentId);
+      if (!mapping?.model) return send(res,400,{error:'agent_model_not_mapped',agentId,message:'Assign an upstream model to this agent first (PUT /v1/admin/agent-model-mappings/{agentId}).'});
+      const persona=(await personas.list()).find(p=>p.id===agentId);
+      const system=String(persona?.persona ?? '').trim();
+      const messages=[...(system?[{role:'system',content:system}]:[]),{role:'user',content:prompt}];
+      let tools;
+      if (mode==='tool') {
+        const rows=await toolsRegistry.list();
+        tools=rows.filter(t=>t.status!=='DISABLED' && t.metadata?.toolSchema).slice(0,8).map(t=>({
+          type:'function',
+          function:{name:t.id,description:String(t.description||t.name||t.id),parameters:t.metadata.toolSchema}
+        }));
+        if (!tools.length) return send(res,400,{error:'no_tool_schema_available'});
+      }
+      // Same router the chat path uses, so a public alias (zombie-mini) resolves
+      // exactly as it would for a client instead of being treated as a literal id.
+      const route=await smartRouter.candidates({model:mapping.model,...(tools?{tools,allowJsonToolFallback:true}:{})});
+      const candidates=route.candidates;
+      if (!candidates.length) return send(res,400,{error:'agent_model_unroutable',agentId,model:mapping.model});
+      const startedAt=Date.now();
+      const providerId=candidates[0].providerId;
+      try {
+        const provider=await providers.resolve(providerId);
+        const model=await providers.resolveModel(providerId,candidates[0].model);
+        const raw=await provider.chatCompletions({model,messages,stream:false,...(tools?{tools,tool_choice:'auto'}:{})});
+        const canonicalInput=typeof provider.toCanonical==='function'?provider.toCanonical(raw):raw;
+        const canonical=normalizer.normalize(canonicalInput,{model,providerId:provider.id});
+        const message=canonical?.choices?.[0]?.message??{};
+        const toolCalls=message.tool_calls??raw?.choices?.[0]?.message?.tool_calls??null;
+        return send(res,200,{
+          ok:true,agentId,mode,providerId,model,publicModel:`zombiecoder/${agentId}`,
+          latencyMs:Date.now()-startedAt,content:message.content??null,
+          toolCalls:Array.isArray(toolCalls)&&toolCalls.length?toolCalls:null,
+          toolCallCount:Array.isArray(toolCalls)?toolCalls.length:0,
+          finishReason:canonical?.choices?.[0]?.finish_reason??null,
+          response:canonical
+        });
+      } catch (error) {
+        const code=String(error?.message??'agent_test_failed').replace(/[^a-zA-Z0-9_.:-]/g,'_').slice(0,100);
+        return send(res,200,{ok:false,agentId,mode,providerId,model:mapping.model,latencyMs:Date.now()-startedAt,error:code});
+      }
+    }
     // Join the three records an operator otherwise has to assemble by hand: the
     // agent registry row, its persona text, and the model mapping that decides
     // which upstream serves it. Read-only; writes stay on their own endpoints.
@@ -1089,7 +1242,11 @@ const requestHandler = async (req,res) => {
           id:a.id,name:a.name,status:a.status??null,enabled:a.enabled!==false,
           capabilities:a.capabilities??[],toolBoundary:a.toolBoundary??null,workingDirectory:a.workingDirectory??null,
           persona:p?{id:p.id,name:p.name,role:p.role??'',title:p.title??'',callSign:p.callSign??'',priority:p.priority??null,enabled:p.enabled!==false}:null,
-          mappedModel:mappingByAgent.get(a.id)?.model??null
+          mappedModel:mappingByAgent.get(a.id)?.model??null,
+          // What a client actually sees: maskCanonicalResponse() replaces both the
+          // provider name and the model id with this identity. The mapping above is
+          // operator-only routing state and is never returned by the agent API.
+          publicModel:`zombiecoder/${a.id}`
         };
       });
       return send(res,200,{agents:rows});

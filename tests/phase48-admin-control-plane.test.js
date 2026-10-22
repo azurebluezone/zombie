@@ -14,7 +14,7 @@ async function freePort(){const s=createNetServer();await new Promise((resolve,r
 
 test('phase48 admin UI loads, provider/model routes work, and agent mapping reaches the mapped upstream model',async t=>{
  const observed=[];
- const fixture=createHttpServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{};observed.push({path:req.url,model:body.model,stream:body.stream});res.writeHead(200,{'content-type':'application/json'});if(req.method==='GET'&&req.url==='/v1/models'){res.end(JSON.stringify({data:[{id:'fixture-model',object:'model'}]}));return;}res.end(JSON.stringify({id:'fixture-completion',object:'chat.completion',model:body.model||'fixture-model',choices:[{index:0,message:{role:'assistant',content:'fixture reply'},finish_reason:'stop'}]}));});
+ const fixture=createHttpServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const body=raw?JSON.parse(raw):{};observed.push({path:req.url,model:body.model,stream:body.stream});res.writeHead(200,{'content-type':'application/json'});if(req.method==='GET'&&req.url==='/v1/models'){res.end(JSON.stringify({data:[{id:'fixture-model',object:'model'}]}));return;}if(Array.isArray(body.tools)&&body.tools.length){res.end(JSON.stringify({id:'fixture-tool',object:'chat.completion',model:body.model||'fixture-model',choices:[{index:0,message:{role:'assistant',content:null,tool_calls:[{id:'call_fixture',type:'function',function:{name:body.tools[0].function?.name||'runtime_echo',arguments:'{"value":"x"}'}}]},finish_reason:'tool_calls'}]}));return;}res.end(JSON.stringify({id:'fixture-completion',object:'chat.completion',model:body.model||'fixture-model',choices:[{index:0,message:{role:'assistant',content:'fixture reply'},finish_reason:'stop'}]}));});
  await new Promise(resolve=>fixture.listen(0,'127.0.0.1',resolve));const fixturePort=fixture.address().port;const port=await freePort();const dir=await mkdtemp(path.join(tmpdir(),'zc-phase48-admin-'));const adminToken='phase48-admin-test-token';
  const env={...process.env,ENV_LOADER_ENABLED:'false',HOST:'127.0.0.1',PORT:String(port),ADMIN_TOKEN:adminToken,LOCAL_AUTH_BYPASS:'false',PROVIDER_KEY_FIXTURE_PROVIDER:'fixture-env-secret',PROVIDER_CONFIG_JSON:JSON.stringify([{id:'fixture-provider',name:'Fixture Provider',baseUrl:`http://127.0.0.1:${fixturePort}/v1`,driver:'openai-compatible',protocol:'openai-compatible',models:['fixture-model'],defaultModel:'fixture-model',enabled:true,capabilities:['chat-completions','streaming','model-catalog'],priority:1}]),ALLOW_PLAINTEXT_HTTP:'true',PROVIDER_ALLOW_PRIVATE_NETWORK:'true',PROVIDER_ALLOW_PRIVATE_HOSTS:'127.0.0.1',DATA_DIR:path.join(dir,'data'),SQLITE_PATH:path.join(dir,'data','runtime.sqlite'),LOG_DIR:path.join(dir,'logs'),LOG_TO_STDOUT:'false',UDS_ENABLED:'false',PROVIDER_CATALOG_SYNC_ON_START:'false',ZOMBIECODER_EXECUTION_MODE:'chat-only',EXTERNAL_MCP_URLS:'',PROJECT_ROOTS:''};
  const child=spawn(process.execPath,['src/server.js'],{cwd:root,env,stdio:'ignore'});t.after(async()=>{child.kill('SIGTERM');await Promise.race([new Promise(resolve=>child.once('exit',resolve)),delay(2000)]);if(child.exitCode===null)child.kill('SIGKILL');await new Promise(resolve=>fixture.close(resolve));await rm(dir,{recursive:true,force:true});});
@@ -62,6 +62,27 @@ test('phase48 admin UI loads, provider/model routes work, and agent mapping reac
  assert.equal(typeof joined.enabled,'boolean');
  if(joined.persona){assert.equal('persona' in joined.persona,false,'the long persona text is not shipped in the agent list');}
  assert.equal(JSON.stringify(data).includes('You are Code Guru'),false,'no persona text leaks through the joined view');
+ // Connection probe returns the vendor's own model list; a success is cached for
+ // six hours so the form does not flip verified -> unverified on re-open.
+ r=await fetch(`${base}/v1/admin/providers/probe`,{method:'POST',headers,body:JSON.stringify({id:'fixture-provider'})});assert.equal(r.status,200);data=await r.json();
+ assert.equal(data.ok,true);assert.deepEqual(data.models,['fixture-model']);assert.equal(data.keySource,'env');assert.equal(data.cached,false);
+ r=await fetch(`${base}/v1/admin/providers/probe`,{method:'POST',headers,body:JSON.stringify({id:'fixture-provider'})});data=await r.json();assert.equal(data.cached,true,'a successful probe is cached');
+
+ // Priority is unique across 1..10, and omitted means "lowest free", not 10.
+ r=await fetch(`${base}/v1/admin/providers`,{method:'POST',headers,body:JSON.stringify({id:'priority-one',name:'P1',baseUrl:'https://example.invalid/v1',priority:1})});assert.equal(r.status,409);assert.equal((await r.json()).error.code,'provider_priority_in_use');
+ r=await fetch(`${base}/v1/admin/providers`,{method:'POST',headers,body:JSON.stringify({id:'priority-auto',name:'PA',baseUrl:'https://example.invalid/v1'})});assert.equal(r.status,201);data=await r.json();assert.equal(data.provider.priority,2,'the lowest free priority is assigned');
+ r=await fetch(`${base}/v1/admin/providers/priority-auto`,{method:'PATCH',headers,body:JSON.stringify({priority:1})});assert.equal(r.status,409);
+
+ // Agent test: one real request through the persona and the mapped route. Tool
+ // mode counts real tool_calls; prose that merely mentions a tool is not a call.
+ r=await fetch(`${base}/v1/admin/agents/code-guru/test`,{method:'POST',headers,body:JSON.stringify({prompt:'hi'})});assert.equal(r.status,200);data=await r.json();assert.equal(data.ok,true);assert.equal(data.content,'fixture reply');assert.equal(data.publicModel,'zombiecoder/code-guru');
+ r=await fetch(`${base}/v1/admin/agents/code-guru/test`,{method:'POST',headers,body:JSON.stringify({mode:'tool',prompt:'call a tool'})});assert.equal(r.status,200);data=await r.json();assert.equal(data.ok,true);assert.equal(data.toolCallCount,1);assert.equal(typeof data.toolCalls[0].function.name,'string');
+
+ // A per-model switch persists on the provider row and changes the catalog.
+ r=await fetch(`${base}/v1/admin/providers/fixture-provider/models/fixture-model`,{method:'PATCH',headers,body:JSON.stringify({enabled:false})});assert.equal(r.status,200);data=await r.json();assert.equal(data.enabled,false);
+ r=await fetch(`${base}/v1/admin/models`,{headers});data=await r.json();const switchedOff=data.models.find(m=>m.providerId==='fixture-provider'&&m.model==='fixture-model');assert.equal(switchedOff.enabled,false);assert.equal(switchedOff.disabled,true);
+ r=await fetch(`${base}/v1/admin/providers/fixture-provider/models/fixture-model`,{method:'PATCH',headers,body:JSON.stringify({enabled:true})});assert.equal(r.status,200);
+
  r=await fetch(`${base}/v1/admin/metrics`,{headers});assert.equal(r.status,200);data=await r.json();assert.ok(data.providers.total>=1);assert.ok(data.agents.mapped>=1);
  r=await fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer invalid-app-key`},body:JSON.stringify({model:'zombie-mini',agent:'code-guru',messages:[{role:'user',content:'hello'}]})});
  // Runtime mapping is exercised after valid application authentication below; the admin UI itself must not create an implicit app credential.
