@@ -451,23 +451,30 @@ const requestHandler = async (req,res) => {
     const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
     // CORS preflight: hardening + allowlisted CORS headers were applied above.
     if (req.method==='OPTIONS') { res.writeHead(204); res.end(); return; }
-    // Both bundled pages are fully self-contained (inline style + inline script,
-    // no external assets), so one strict CSP covers them: inline is allowed for
-    // style/script only, and network access is limited to this origin.
-    const PAGE_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
-    if (req.method==='GET' && (url.pathname==='/admin' || url.pathname==='/admin/')) {
-      const html = await readFile(fromRoot('public','admin','index.html'), 'utf8');
-      res.writeHead(200, {'content-type':'text/html; charset=utf-8','content-security-policy':PAGE_CSP});
-      res.end(html); return;
+    // No bundled frontend: this runtime is API-only. UIs are external clients that
+    // receive the base URL and a token as values and are never read from this
+    // process. 410 (not 404) is deliberate — the page used to exist here and its
+    // absence is a boundary, not a typo.
+    if (req.method==='GET' && (url.pathname==='/' || url.pathname==='/chat' || url.pathname==='/chat/' || url.pathname==='/admin' || url.pathname==='/admin/')) {
+      return send(res,410,{error:'frontend_not_bundled',message:'This runtime serves no UI. Use an external client with the API base URL and an application key or ADMIN_TOKEN.',uiConfig:'/v1/ui-config'});
     }
-    // Chat UI is the runtime's front door: only the masking model names are ever
-    // visible to it, real provider/model routing stays server-side.
-    if (req.method==='GET' && (url.pathname==='/' || url.pathname==='/chat' || url.pathname==='/chat/')) {
-      try {
-        const html = await readFile(fromRoot('public','chat.html'), 'utf8');
-        res.writeHead(200, {'content-type':'text/html; charset=utf-8','content-security-policy':PAGE_CSP});
-        res.end(html); return;
-      } catch { /* missing bundle: fall through to the standard 404 */ }
+    // Public, non-secret bootstrap for external UIs. Any client (admin console,
+    // chat client, script) can learn the shape of this runtime without holding an
+    // admin token; authorization still happens per endpoint on every call. Provider
+    // identities and API keys never appear here — only public masking models.
+    if (req.method==='GET' && url.pathname==='/v1/ui-config') {
+      const publicAgents = (await agentsRegistry.list()).map(a => ({id:a.id,name:a.name,role:a.role,publicModel:a.publicModel ?? null}));
+      return send(res,200,{
+        service:'zombiecoder-runtime', version:RUNTIME_VERSION, phase:RUNTIME_PHASE,
+        executionMode:config.executionMode,
+        ui:{bundled:false,admin:'external'},
+        maskingModels:ZOMBIECODER_MODELS,
+        agents:publicAgents,
+        endpoints:{chat:'/v1/chat/completions',models:'/v1/models',health:'/health',mcp:config.mcpServerEnabled ? '/mcp' : null},
+        auth:{admin:'bearer ADMIN_TOKEN',application:'bearer application key'},
+        features:{streaming:true,toolLoop:typeof toolLoop?.execute==='function',agentRuns:typeof agentRunner?.prepare==='function'},
+        generatedAt:new Date().toISOString()
+      });
     }
     if (req.method==='GET' && url.pathname==='/health') {
       const coreModules = {
@@ -963,6 +970,30 @@ const requestHandler = async (req,res) => {
     if (req.method==='GET' && url.pathname==='/v1/admin/masking-models') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       return send(res,200,{models:ZOMBIECODER_MODELS});
+    }
+    // Each normalizer/masking module is testable on its own: the console sends one
+    // payload and gets the exact transform back, without touching a provider. The
+    // same modules the request path uses are the ones under test — no re-implementation.
+    if (req.method==='POST' && url.pathname==='/v1/admin/normalizer/test') {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const input=await body(req, config.maxBodyBytes);
+      const module=String(input.module ?? 'response');
+      try {
+        if (module==='response') {
+          const output=normalizer.normalize(input.payload ?? {}, {model:String(input.model ?? 'admin-probe'),providerId:String(input.providerId ?? 'probe')});
+          return send(res,200,{module,ok:true,output});
+        }
+        if (module==='stream') return send(res,200,{module,ok:true,output:completionToStreamChunk(input.payload ?? {})});
+        if (module==='mask') {
+          const output=maskCanonicalResponse(input.payload ?? {}, {agentId:String(input.agentId ?? 'code-guru'),configuredModel:String(input.model ?? 'zombie-mini'),capabilities:Array.isArray(input.capabilities)?input.capabilities:[]});
+          return send(res,200,{module,ok:true,output});
+        }
+        return send(res,400,{error:'normalizer_module_unknown',modules:['response','stream','mask']});
+      } catch (error) {
+        const raw=String(error?.message ?? 'normalizer_test_failed');
+        const code=/^[a-zA-Z0-9_.:-]{1,100}$/.test(raw)?raw:'normalizer_test_failed';
+        return send(res,200,{module,ok:false,error:code});
+      }
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/models') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});

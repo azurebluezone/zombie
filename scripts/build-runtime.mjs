@@ -15,13 +15,13 @@ const output=path.resolve(root,outputValue??'dist/zombiecoder-runtime');
 const relativeOutput=path.relative(root,output);
 const outputContainsRoot=path.relative(output,root);
 if(!relativeOutput||(!path.isAbsolute(outputContainsRoot)&&outputContainsRoot!=='..'&&!outputContainsRoot.startsWith(`..${path.sep}`)))throw new Error('build_output_must_not_replace_project_root');
-const protectedRoots=['src','tools','scripts','tests','data','public','external-mcp','docs','schemas'];
+const protectedRoots=['src','tools','scripts','tests','data','external-mcp','docs','schemas'];
 if(protectedRoots.some(name=>relativeOutput===name||relativeOutput.startsWith(`${name}${path.sep}`)))throw new Error('build_output_inside_source_tree');
 
 const packageMarker='.zombiecoder-build.json';
 const stage=path.join(path.dirname(output),`.${path.basename(output)}.tmp-${process.pid}-${randomUUID()}`);
 const backup=path.join(path.dirname(output),`.${path.basename(output)}.old-${process.pid}-${randomUUID()}`);
-const entries=['start.js','package.json','README.md','CHANGELOG.md','IMPLEMENTATION_MANIFEST.md','.env.example','src','tools','external-mcp','public','schemas','scripts','docs','integration'];
+const entries=['start.js','package.json','README.md','CHANGELOG.md','IMPLEMENTATION_MANIFEST.md','.env.example','src','tools','external-mcp','schemas','scripts','docs','integration'];
 const excluded=new Set(['.git','.vscode','.env','node_modules','data','logs','tests','dist','build','.zombiecoder','.zombiecoder-runtime.pid']);
 async function exists(file){try{return await lstat(file)}catch(error){if(error.code==='ENOENT')return null;throw error}}
 // A package writes its launcher PID inside its own directory. Replacing that

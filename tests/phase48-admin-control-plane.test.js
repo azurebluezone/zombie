@@ -19,7 +19,10 @@ test('phase48 admin UI loads, provider/model routes work, and agent mapping reac
  const child=spawn(process.execPath,['src/server.js'],{cwd:root,env,stdio:'ignore'});t.after(async()=>{child.kill('SIGTERM');await Promise.race([new Promise(resolve=>child.once('exit',resolve)),delay(2000)]);if(child.exitCode===null)child.kill('SIGKILL');await new Promise(resolve=>fixture.close(resolve));await rm(dir,{recursive:true,force:true});});
  let ready=false;for(let i=0;i<100;i++){if(child.exitCode!==null)assert.fail(`runtime exited ${child.exitCode}`);try{const r=await fetch(`http://127.0.0.1:${port}/health`);if(r.ok){ready=true;break}}catch{}await delay(100)}assert.equal(ready,true,'runtime did not start');
  const base=`http://127.0.0.1:${port}`;const headers={'content-type':'application/json',authorization:`Bearer ${adminToken}`};
- let r=await fetch(`${base}/admin`);assert.equal(r.status,200);assert.match(await r.text(),/ZombieCoder.*Admin Control Plane/);
+ // The runtime ships no UI: /admin is a boundary (410), and external consoles
+ // bootstrap from the public, non-secret /v1/ui-config instead.
+ let r=await fetch(`${base}/admin`);assert.equal(r.status,410);assert.equal((await r.json()).error.code,'frontend_not_bundled');
+ r=await fetch(`${base}/v1/ui-config`);assert.equal(r.status,200);const uiCfg=await r.json();assert.equal(uiCfg.ui.bundled,false);assert.equal(JSON.stringify(uiCfg).includes('fixture-provider'),false);
  r=await fetch(`${base}/v1/admin/providers`,{headers});assert.equal(r.status,200);let data=await r.json();assert.equal(data.providers.some(p=>p.id==='fixture-provider'),true);
  r=await fetch(`${base}/v1/admin/models`,{headers});assert.equal(r.status,200);data=await r.json();assert.equal(data.models.some(m=>m.providerId==='fixture-provider'&&m.model==='fixture-model'),true);
  r=await fetch(`${base}/v1/admin/providers/fixture-provider/health`,{method:'POST',headers,body:'{}'});assert.equal(r.status,200);data=await r.json();assert.equal(data.health.status,'healthy');assert.equal(data.health.modelCount,1);
