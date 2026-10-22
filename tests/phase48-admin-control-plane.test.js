@@ -53,6 +53,15 @@ test('phase48 admin UI loads, provider/model routes work, and agent mapping reac
  r=await fetch(`${base}/v1/admin/providers/secret-mask-test`,{method:'PATCH',headers,body:JSON.stringify({apiKey:'sk-phase48-rotated-77b1'})});assert.equal(r.status,400);data=await r.json();assert.equal(data.error.code,'provider_keys_are_env_only');
  r=await fetch(`${base}/v1/admin/providers/secret-mask-test`,{method:'DELETE',headers});assert.equal(r.status,200);
  r=await fetch(`${base}/v1/admin/agent-model-mappings/code-guru`,{method:'PUT',headers,body:JSON.stringify({model:'zombie-mini'})});assert.equal(r.status,200,await r.text());
+ // The agents view is a join, not a dump: registry row + persona summary + the
+ // model mapping, with the long persona text left behind.
+ r=await fetch(`${base}/v1/admin/agents`,{headers});assert.equal(r.status,200);data=await r.json();
+ assert.ok(Array.isArray(data.agents),'agents is an array');
+ const joined=data.agents.find(a=>a.id==='code-guru');assert.ok(joined,'the registry agent appears in the joined view');
+ assert.equal(joined.mappedModel,'zombie-mini','the mapping is joined into the agent row');
+ assert.equal(typeof joined.enabled,'boolean');
+ if(joined.persona){assert.equal('persona' in joined.persona,false,'the long persona text is not shipped in the agent list');}
+ assert.equal(JSON.stringify(data).includes('You are Code Guru'),false,'no persona text leaks through the joined view');
  r=await fetch(`${base}/v1/admin/metrics`,{headers});assert.equal(r.status,200);data=await r.json();assert.ok(data.providers.total>=1);assert.ok(data.agents.mapped>=1);
  r=await fetch(`${base}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer invalid-app-key`},body:JSON.stringify({model:'zombie-mini',agent:'code-guru',messages:[{role:'user',content:'hello'}]})});
  // Runtime mapping is exercised after valid application authentication below; the admin UI itself must not create an implicit app credential.

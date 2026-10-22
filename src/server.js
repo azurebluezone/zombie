@@ -1075,6 +1075,25 @@ const requestHandler = async (req,res) => {
       }
       return send(res,200,{results});
     }
+    // Join the three records an operator otherwise has to assemble by hand: the
+    // agent registry row, its persona text, and the model mapping that decides
+    // which upstream serves it. Read-only; writes stay on their own endpoints.
+    if (req.method==='GET' && url.pathname==='/v1/admin/agents') {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const [agentRows,personaRows,mappingRows]=await Promise.all([agentsRegistry.list(),personas.list(),store.read('agentModelMappings',[])]);
+      const personaById=new Map(personaRows.map(p=>[p.id,p]));
+      const mappingByAgent=new Map(mappingRows.map(m=>[m.agentId,m]));
+      const rows=agentRows.map(a=>{
+        const p=personaById.get(a.id);
+        return {
+          id:a.id,name:a.name,status:a.status??null,enabled:a.enabled!==false,
+          capabilities:a.capabilities??[],toolBoundary:a.toolBoundary??null,workingDirectory:a.workingDirectory??null,
+          persona:p?{id:p.id,name:p.name,role:p.role??'',title:p.title??'',callSign:p.callSign??'',priority:p.priority??null,enabled:p.enabled!==false}:null,
+          mappedModel:mappingByAgent.get(a.id)?.model??null
+        };
+      });
+      return send(res,200,{agents:rows});
+    }
     if (req.method==='GET' && url.pathname==='/v1/admin/model-tests') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const provider=url.searchParams.get('provider');

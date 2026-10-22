@@ -85,8 +85,9 @@
   /* ── table ── */
   table{width:100%;border-collapse:collapse}
   th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
-  #providersTable,#modelsList,#toolsTable,#mcpTable{overflow-x:auto}
+  #providersTable,#modelsList,#agentsTable,#toolsTable,#mcpTable{overflow-x:auto}
   #providersTable table{min-width:700px}
+  #agentsTable table{min-width:900px}
   #toolsTable table,#mcpTable table{min-width:560px}
   th{font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:#6f7c76;font-weight:600}
   tbody tr:hover{background:var(--card-hover)}
@@ -169,6 +170,7 @@
 
     <div class="nav-group">
       <div class="nav-label">Runtime</div>
+      <button class="nav-item" data-view="agents">👤 <span>Agents &amp; Personas</span><span class="count" id="cntAgents">–</span></button>
       <button class="nav-item" data-view="tools">⌘ <span>Tools</span><span class="count" id="cntTools">–</span></button>
       <button class="nav-item" data-view="mcp">⇄ <span>MCP</span></button>
       <button class="nav-item" data-view="system">≡ <span>System</span></button>
@@ -315,6 +317,46 @@
         <div class="grid c3" id="benchCards"></div>
       </section>
 
+      <!-- ── Agents & Personas ── -->
+      <section class="view" id="view-agents">
+        <div class="card">
+          <h2>Agents <span class="tag" id="agentsTag">–</span></h2>
+          <div class="hint" style="margin-bottom:10px">The model mapping decides which upstream serves an agent. The persona is the text the agent is given; it is editable below.</div>
+          <div id="agentsTable"><div class="empty">Connect to load agents.</div></div>
+        </div>
+        <div class="grid c2">
+          <div class="card">
+            <h2>Persona editor <span class="tag" id="personaTag">PATCH /v1/admin/personas/{id}</span></h2>
+            <div class="grid c2">
+              <label class="field"><span>Persona</span><select id="peSelect"><option value="">— select —</option></select></label>
+              <label class="field"><span>Priority</span><input type="text" id="pePriority" placeholder="1"></label>
+              <label class="field"><span>Name</span><input type="text" id="peName" autocomplete="off"></label>
+              <label class="field"><span>Title</span><input type="text" id="peTitle" autocomplete="off"></label>
+              <label class="field"><span>Role</span><input type="text" id="peRole" autocomplete="off"></label>
+              <label class="field"><span>Call sign</span><input type="text" id="peCallSign" autocomplete="off"></label>
+            </div>
+            <label class="field"><span>Persona text</span><textarea id="peText" style="min-height:210px"></textarea></label>
+            <div class="inline">
+              <button class="btn primary" id="peSave">Save persona</button>
+              <button class="btn" id="peNew">New persona</button>
+              <label class="inline" style="margin-left:auto;gap:6px"><span class="hint" style="margin:0">enabled</span><span class="switch"><input type="checkbox" id="peEnabled" checked><span class="slider"></span></span></label>
+            </div>
+            <div class="out" id="peOut" style="display:none"></div>
+          </div>
+          <div class="card">
+            <h2>What this page can and cannot do <span class="tag">boundaries</span></h2>
+            <p class="muted" style="font-size:11.5px">Writes go through the documented admin endpoints, one record at a time:</p>
+            <div class="out" style="max-height:none">POST   /v1/admin/personas
+PATCH  /v1/admin/personas/{id}
+DELETE /v1/admin/personas/{id}   (soft: sets enabled=false)
+PUT    /v1/admin/agent-model-mappings/{agentId}
+DELETE /v1/admin/agent-model-mappings/{agentId}</div>
+            <div class="divider"></div>
+            <p class="muted" style="font-size:11.5px">An agent itself is registry-owned. This page shows its status and boundary; disabling it sends <span class="mono">DELETE /v1/admin/registry/agents/{id}</span> (soft disable), it never deletes the file that defines the agent.</p>
+          </div>
+        </div>
+      </section>
+
       <!-- ── Tools ── -->
       <section class="view" id="view-tools">
         <div class="card">
@@ -354,7 +396,7 @@ const LS_BASE='zcadmin.base', LS_TOKEN='zcadmin.token';
 const state={
   base: localStorage.getItem(LS_BASE)||'',
   token: localStorage.getItem(LS_TOKEN)||'',
-  health:null, uiConfig:null, providers:[], models:[], tools:[], masking:[], routes:null, mcp:[],
+  health:null, uiConfig:null, providers:[], models:[], tools:[], masking:[], personas:[], agents:[], routes:null, mcp:[],
   connected:false, view:'overview'
 };
 const $=s=>document.querySelector(s);
@@ -444,6 +486,8 @@ async function refreshAll({silent=false}={}){
     api('/v1/admin/providers').then(d=>{state.providers=d.providers||[];}).catch(e=>{if(!silent)toast('providers: '+e.message,true);}),
     api('/v1/admin/models').then(d=>{state.models=d.models||[];}).catch(()=>{}),
     api('/v1/admin/masking-models').then(d=>{state.masking=d.models||[];}).catch(()=>{state.masking=state.uiConfig?.maskingModels||[];}),
+    api('/v1/admin/personas').then(d=>{state.personas=d.personas||[];}).catch(()=>{}),
+    api('/v1/admin/agents').then(d=>{state.agents=d.agents||[];}).catch(()=>{}),
     api('/v1/admin/registry/tools').then(d=>{state.tools=d.components||[];}).catch(()=>{}),
     api('/v1/admin/registry/external-mcp').then(d=>{state.mcp=d.endpoints||[];}).catch(()=>{})
   ];
@@ -452,10 +496,11 @@ async function refreshAll({silent=false}={}){
 }
 function paintAll(){
   paintConnection();
-  paintOverview(); paintProviders(); paintModels(); paintMasking(); paintTools(); paintMcp(); paintSystem();
+  paintOverview(); paintProviders(); paintModels(); paintMasking(); paintAgents(); paintTools(); paintMcp(); paintSystem();
   $('#cntProviders').textContent=state.connected?(state.providers.filter(p=>p.enabled!==false).length+'/'+state.providers.length):'–';
   $('#cntModels').textContent=state.connected?String(state.models.length):'–';
   $('#cntTools').textContent=state.connected?String(state.tools.length):'–';
+  $('#cntAgents').textContent=state.connected?String(state.agents.length):'–';
 }
 
 /* ───────────────────────── views ───────────────────────── */
@@ -465,6 +510,7 @@ const VIEW_META={
   providers:['Providers','Enable/disable and probe each provider with a real completion.'],
   models:['Models','The catalog each enabled provider actually reports.'],
   masking:['Masking & Normalizer','Each module is testable on its own, with the same code the request path uses.'],
+  agents:['Agents & Personas','Who exists, which persona they carry, and which model serves them.'],
   tools:['Tools','The runtime tool registry, read-only.'],
   mcp:['MCP','External MCP endpoints and their reconciliation state.'],
   system:['System','Runtime identity, module flags and the admin route inventory.']
@@ -759,6 +805,99 @@ async function runModule(id){
   }catch(e){ out.className='out err'; out.textContent='failed: '+e.message; }
 }
 
+/* ── agents & personas ── */
+function modelOptions(selected){
+  const names=[...new Set(state.models.map(m=>m.model))].sort();
+  return '<option value="">— default —</option>'+names.map(n=>`<option value="${esc(n)}" ${n===selected?'selected':''}>${esc(n)}</option>`).join('');
+}
+function paintAgents(){
+  const wrap=$('#agentsTable'); if(!wrap) return;
+  $('#agentsTag').textContent=state.connected?(state.agents.length+' agents'):'–';
+  const sel=$('#peSelect');
+  if(sel && state.personas.length){
+    const current=sel.value;
+    sel.innerHTML='<option value="">— select —</option>'+state.personas.map(p=>`<option value="${esc(p.id)}">${esc(p.id)} · ${esc(p.name||'')}</option>`).join('');
+    if(current) sel.value=current;
+  }
+  if(!state.connected){ wrap.innerHTML='<div class="empty">Connect to load agents.</div>'; return; }
+  if(!state.agents.length){ wrap.innerHTML='<div class="empty">No agents registered.</div>'; return; }
+  const t=document.createElement('table');
+  t.innerHTML='<thead><tr><th>Agent</th><th>Status</th><th>Persona</th><th>Boundary</th><th>Model</th><th class="right">Actions</th></tr></thead>';
+  const tb=document.createElement('tbody');
+  state.agents.forEach(a=>{
+    const tr=document.createElement('tr');
+    const on=a.enabled!==false && String(a.status||'').toUpperCase()!=='DISABLED';
+    tr.innerHTML=`<td class="mono">${esc(a.id)}<div class="caption">${esc(a.name||'')}</div></td>
+      <td>${on?'<span class="pill ok">'+esc(a.status||'active')+'</span>':'<span class="pill off">'+esc(a.status||'disabled')+'</span>'}</td>
+      <td>${a.persona?'<span class="mono">'+esc(a.persona.id)+'</span><div class="caption">'+esc(a.persona.title||a.persona.role||'')+'</div>':'<span class="pill warn">missing</span>'}</td>
+      <td class="mono muted">${esc(a.toolBoundary||'—')}</td>
+      <td><select id="map_${esc(a.id)}" style="min-width:170px">${modelOptions(a.mappedModel||'')}</select></td>
+      <td class="right"><div class="row-actions">
+        <button class="btn sm" data-savemap="${esc(a.id)}">Save model</button>
+        <button class="btn sm ghost" data-personaedit="${esc(a.persona?.id||a.id)}">Persona</button>
+        <button class="btn sm ghost" data-agenttoggle="${esc(a.id)}" data-on="${on?'1':'0'}">${on?'Disable':'Enable'}</button>
+      </div></td>`;
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb); wrap.innerHTML=''; wrap.appendChild(t);
+}
+function loadPersona(id){
+  const p=state.personas.find(x=>x.id===id);
+  if(!p) return;
+  $('#peSelect').value=p.id;
+  $('#peName').value=p.name||'';
+  $('#peTitle').value=p.title||'';
+  $('#peRole').value=p.role||'';
+  $('#peCallSign').value=p.callSign||'';
+  $('#pePriority').value=p.priority??'';
+  $('#peText').value=p.persona||'';
+  $('#peEnabled').checked=p.enabled!==false;
+  $('#personaTag').textContent='PATCH /v1/admin/personas/'+p.id;
+  $('#peOut').style.display='none';
+  document.querySelector('#view-agents').scrollIntoView({behavior:'smooth',block:'start'});
+}
+function blankPersona(){
+  $('#peSelect').value='';
+  ['#peName','#peTitle','#peRole','#peCallSign','#pePriority','#peText'].forEach(x=>$(x).value='');
+  $('#peEnabled').checked=true;
+  $('#personaTag').textContent='POST /v1/admin/personas';
+  $('#peOut').style.display='none';
+}
+async function savePersona(){
+  const out=$('#peOut'); out.style.display='block'; out.className='out';
+  const id=$('#peSelect').value;
+  const body={
+    name:$('#peName').value.trim(),title:$('#peTitle').value.trim(),role:$('#peRole').value.trim(),
+    callSign:$('#peCallSign').value.trim(),persona:$('#peText').value,enabled:$('#peEnabled').checked
+  };
+  const prio=Number($('#pePriority').value); if(Number.isFinite(prio)&&$('#pePriority').value!=='') body.priority=prio;
+  try{
+    const d=id
+      ? await api('/v1/admin/personas/'+encodeURIComponent(id),{method:'PATCH',body})
+      : await api('/v1/admin/personas',{method:'POST',body:{...body,id:($('#peName').value.trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||('persona-'+Date.now()))}});
+    out.className='out ok'; out.textContent=JSON.stringify({id:d.persona.id,name:d.persona.name,enabled:d.persona.enabled,priority:d.persona.priority},null,2);
+    toast('persona saved: '+d.persona.id);
+    await refreshAll({silent:true}); loadPersona(d.persona.id);
+  }catch(e){ out.className='out err'; out.textContent='failed: '+e.message; }
+}
+async function saveMapping(agentId){
+  const value=document.getElementById('map_'+agentId)?.value||'';
+  try{
+    if(value) await api('/v1/admin/agent-model-mappings/'+encodeURIComponent(agentId),{method:'PUT',body:{model:value}});
+    else await api('/v1/admin/agent-model-mappings/'+encodeURIComponent(agentId),{method:'DELETE'});
+    toast(agentId+' → '+(value||'default'));
+    await refreshAll({silent:true});
+  }catch(e){ toast('mapping failed: '+e.message,true); }
+}
+async function toggleAgent(agentId,enable){
+  try{
+    if(enable) await api('/v1/admin/registry/agents/'+encodeURIComponent(agentId),{method:'PATCH',body:{enabled:true,status:'REGISTERED'}});
+    else await api('/v1/admin/registry/agents/'+encodeURIComponent(agentId),{method:'DELETE'});
+    toast(agentId+' → '+(enable?'enabled':'disabled'));
+    await refreshAll({silent:true});
+  }catch(e){ toast('agent change failed: '+e.message,true); }
+}
+
 /* ── tools ── */
 function paintTools(){
   const wrap=$('#toolsTable'); if(!wrap) return;
@@ -856,6 +995,15 @@ document.addEventListener('click',async(ev)=>{
   const mh=ev.target.closest('[data-modelhistory]');
   if(mh){ await showModelHistory(mh.dataset.modelhistory,mh.dataset.model); return; }
 
+  const sm=ev.target.closest('[data-savemap]');
+  if(sm){ await saveMapping(sm.dataset.savemap); return; }
+
+  const pe=ev.target.closest('[data-personaedit]');
+  if(pe){ loadPersona(pe.dataset.personaedit); return; }
+
+  const at=ev.target.closest('[data-agenttoggle]');
+  if(at){ await toggleAgent(at.dataset.agenttoggle, at.dataset.on!=='1'); return; }
+
   const run=ev.target.closest('[data-run]');
   if(run){ await runModule(run.dataset.run); return; }
 });
@@ -881,6 +1029,9 @@ $('#btnSyncAll').addEventListener('click',async()=>{
   catch(e){ toast('sync failed: '+e.message,true); }
 });
 $('#btnProbe').addEventListener('click',()=>testProvider($('#probeProvider').value,$('#probeModel').value.trim()));
+$('#peSelect').addEventListener('change',e=>{ if(e.target.value) loadPersona(e.target.value); });
+$('#peSave').addEventListener('click',savePersona);
+$('#peNew').addEventListener('click',blankPersona);
 $('#pfSave').addEventListener('click',saveProvider);
 $('#pfCancel').addEventListener('click',resetProviderForm);
 
