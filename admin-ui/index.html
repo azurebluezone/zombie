@@ -302,6 +302,7 @@
             <span class="hint" style="margin:0">A provider whose API is off shows no models — the list is not faked.</span>
           </div>
           <div id="modelsList"><div class="empty">Connect to load models.</div></div>
+          <div class="out" id="modelHistory" style="display:none"></div>
         </div>
       </section>
 
@@ -658,13 +659,19 @@ function paintModels(){
       blocks.push(card); return;
     }
     const t=document.createElement('table');
-    t.innerHTML='<thead><tr><th>Model</th><th>Default</th><th class="right">Probe</th></tr></thead>';
+    t.innerHTML='<thead><tr><th>Model</th><th>Default</th><th>Last test</th><th>Latency</th><th class="right">Probe</th></tr></thead>';
     const tb=document.createElement('tbody');
     list.forEach(m=>{
       const tr=document.createElement('tr');
+      const last=m.lastTest;
       tr.innerHTML=`<td class="mono">${esc(m.model)}</td>
         <td>${m.defaultModel?'<span class="pill ok">default</span>':'<span class="muted">–</span>'}</td>
-        <td class="right"><div class="row-actions"><button class="btn sm" data-modeltest="${esc(p.id)}" data-model="${esc(m.model)}">Test</button></div></td>`;
+        <td>${last?(last.ok?'<span class="pill ok">ok</span>':'<span class="pill err" title="'+esc(last.error||'')+'">'+esc(last.error||'failed')+'</span>')+'<div class="caption">'+esc(shortTime(last.checkedAt))+'</div>':'<span class="pill off">never</span>'}</td>
+        <td class="mono">${last?fmtMs(last.latencyMs):'—'}</td>
+        <td class="right"><div class="row-actions">
+          <button class="btn sm" data-modeltest="${esc(p.id)}" data-model="${esc(m.model)}">Test</button>
+          <button class="btn sm ghost" data-modelhistory="${esc(p.id)}" data-model="${esc(m.model)}">History</button>
+        </div></td>`;
       tb.appendChild(tr);
     });
     t.appendChild(tb); card.appendChild(t);
@@ -673,6 +680,25 @@ function paintModels(){
   wrap.innerHTML='';
   if(!blocks.length) wrap.innerHTML='<div class="empty">No providers registered.</div>';
   blocks.forEach(b=>wrap.appendChild(b));
+}
+
+async function testModel(providerId, model, btn){
+  if(btn){ btn.disabled=true; btn.dataset.label=btn.textContent; btn.textContent='testing…'; }
+  try{
+    const d=await api('/v1/admin/providers/'+encodeURIComponent(providerId)+'/test',{method:'POST',body:{model,prompt:'Reply with the single word: ok'}});
+    toast(`${providerId} · ${model}: ${d.ok?'ok':'failed'} · ${fmtMs(d.latencyMs)}${d.ok?'':' · '+d.error}`,!d.ok);
+    await refreshAll({silent:true});
+  }catch(e){ toast('test failed: '+e.message,true); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent=btn.dataset.label||'Test'; } }
+}
+async function showModelHistory(providerId, model){
+  const out=$('#modelHistory'); out.style.display='block'; out.className='out'; out.textContent='loading…';
+  try{
+    const d=await api('/v1/admin/model-tests?provider='+encodeURIComponent(providerId)+'&model='+encodeURIComponent(model)+'&limit=20');
+    out.className='out ok';
+    out.textContent=providerId+' · '+model+' — last '+d.runs.length+' of '+d.total+'\n\n'+
+      d.runs.map(r=>`${r.checkedAt}  ${r.ok?'ok   ':'FAIL '}  ${String(r.latencyMs).padStart(6)} ms  ${r.error||''}`).join('\n');
+  }catch(e){ out.className='out err'; out.textContent='history failed: '+e.message; }
 }
 
 /* ── masking bench ── */
@@ -825,7 +851,10 @@ document.addEventListener('click',async(ev)=>{
   }
 
   const mt=ev.target.closest('[data-modeltest]');
-  if(mt){ show('providers'); $('#probeProvider').value=mt.dataset.modeltest; $('#probeModel').value=mt.dataset.model; await testProvider(mt.dataset.modeltest,mt.dataset.model); return; }
+  if(mt){ await testModel(mt.dataset.modeltest,mt.dataset.model,mt); return; }
+
+  const mh=ev.target.closest('[data-modelhistory]');
+  if(mh){ await showModelHistory(mh.dataset.modelhistory,mh.dataset.model); return; }
 
   const run=ev.target.closest('[data-run]');
   if(run){ await runModule(run.dataset.run); return; }

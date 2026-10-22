@@ -22,17 +22,25 @@ const TABLES = {
   agentMetrics: 'agent_metrics',
   'mcp-clients': 'mcp_clients',
   'mcp-settings': 'mcp_settings',
+  'model-tests': 'model_tests',
 };
 
 // Records whose JSON payload is mirrored into queryable columns. `data` stays the
 // source of truth; these columns exist so an operator can SELECT them directly.
 const EXTRA_COLUMNS = {
   agents: ['tool_boundary', 'working_directory'],
+  // Probe history is append-only; these columns exist so a plain SELECT can rank
+  // recent runs without parsing every JSON payload.
+  'model-tests': ['provider', 'model', 'ok', 'latency_ms'],
 };
 
 const EXTRA_VALUES = {
   tool_boundary: item => (item.toolBoundary == null || String(item.toolBoundary).trim() === '' ? null : String(item.toolBoundary)),
   working_directory: item => (item.workingDirectory == null || String(item.workingDirectory).trim() === '' ? null : String(item.workingDirectory)),
+  provider: item => String(item.providerId ?? ''),
+  model: item => String(item.model ?? ''),
+  ok: item => (item.ok === true ? 1 : 0),
+  latency_ms: item => (Number.isFinite(Number(item.latencyMs)) ? Math.trunc(Number(item.latencyMs)) : null),
 };
 
 export class SqliteStore {
@@ -62,10 +70,13 @@ export class SqliteStore {
       CREATE TABLE IF NOT EXISTS agent_metrics (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS mcp_clients (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS mcp_settings (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS model_tests (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, provider TEXT, model TEXT, ok INTEGER, latency_ms INTEGER);
       CREATE INDEX IF NOT EXISTS idx_session_messages_session_created ON session_messages(json_extract(data,'$.sessionId'), created_at);
       CREATE INDEX IF NOT EXISTS idx_mcp_audit_created_at ON mcp_audit(created_at);
       CREATE INDEX IF NOT EXISTS idx_mcp_connections_session ON mcp_connections(json_extract(data,'$.sessionId'));
       CREATE INDEX IF NOT EXISTS idx_mcp_connections_lease ON mcp_connections(json_extract(data,'$.leaseExpiresAt'));
+      CREATE INDEX IF NOT EXISTS idx_model_tests_provider_model ON model_tests(provider, model, created_at);
+      CREATE INDEX IF NOT EXISTS idx_model_tests_created_at ON model_tests(created_at);
     `);
     this._ensureColumns();
   }
@@ -73,7 +84,8 @@ export class SqliteStore {
   // the JSON payload. They stay in `data` as the source of truth and are mirrored
   // into real columns here, so a plain SELECT shows them.
   _ensureColumns() {
-    for (const [table, columns] of Object.entries(EXTRA_COLUMNS)) {
+    for (const [name, columns] of Object.entries(EXTRA_COLUMNS)) {
+      const table = this._table(name);
       const existing = new Set(this.db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name));
       for (const name of columns) {
         if (existing.has(name)) continue;
@@ -135,6 +147,13 @@ export class SqliteStore {
     if (keep.length !== rows.length) await this.write(name, keep); return rows.length-keep.length;
   }
   async findWhere(name, predicate) { const rows=await this.read(name, []); return rows.filter(predicate); }
+
+  /** Keep the newest `keep` rows of an append-only collection. */
+  async prune(name, keep = 1000) {
+    const table = this._table(name);
+    const limit = Math.max(0, Math.trunc(Number(keep) || 0));
+    return this.db.prepare(`DELETE FROM ${table} WHERE id IN (SELECT id FROM ${table} ORDER BY rowid DESC LIMIT -1 OFFSET ?)`).run(limit).changes;
+  }
 
   close(){ this.db?.close(); }
 }

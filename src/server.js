@@ -381,6 +381,21 @@ function publicProvider(provider) {
   const {apiKey, api_key, secret, token, ...safe} = provider ?? {};
   return {...safe, baseUrl:maskUrlSecrets(safe.baseUrl), syncUrl:maskUrlSecrets(safe.syncUrl), ...providerKeyFacts(provider)};
 }
+// Probe history. A latency number that only lives in a toast is not evidence, so
+// every admin probe is appended to SQLite and can be read back after a restart.
+async function recordModelTestRun({providerId,model,ok,latencyMs,error}) {
+  const run={
+    id:`mt_${Date.now()}_${Math.random().toString(16).slice(2,10)}`,
+    providerId:String(providerId ?? ''),
+    model:model ? String(model) : null,
+    ok:ok === true,
+    latencyMs:Math.max(0,Math.trunc(Number(latencyMs)||0)),
+    error:error ? String(error).slice(0,200) : null,
+    checkedAt:new Date().toISOString()
+  };
+  try { await store.append('model-tests',run); await store.prune?.('model-tests',2000); } catch { /* history must never fail a probe */ }
+  return run;
+}
 
 const applications = async () => store.read('applications', []);
 async function authenticateRequest(req, requestLog, requestState) {
@@ -1022,7 +1037,14 @@ const requestHandler = async (req,res) => {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
       const filter=url.searchParams.get('provider');
       const list=(await providers.list()).filter(p=>!filter||p.id===filter);
-      return send(res,200,{models:list.flatMap(p=>(p.models??[]).map(model=>({id:`${p.id}:${model}`,providerId:p.id,providerName:p.name,model,enabled:p.enabled!==false,defaultModel:p.defaultModel===model,priority:p.priority??10}))) });
+      const runs=await store.read('model-tests',[]);
+      const latest=new Map();
+      for(const run of runs){
+        const key=`${run.providerId}::${run.model}`;
+        const previous=latest.get(key);
+        if(!previous || String(run.checkedAt)>String(previous.checkedAt)) latest.set(key,run);
+      }
+      return send(res,200,{models:list.flatMap(p=>(p.models??[]).map(model=>({id:`${p.id}:${model}`,providerId:p.id,providerName:p.name,model,enabled:p.enabled!==false,defaultModel:p.defaultModel===model,priority:p.priority??10,lastTest:latest.get(`${p.id}::${model}`) ?? null}))) });
     }
     if (req.method==='PATCH' && /^\/v1\/admin\/providers\/[^/]+$/.test(url.pathname)) {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -1052,6 +1074,17 @@ const requestHandler = async (req,res) => {
         catch(error) { results.push({providerId:item.id,status:'failed',error:String(error?.message??'model_sync_failed').replace(/[^a-zA-Z0-9_.:-]/g,'_').slice(0,100)}); }
       }
       return send(res,200,{results});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/model-tests') {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const provider=url.searchParams.get('provider');
+      const model=url.searchParams.get('model');
+      const limit=Math.min(500,Math.max(1,Number(url.searchParams.get('limit')||100)));
+      let runs=await store.read('model-tests',[]);
+      if(provider) runs=runs.filter(r=>r.providerId===provider);
+      if(model) runs=runs.filter(r=>r.model===model);
+      runs.sort((a,b)=>String(b.checkedAt).localeCompare(String(a.checkedAt)));
+      return send(res,200,{runs:runs.slice(0,limit),total:runs.length});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/agent-model-mappings') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -1120,7 +1153,8 @@ const requestHandler = async (req,res) => {
         const canonicalInput=typeof provider.toCanonical==='function' ? provider.toCanonical(raw) : raw;
         const canonical=normalizer.normalize(canonicalInput,{model,providerId:provider.id});
         await providers.register({...current,healthStatus:'healthy',lastHealthCheckAt:checkedAt,lastHealthError:null});
-        return send(res,200,{ok:true,providerId,model,latencyMs:Date.now()-startedAt,request:{model,messages,stream:false},response:canonical,upstream:raw});
+        const run=await recordModelTestRun({providerId,model,ok:true,latencyMs:Date.now()-startedAt});
+        return send(res,200,{ok:true,providerId,model,latencyMs:run.latencyMs,checkedAt:run.checkedAt,runId:run.id,request:{model,messages,stream:false},response:canonical,upstream:raw});
       } catch(error) {
         const rawMessage=String(error?.message??'provider_test_failed');
         const code=/^[a-zA-Z0-9_.:-]{1,100}$/.test(rawMessage)?rawMessage:'provider_test_failed';
@@ -1129,7 +1163,8 @@ const requestHandler = async (req,res) => {
         if (code !== 'provider_not_found_or_disabled') {
           await providers.register({...current,healthStatus:'error',lastHealthCheckAt:checkedAt,lastHealthError:code}).catch(()=>{});
         }
-        return send(res,200,{ok:false,providerId,model:requestedModel||null,latencyMs:Date.now()-startedAt,request:{model:requestedModel||null,messages,stream:false},error:code});
+        const run=await recordModelTestRun({providerId,model:requestedModel||null,ok:false,latencyMs:Date.now()-startedAt,error:code});
+        return send(res,200,{ok:false,providerId,model:requestedModel||null,latencyMs:run.latencyMs,checkedAt:run.checkedAt,runId:run.id,request:{model:requestedModel||null,messages,stream:false},error:code});
       }
     }
     if (req.method==='POST' && url.pathname.match(/^\/v1\/admin\/providers\/[^/]+\/sync$/)) {

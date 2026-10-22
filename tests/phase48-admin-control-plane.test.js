@@ -26,6 +26,15 @@ test('phase48 admin UI loads, provider/model routes work, and agent mapping reac
  r=await fetch(`${base}/v1/ui-config`);assert.equal(r.status,200);const uiCfg=await r.json();assert.equal(uiCfg.ui.bundled,false);assert.equal(JSON.stringify(uiCfg).includes('fixture-provider'),false);
  r=await fetch(`${base}/v1/admin/providers`,{headers});assert.equal(r.status,200);let data=await r.json();assert.equal(data.providers.some(p=>p.id==='fixture-provider'),true);
  r=await fetch(`${base}/v1/admin/models`,{headers});assert.equal(r.status,200);data=await r.json();assert.equal(data.models.some(m=>m.providerId==='fixture-provider'&&m.model==='fixture-model'),true);
+ // A probe is recorded, not just shown in a toast: the row must be queryable and
+ // must already be on disk (a second SQLite connection can read it).
+ r=await fetch(`${base}/v1/admin/providers/fixture-provider/test`,{method:'POST',headers,body:JSON.stringify({model:'fixture-model'})});assert.equal(r.status,200);data=await r.json();assert.equal(data.ok,true);assert.equal(typeof data.latencyMs,'number');assert.ok(data.runId);
+ r=await fetch(`${base}/v1/admin/model-tests?provider=fixture-provider&model=fixture-model`,{headers});assert.equal(r.status,200);data=await r.json();assert.ok(data.runs.length>=1);assert.equal(data.runs[0].ok,true);assert.equal(typeof data.runs[0].latencyMs,'number');
+ r=await fetch(`${base}/v1/admin/models`,{headers});data=await r.json();const probedModel=data.models.find(m=>m.providerId==='fixture-provider'&&m.model==='fixture-model');assert.ok(probedModel.lastTest,'the model list carries the last probe');assert.equal(probedModel.lastTest.ok,true);
+ const {DatabaseSync}=await import('node:sqlite');const db=new DatabaseSync(path.join(dir,'data','runtime.sqlite'));
+ const persisted=db.prepare('SELECT provider, model, ok, latency_ms FROM model_tests').all();db.close();
+ assert.ok(persisted.some(x=>x.provider==='fixture-provider'&&x.model==='fixture-model'&&x.ok===1&&Number(x.latency_ms)>=0),'the probe is persisted in SQLite');
+
  r=await fetch(`${base}/v1/admin/providers/fixture-provider/health`,{method:'POST',headers,body:'{}'});assert.equal(r.status,200);data=await r.json();assert.equal(data.health.status,'healthy');assert.equal(data.health.modelCount,1);
  const providerSecret='sk-phase48-write-only-9f2a';
  // Provider keys are env-only: the API refuses to persist one and names the
