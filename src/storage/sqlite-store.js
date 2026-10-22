@@ -50,6 +50,10 @@ export class SqliteStore {
     this.db = new DatabaseSync(this.filePath);
     this.db.exec(`
       PRAGMA journal_mode=WAL;
+      -- WAL + synchronous=NORMAL can drop the last commits on a power cut. This
+      -- runtime runs from a USB stick where power loss is the expected failure,
+      -- and the write volume is tiny, so pay the fsync and keep every ACKed write.
+      PRAGMA synchronous=FULL;
       PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS mcp_endpoints (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);

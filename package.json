@@ -2,7 +2,9 @@
   "name": "zombiecoder-runtime",
   "version": "0.49.0",
   "private": true,
-  "engines": { "node": ">=22.5.0" },
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "description": "Evidence-first, local-first runtime scaffold for ZombieCoder",
   "type": "module",
   "scripts": {
@@ -10,6 +12,7 @@
     "dev": "node --watch src/server.js",
     "build": "node scripts/build-runtime.mjs",
     "test": "node --test",
-    "check:zero-deps": "node scripts/check-zero-deps.mjs"
+    "check:zero-deps": "node scripts/check-zero-deps.mjs",
+    "backup": "bash scripts/backup-runtime.sh"
   }
 }

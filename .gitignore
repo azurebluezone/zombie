@@ -23,6 +23,7 @@ certs/*.crt
 
 # ── runtime state (SQLite, socket, lock, pid, logs) ──────────
 data/
+backups/
 logs/
 .zombiecoder/
 instances/
