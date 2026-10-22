@@ -752,7 +752,7 @@ function openProviderModal(id){
   renderModelPicker(p?.defaultModel||providerDraftModels[0]||'');
   const st=$('#pfConnState'); st.style.color='var(--muted)';
   st.textContent=p
-    ? `${providerDraftModels.length} model(s) already stored. Press Connection to verify; a success is cached for 6 hours.`
+    ? `${p.baseUrlEnv?'Base URL is seeded from '+p.baseUrlEnv+'. ':''}${providerDraftModels.length} model(s) already stored. Press Connection to verify; a success is cached for 6 hours.`
     : 'Connection asks the endpoint for its own model list. A success is cached for 6 hours, so the form does not flip unverified on re-open. The API key stays in the runtime environment.';
   $('#pfFoot').textContent='';
   openModal('providerModal');
@@ -1005,7 +1005,7 @@ function paintProviders(){
     const tr=document.createElement('tr');
     const on=p.enabled!==false;
     tr.innerHTML=`
-      <td class="mono" data-label="Provider">${esc(p.id)}<div class="caption">${esc(p.name||'')}</div></td>
+      <td class="mono" data-label="Provider">${esc(p.id)}<div class="caption">${esc(p.name||'')}${p.baseUrlEnv?' · base URL from '+esc(p.baseUrlEnv):''}</div></td>
       <td class="mono muted" data-label="Driver">${esc(p.driver||'?')}</td>
       <td class="right mono" data-label="Priority">${esc(p.priority??'—')}</td>
       <td data-label="Enabled"><label class="switch"><input type="checkbox" data-toggle="${esc(p.id)}" ${on?'checked':''} aria-label="Enable ${esc(p.id)}"><span class="slider"></span></label></td>

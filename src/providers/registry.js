@@ -61,6 +61,10 @@ export class ProviderRegistry {
       id: input.id ?? `provider_${Date.now()}`,
       name: String(input.name ?? input.id ?? 'provider').slice(0, 120),
       baseUrl: String(input.baseUrl).replace(/\/(models|chat\/completions)\/?$/, ''),
+      // The name of the env var this provider's base URL came from, when the seed
+      // declared one. Kept so the console can say "seeded from CUSTOM_…_BASE_URL"
+      // instead of pretending the URL lives in the database.
+      baseUrlEnv: input.baseUrlEnv ? String(input.baseUrlEnv) : null,
       defaultModel: String(input.defaultModel ?? ''),
       models: Array.isArray(input.models) ? [...new Set(input.models.map(String))] : [],
       enabled: input.enabled !== false,

@@ -59,6 +59,20 @@ export function carryForwardProviderState(existing, incoming = {}) {
   return merged;
 }
 
+// The base URL belongs to the deployment, not to the source tree or to a JSON
+// blob: a seed may name the environment variable that holds it (`baseUrlEnv`), so
+// changing the endpoint is an .env edit. A fixed public provider may still declare
+// `baseUrl` directly; that value is only a fallback when the env var is absent.
+export function resolveSeedProvider(item = {}, env = process.env) {
+  const envName = String(item.baseUrlEnv ?? '').trim();
+  const fromEnv = envName ? String(env[envName] ?? '').trim() : '';
+  return {
+    ...item,
+    ...(envName ? { baseUrlEnv: envName } : {}),
+    baseUrl: fromEnv || String(item.baseUrl ?? '').trim()
+  };
+}
+
 function withTimeout(promise, ms, label) {
   let timer = null;
   return Promise.race([
@@ -113,8 +127,17 @@ export async function bootstrapProviders({ registry, config, logger, bootConfig 
   }
   if (retired.length) await logger?.info?.('provider.legacy_id_retired', { providers: retired });
   const registered = [];
+  const skipped = [];
   for (const item of boot) {
-    const seeded = carryForwardProviderState(existingById.get(item.id), item);
+    const resolved = resolveSeedProvider(item);
+    if (!resolved.baseUrl) {
+      // A seed that points at a missing env var is a configuration gap, not a
+      // reason to fail the whole boot. Report it and leave the stored row alone.
+      await logger?.warn?.('provider.seed_skipped_missing_base_url', { id: item.id, baseUrlEnv: resolved.baseUrlEnv ?? null });
+      skipped.push({ id: item.id, reason: 'base_url_env_missing', baseUrlEnv: resolved.baseUrlEnv ?? null });
+      continue;
+    }
+    const seeded = carryForwardProviderState(existingById.get(resolved.id), resolved);
     const provider = await registry.register({...seeded, source: item.source ?? 'env-bootstrap'});
     registered.push({ id: provider.id, source: 'env', enabled: provider.enabled !== false, driver: provider.driver, baseUrl: provider.baseUrl, defaultModel: provider.defaultModel || null });
   }
@@ -129,5 +152,5 @@ export async function bootstrapProviders({ registry, config, logger, bootConfig 
     }
   }
   const modelsRefresh = await refreshProviderModelsOnStart({ registry, config, logger });
-  return { registered, sync, modelsRefresh };
+  return { registered, skipped, sync, modelsRefresh };
 }

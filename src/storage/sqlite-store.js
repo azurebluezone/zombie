@@ -25,14 +25,49 @@ const TABLES = {
   'model-tests': 'model_tests',
 };
 
+// Every table starts with the same four bookkeeping columns. `data` is the source
+// of truth (JSON), the rest are indexed mirrors. Keep this declaration in one place:
+// init() creates a fresh database from it and _ensureColumns() upgrades an existing
+// one, so a column added in a later release appears on the next boot without a
+// manual migration step.
+const BASE_COLUMNS = Object.freeze({
+  id: 'TEXT PRIMARY KEY',
+  data: 'TEXT NOT NULL',
+  created_at: 'TEXT NOT NULL',
+  updated_at: 'TEXT NOT NULL',
+});
+
+const TABLE_COLUMNS = Object.freeze({
+  // Append-only audit log has no updated_at and auto-increments its id.
+  'mcp-audit': Object.freeze({ id: 'INTEGER PRIMARY KEY AUTOINCREMENT', data: 'TEXT NOT NULL', created_at: 'TEXT NOT NULL' }),
+  // Probe history is append-only; these columns let a plain SELECT rank recent
+  // runs without parsing every JSON payload. Types are declared here on purpose:
+  // adding `ok` as TEXT to an older database would make SUM/ORDER BY wrong.
+  'model-tests': Object.freeze({ ...BASE_COLUMNS, provider: 'TEXT', model: 'TEXT', ok: 'INTEGER', latency_ms: 'INTEGER' }),
+});
+
+function columnsFor(name) {
+  return TABLE_COLUMNS[name] ?? BASE_COLUMNS;
+}
+
 // Records whose JSON payload is mirrored into queryable columns. `data` stays the
 // source of truth; these columns exist so an operator can SELECT them directly.
 const EXTRA_COLUMNS = {
-  agents: ['tool_boundary', 'working_directory'],
-  // Probe history is append-only; these columns exist so a plain SELECT can rank
-  // recent runs without parsing every JSON payload.
-  'model-tests': ['provider', 'model', 'ok', 'latency_ms'],
+  agents: { tool_boundary: 'TEXT', working_directory: 'TEXT' },
+  'model-tests': { provider: 'TEXT', model: 'TEXT', ok: 'INTEGER', latency_ms: 'INTEGER' },
 };
+
+// Exported so a test can assert the live schema, not a copy of it.
+export const SQLITE_SCHEMA = Object.freeze({ tables: TABLES, columnsFor, extraColumns: EXTRA_COLUMNS });
+
+const INDEXES = [
+  `CREATE INDEX IF NOT EXISTS idx_session_messages_session_created ON session_messages(json_extract(data,'$.sessionId'), created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_mcp_audit_created_at ON mcp_audit(created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_mcp_connections_session ON mcp_connections(json_extract(data,'$.sessionId'))`,
+  `CREATE INDEX IF NOT EXISTS idx_mcp_connections_lease ON mcp_connections(json_extract(data,'$.leaseExpiresAt'))`,
+  `CREATE INDEX IF NOT EXISTS idx_model_tests_provider_model ON model_tests(provider, model, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_model_tests_created_at ON model_tests(created_at)`,
+];
 
 const EXTRA_VALUES = {
   tool_boundary: item => (item.toolBoundary == null || String(item.toolBoundary).trim() === '' ? null : String(item.toolBoundary)),
@@ -55,34 +90,16 @@ export class SqliteStore {
       -- and the write volume is tiny, so pay the fsync and keep every ACKed write.
       PRAGMA synchronous=FULL;
       PRAGMA foreign_keys=ON;
-      CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS mcp_endpoints (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS mcp_permissions (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS mcp_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL, created_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS mcp_connections (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS personas (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS tools (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS skills (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS transports (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS session_messages (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS tool_permissions (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS agent_model_mappings (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS agent_metrics (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS mcp_clients (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS mcp_settings (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS model_tests (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, provider TEXT, model TEXT, ok INTEGER, latency_ms INTEGER);
-      CREATE INDEX IF NOT EXISTS idx_session_messages_session_created ON session_messages(json_extract(data,'$.sessionId'), created_at);
-      CREATE INDEX IF NOT EXISTS idx_mcp_audit_created_at ON mcp_audit(created_at);
-      CREATE INDEX IF NOT EXISTS idx_mcp_connections_session ON mcp_connections(json_extract(data,'$.sessionId'));
-      CREATE INDEX IF NOT EXISTS idx_mcp_connections_lease ON mcp_connections(json_extract(data,'$.leaseExpiresAt'));
-      CREATE INDEX IF NOT EXISTS idx_model_tests_provider_model ON model_tests(provider, model, created_at);
-      CREATE INDEX IF NOT EXISTS idx_model_tests_created_at ON model_tests(created_at);
     `);
+    for (const name of Object.keys(TABLES)) {
+      const table = TABLES[name];
+      const columns = Object.entries(columnsFor(name)).map(([column, type]) => `${column} ${type}`).join(', ');
+      this.db.exec(`CREATE TABLE IF NOT EXISTS ${table} (${columns})`);
+    }
+    // Existing databases may predate a table or a mirror column. Add what is
+    // missing before creating indexes that depend on those columns.
     this._ensureColumns();
+    for (const sql of INDEXES) this.db.exec(sql);
   }
   // Some records carry a few fields that operators want to query without parsing
   // the JSON payload. They stay in `data` as the source of truth and are mirrored
@@ -91,9 +108,9 @@ export class SqliteStore {
     for (const [name, columns] of Object.entries(EXTRA_COLUMNS)) {
       const table = this._table(name);
       const existing = new Set(this.db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name));
-      for (const name of columns) {
-        if (existing.has(name)) continue;
-        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} TEXT`);
+      for (const [column, type] of Object.entries(columns)) {
+        if (existing.has(column)) continue;
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
       }
     }
   }
@@ -123,7 +140,7 @@ export class SqliteStore {
     }
     const existing=this.db.prepare(`SELECT id FROM ${table}`).all().map(r=>r.id);
     const keep=new Set();
-    const extra=EXTRA_COLUMNS[name] ?? [];
+    const extra=Object.keys(EXTRA_COLUMNS[name] ?? {});
     const upsert=this._upsertStatement(table, extra);
     this.db.exec('BEGIN');
     try {
@@ -140,8 +157,9 @@ export class SqliteStore {
       const stmt=this.db.prepare(`INSERT INTO ${table}(data,created_at) VALUES(?,?)`);
       stmt.run(JSON.stringify(item), item.timestamp ?? now); return item;
     }
-    const stmt=this._upsertStatement(table, EXTRA_COLUMNS[name] ?? []);
-    stmt.run(...this._rowValues(item, now, EXTRA_COLUMNS[name] ?? [])); return item;
+    const extra=Object.keys(EXTRA_COLUMNS[name] ?? {});
+    const stmt=this._upsertStatement(table, extra);
+    stmt.run(...this._rowValues(item, now, extra)); return item;
   }
   async deleteById(name, id) {
     const table=this._table(name); const stmt=this.db.prepare(`DELETE FROM ${table} WHERE id=?`); return stmt.run(String(id)).changes;
