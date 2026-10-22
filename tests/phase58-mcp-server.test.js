@@ -103,6 +103,10 @@ test('phase58 the runtime serves MCP on /mcp when explicitly enabled', async t =
     ...process.env,
     ENV_LOADER_ENABLED: 'false', HOST: '127.0.0.1', PORT: String(port), ADMIN_TOKEN: adminToken, LOCAL_AUTH_BYPASS: 'false',
     MCP_SERVER_ENABLED: 'true',
+    // This suite proves the grant gate itself, so it pins the closed mode. The
+    // runtime default is `unrestricted`; the open path is covered by the
+    // ToolPolicy/McpPermissions unit suite and the live no-grant execution probe.
+    TOOL_ACCESS_MODE: 'permissioned',
     PROVIDER_CONFIG_JSON: JSON.stringify([{ id: 'fixture-provider', name: 'Fixture', baseUrl: 'http://127.0.0.1:9/v1', driver: 'openai-compatible', protocol: 'openai-compatible', models: ['fixture-model'], defaultModel: 'fixture-model', enabled: false }]),
     DATA_DIR: dataDir, SQLITE_PATH: path.join(dataDir, 'runtime.sqlite'), LOG_DIR: path.join(dir, 'logs'), LOG_TO_STDOUT: 'false',
     UDS_ENABLED: 'false', PROVIDER_CATALOG_SYNC_ON_START: 'false', ZOMBIECODER_EXECUTION_MODE: 'tools-enabled', EXTERNAL_MCP_URLS: '', PROJECT_ROOTS: ''

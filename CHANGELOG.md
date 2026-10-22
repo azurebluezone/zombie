@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — admin console, context pipeline, and tool-access default (2026-10-22)
+- Shipped the standalone admin console as an API client: provider add/edit/probe with a 6h cache, multi-select provider model picker, per-model switches, agent chat/tool tests, tool enable/disable, and a View/JSON response viewer. The runtime never reads the UI.
+- Made provider credentials env-only (`400 provider_keys_are_env_only`), with `PROVIDER_KEY_<ID_UPPER_SNAKE>` naming and an env-driven base URL for `custom-openai`.
+- Rebuilt the agent test on the real pipeline: agent scope → auto-setup → SSOT/syllabus/memory → `compileContext` → `buildSystemMessage` → context-aware tool surface. `allTools`, `toolIds`, `projectRoot` are accepted; the response carries the compiled context summary.
+- Fixed empty `context` in responses: plain chat and the tool loop now expose `context.compiled`; `meta.context` carries the same bounded summary.
+- Changed `TOOL_ACCESS_MODE` default to `unrestricted`: the per-application grant gate is gone, while configuration disables, agent path scope, consent, task policy and execution mode still apply. Any value other than the exact word `unrestricted` fails closed to `permissioned`.
+- Exposed the access mode on `/health` and `/v1/admin/tools/permissions`; the Tools page and Overview show it.
+- Documented the current resume point in `docs/PROJECT_STATUS.md` (state, management map, P0/P1/P2 open problems, next plan).
+- Regression: **423 tests, 423 pass, 0 fail, 0 skipped, exit 0**. Live no-grant `/v1/execution/run` on `runtime_echo` returned `no-grant-ok` with zero grants. Live model completion is NOT_TESTED while the Gemini quota is exhausted (429).
+- Known P0: all 12 agents still have a `global` tool boundary, so the new default plus global scope lets any valid application run read/write/terminal anywhere. Pinning agents to working directories is the next change; see `docs/PROJECT_STATUS.md` §6.
+
 ## 0.49.0 documentation follow-up — Phase 78/79 (users, tokens and terms)
 - Added per-user **roles** (`admin` | `user`) and per-user **ceilings** (`rateLimit`, `concurrency`; `null` inherits `APP_RATE_LIMIT` / `APP_CONCURRENCY`) on the existing `applications` rows, presented as one **Users** view. A row created before roles existed is a `user`, which is what it could already do.
 - Added a per-user **token vault** (`src/auth/token-vault.js`): AES-256-GCM under `TOKEN_ENCRYPTION_KEY`, revealed only by a deliberate `GET /v1/admin/applications/:id/token` that writes `application.token.revealed`. The hot path still compares a SHA-256 hash, so authentication decrypts nothing. Errors: `token_not_recoverable`, `token_vault_not_configured`, `token_vault_key_changed`, `token_vault_authentication_failed`.

@@ -494,7 +494,7 @@ the router's candidate list and priority</div>
       <section class="view" id="view-tools">
         <div class="card">
           <h2>Registered tools <span class="tag" id="toolsTag">–</span></h2>
-          <div class="hint" style="margin:0 0 10px">The switch sends <span class="mono">PATCH /v1/admin/registry/tools/{id}</span> with <span class="mono">status: DISABLED</span>. Execution only accepts REGISTERED/ENABLED/VERIFIED, so a disabled tool cannot run even if a request names it.</div>
+          <div class="hint" style="margin:0 0 10px">The switch sends <span class="mono">PATCH /v1/admin/registry/tools/{id}</span> with <span class="mono">status: DISABLED</span>. Execution only accepts REGISTERED/ENABLED/VERIFIED, so a disabled tool cannot run even if a request names it. Access mode: <span class="mono" id="toolsMode">—</span> — <span class="mono">unrestricted</span> means no per-application grant is needed; <span class="mono">permissioned</span> requires one.</div>
           <div id="toolsTable"><div class="empty">Connect to load tools.</div></div>
         </div>
       </section>
@@ -1008,7 +1008,7 @@ function paintOverview(){
   const box=$('#overviewCards'); box.innerHTML='';
   const h=state.health;
   const cards=[
-    ['Runtime', h?('v'+(h.version||'?')):'—', h?('phase '+(h.phase??'?')+' · '+(h.executionMode||'?')):'not connected'],
+    ['Runtime', h?('v'+(h.version||'?')):'—', h?('phase '+(h.phase??'?')+' · '+(h.executionMode||'?')+' · tools '+(h.toolAccessMode||'?')):'not connected'],
     ['Providers', h?(h.providerBootstrap?.registered??0):'—', h?((h.providerBootstrap?.sync?'sync: '+h.providerBootstrap.sync:'catalog not synced')):'not connected'],
     ['Agents ready', h?(h.agentRuntime?.ready??0)+'/'+(h.agentRuntime?.total??0):'—', h?((h.agentRuntime?.status||'?')):'not connected'],
     ['Core modules', h?String(Object.values(h.coreModules||{}).filter(Boolean).length):'—', h?('of '+Object.keys(h.coreModules||{}).length+' declared'):'not connected']
@@ -1457,6 +1457,7 @@ async function toggleAgent(agentId,enable){
 function paintTools(){
   const wrap=$('#toolsTable'); if(!wrap) return;
   $('#toolsTag').textContent=state.connected?(state.tools.length+' tools'):'–';
+  const modeEl=$('#toolsMode'); if(modeEl) modeEl.textContent=state.health?.toolAccessMode||'—';
   if(!state.connected){ wrap.innerHTML='<div class="empty">Connect to load tools.</div>'; return; }
   if(!state.tools.length){ wrap.innerHTML='<div class="empty">No tools registered.</div>'; return; }
   const t=document.createElement('table');

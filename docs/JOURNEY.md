@@ -1,5 +1,9 @@
 # The journey — plan, where we stand, and what comes next
 
+> **2026-10-22 resume point:** read `docs/PROJECT_STATUS.md` first. It records the
+> admin console, context-pipeline and tool-access work, the open P0s, and the next
+> plan. The measured section below (§2) predates that work and is kept as history.
+
 This file is a **living record**, not a design document. `docs/DESIGN_FLOW.md` explains why
 the runtime is built the way it is; this one answers three plain questions and is meant to be
 edited as work moves:

@@ -204,13 +204,14 @@ export const config = {
   // sessions, tool permissions and audit entries still have a real owner. An
   // admin override can change this at runtime without editing .env or restarting.
   mcpRequireAuth: mcpAuthRequiredEnv(),
-  // Tool access mode. `permissioned` (default) keeps the application-scoped
-  // grant store as the authority: an application may only call a tool an operator
-  // has explicitly granted. `unrestricted` drops that per-application gate so
-  // every agent can call every runnable tool; a tool that is disabled by
-  // configuration is still refused, and the agent's own path scope still bounds
-  // where those tools may operate.
-  toolAccessMode: env('TOOL_ACCESS_MODE', 'permissioned') === 'unrestricted' ? 'unrestricted' : 'permissioned',
+  // Tool access mode. `unrestricted` (default) drops the application-scoped
+  // grant gate so every agent can call every runnable tool; a tool that is
+  // disabled by configuration is still refused, and the agent's own path scope
+  // still bounds where those tools may operate. `permissioned` restores least
+  // privilege: an application may only call a tool an operator granted it.
+  // Any value other than the exact word `unrestricted` fails closed to
+  // `permissioned`, so a typo cannot silently open every tool.
+  toolAccessMode: env('TOOL_ACCESS_MODE', 'unrestricted') === 'unrestricted' ? 'unrestricted' : 'permissioned',
   // What the runtime *offers* an agent, not what it *allows*. `narrowed` shows only the
   // tools the request's purpose needs, plus a small always-on set: that removes roughly
   // 1,900 tokens of tool definitions from every round of a tool loop. `full` shows every

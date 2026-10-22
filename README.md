@@ -241,9 +241,11 @@ mode**. Tool availability never implies permission.
 - `working-directory` — all tools, but confined to that directory.
 
 Symlink-escape and must-exist checks still apply in both modes: "any folder" is not
-"no sandbox". `TOOL_ACCESS_MODE=permissioned` (default) keeps the per-application grant
-gate; `unrestricted` drops that gate so every agent can call every runnable tool. A tool
-disabled by configuration is refused either way.
+"no sandbox". `TOOL_ACCESS_MODE=unrestricted` (default since 2026-10-22) drops the
+per-application grant gate so every agent can call every runnable tool; `permissioned`
+restores least privilege and requires a grant per application. A tool disabled by
+configuration is refused either way. The grant gate is separate from path scope: the
+agent's persisted scope above still decides where a declared path resolves.
 
 **Choosing where to look.** The six search tools — `grep_search`, `regex_search`,
 `file_search`, `find_files`, `view_symbol` and `code_graph` — take an optional `path`
@@ -692,7 +694,8 @@ Three switches worth knowing:
 
 - `ZOMBIECODER_EXECUTION_MODE` — `chat-only` (default) or `tools-enabled`. Tool execution
   routes answer `503 tool_execution_not_verified` until this is `tools-enabled`.
-- `TOOL_ACCESS_MODE` — `permissioned` (default) or `unrestricted`.
+- `TOOL_ACCESS_MODE` — `unrestricted` (default) or `permissioned`. `unrestricted` drops
+  the per-application grant gate; it does not change an agent's path scope. See §5.
 - `TOOL_SURFACE_MODE` — `narrowed` (default) or `full`. What an agent is *offered*, never
   what it is *allowed*; see §5. `TOOL_SURFACE_MAX` (default 12) caps the optional tool
   families, and `COMPILED_CONTEXT_BYTES` (default 20 KB) bounds the compiled context; see §8.
@@ -855,6 +858,7 @@ Be explicit about the line between "implemented" and "verified".
 | --- | --- |
 | `README.md` | this file |
 | `docs/DESIGN_FLOW.md` | why the runtime is built this way, the invariants, and how the next change must be made |
+| `docs/PROJECT_STATUS.md` | the current resume point: what is delivered, the management map, open problems by priority, and the next plan (2026-10-22) |
 | `docs/JOURNEY.md` | the living record: what the plan was, how far it got with measured numbers, and what the next journey is |
 | `docs/LARAVEL_INTEGRATION.md` | the PHP/Laravel HTTP contract, auth, sessions, tools and error codes |
 | `docs/FACEBOOK_CHANNELS.md` | the Messenger / comment / WhatsApp / Ads plan: the rules, the blockers, and the build order |

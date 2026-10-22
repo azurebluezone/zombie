@@ -152,7 +152,7 @@ The keys that decide whether an agent's tools work at all:
 | `LOOPBACK_AUTH_BYPASS` | `false` | with `true` **and** an empty `ADMIN_TOKEN`, admin routes accept loopback requests without a token |
 | `TOKEN_ENCRYPTION_KEY` | empty | seals each client's token with AES-256-GCM so an operator can read it back later. **Set it before you create any user.** Without it, tokens are stored hash-only and cannot be revealed — the API answers `token_not_recoverable` rather than pretending. Changing it later does not recover older rows: it makes them unreadable on purpose (`token_vault_key_changed`), so rotate those users instead. Minimum 24 characters |
 | `ZOMBICODER_EXECUTION_MODE` | `chat-only` | **`tools-enabled` is required for any tool to run.** `chat-only` answers `503 tool_execution_not_verified` |
-| `TOOL_ACCESS_MODE` | `permissioned` | `unrestricted` lets a tool touch any path. This is the path boundary; choose it deliberately |
+| `TOOL_ACCESS_MODE` | `unrestricted` | drops the per-application tool-grant gate. `permissioned` requires an explicit grant per application. On the inbound MCP server surface it still widens the path boundary; agent chat and `/v1/execution/run` take path scope from the agent's own tool boundary |
 | `DATA_DIR` | `./data` | storage, logs' sibling, and the default tool root (see §8.6) |
 | `MCP_SERVER_ENABLED` | `false` | **`true` to serve MCP at `POST /mcp`** |
 | `MCP_SERVER_PROJECT_ROOT` | empty | the root the MCP server's tools operate inside. Empty falls back to the runtime's own root — which is **not** your project |
@@ -352,11 +352,13 @@ assumed. Set it explicitly:
 MCP_SERVER_PROJECT_ROOT=/home/<you>/zombie
 ```
 
-Whether a tool may leave that root is a separate decision:
-`TOOL_ACCESS_MODE=permissioned` (the default) keeps the boundary;
-`TOOL_ACCESS_MODE=unrestricted` allows any path the process can reach. Choose it
-knowingly — it is the difference between "the agent can read this project" and
-"the agent can read the machine".
+For the **inbound MCP server**, whether a tool may leave that root is still tied
+to `TOOL_ACCESS_MODE`: `unrestricted` (the default since 2026-10-22) allows any
+path the process can reach, `permissioned` keeps the boundary. For **agent chat
+and `/v1/execution/run`**, path scope comes from the agent's own tool boundary
+(`global` or `working-directory`), not from this switch. Choose both knowingly:
+this is the difference between "the agent can read this project" and "the agent
+can read the machine".
 
 ---
 
@@ -405,12 +407,14 @@ global tool switch, and it wins over everything else.
 | `mcp_tool_argument_required:<name>` | the tool needs that argument | read the tool's `inputSchema` from `tools/list` |
 | `File not found: <DATA_DIR>/…` | the tool root is the runtime's own root | set `MCP_SERVER_PROJECT_ROOT` |
 | `tool_entry_outside_tool_root` | a tool's entry point resolves outside `TOOL_ROOT` | check `TOOL_ROOT` |
-| a tool answers `mcp_tool_not_permitted` | the application is not granted that tool | grant it on `POST /v1/admin/applications/capabilities/tools` |
+| a tool answers `mcp_tool_not_permitted` | the application is not granted that tool (only possible under `permissioned`) | grant it on `POST /v1/admin/applications/capabilities/tools` |
 | port already in use, or a stale lock | another instance is running | `node start.js --stop`, then start again |
 | the agent "has no tools" | the tool surface was narrowed | the runtime offers the whole surface unless `toolIds` names tools; `toolSurface:"full"` opts out |
 
-Never work around a failure by widening `TOOL_ACCESS_MODE`, disabling auth, or
-exposing the port. Each of those turns a visible misconfiguration into an
+Never work around a failure by disabling auth or exposing the port. Changing
+`TOOL_ACCESS_MODE` is a deliberate policy choice, not a debugging step: under
+`permissioned`, a missing grant is fixed by granting the tool, not by opening
+every application. Each shortcut turns a visible misconfiguration into an
 invisible one.
 
 ---

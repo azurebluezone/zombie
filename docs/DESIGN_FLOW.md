@@ -149,8 +149,9 @@ the reason it was made.
   (`tool-loop.js`, `tool-adapter.js`, `path-boundary.js`).
 - **How:** 28 tools are registered and **all 28 are runnable** (an entry, status
   `ENABLED` or `VERIFIED`). A tool the runtime cannot run is not listed at all —
-  see §3.15. Tool *access* is global
-  (`TOOL_ACCESS_MODE=unrestricted`); path *scope* is per-agent
+  see §3.15. Tool *access* is global by default
+  (`TOOL_ACCESS_MODE=unrestricted`, since 2026-10-22; `permissioned` restores the
+  per-application grant gate); path *scope* is per-agent
   (`global` | `working-directory`) with a `working_directory`.
 - **Why:** two different concerns were deliberately separated. "Which tools may
   this agent use?" and "which paths may it touch?" are not the same question,
@@ -398,7 +399,8 @@ the reason it was made.
   call resolves against `data/`, not the project. Measured: `read_file README.md`
   answered `File not found: <root>/data/README.md`. Whether a tool may leave that
   root is `TOOL_ACCESS_MODE` (`permissioned` keeps the boundary, `unrestricted`
-  does not).
+  does not). This widening applies to the inbound MCP server surface; agent chat
+  and `/v1/execution/run` take `allowAnyPath` from the agent scope instead.
 - **Proof:** live — `initialize` → `200` + session id + `mcp-protocol-version:
   2025-11-25`; `notifications/initialized` → `202`; `tools/list` → **28 tools**,
   all with an object `inputSchema`; `tools/call` → `200` with the output in
