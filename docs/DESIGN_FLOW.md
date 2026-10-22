@@ -152,7 +152,10 @@ the reason it was made.
   see §3.15. Tool *access* is global by default
   (`TOOL_ACCESS_MODE=unrestricted`, since 2026-10-22; `permissioned` restores the
   per-application grant gate); path *scope* is per-agent
-  (`global` | `working-directory`) with a `working_directory`.
+  (`global` | `working-directory`) with a `working_directory`. `working-directory`
+  is the default: a new or unconfigured agent is pinned, and an unset directory
+  falls back to `AGENT_DEFAULT_WORKING_DIRECTORY` (then `DATA_DIR`), never to the
+  caller's root. `global` is an explicit operator choice.
 - **Why:** two different concerns were deliberately separated. "Which tools may
   this agent use?" and "which paths may it touch?" are not the same question,
   and conflating them was the source of earlier confusion.

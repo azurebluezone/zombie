@@ -1,4 +1,4 @@
-import { mkdir, readFile, open, stat } from 'node:fs/promises';
+import { mkdir, readFile, open, realpath, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { config } from './config/env.js';
@@ -231,7 +231,11 @@ async function runnableToolIds() {
 // runtime's PROJECT_ROOTS.
 async function resolveAgentScope(agentId, { requestedRoot = null, requestedWorkingDirectory = null } = {}) {
   const agent = (await agentsRegistry.list()).find(item => item.id === String(agentId)) ?? null;
-  const access = resolveAgentAccess(agent, { requestedRoot, requestedWorkingDirectory, defaultRoot: projectContext.defaultRoot });
+  // An agent pinned to `working-directory` but without a stored directory falls
+  // back to the operator's configured workspace first, then DATA_DIR. Never to
+  // the caller's root: that would turn an unset pin into a global agent.
+  const agentDefaultRoot = config.agentDefaultWorkingDirectory || projectContext.defaultRoot;
+  const access = resolveAgentAccess(agent, { requestedRoot, requestedWorkingDirectory, defaultRoot: agentDefaultRoot });
   const projectRoot = access.projectRoot ? projectContext.root(access.projectRoot, { allowAnyRoot: true }) : null;
   // The agent scope has already authorized this root. Remember it, so the services that
   // only receive the resolved path (SSOT, syllabus, memory, auto-setup) do not re-check it
@@ -1006,17 +1010,35 @@ const requestHandler = async (req,res) => {
       // wants a plain 404 for "no such agent", so look the record up directly.
       const agent=(await agentsRegistry.list()).find(item=>item.id===agentId) ?? null;
       if (!agent) return send(res,404,{error:'agent_not_found',agentId});
-      const effective=(record)=>resolveAgentAccess(record,{defaultRoot:projectContext.defaultRoot});
+      const effective=(record)=>resolveAgentAccess(record,{defaultRoot:config.agentDefaultWorkingDirectory || projectContext.defaultRoot});
       if (req.method==='GET') {
         return send(res,200,{agentId,access:agentAccessRecord(agent),modes:TOOL_BOUNDARY_MODES,effective:effective(agent)});
       }
-      const input=await body(req,config.maxBodyBytes);
+      let input=await body(req,config.maxBodyBytes);
       if (input?.toolBoundary !== undefined && !isToolBoundaryMode(input.toolBoundary)) {
         return send(res,400,{error:'tool_boundary_mode_invalid',allowedModes:TOOL_BOUNDARY_MODES,toolBoundary:input.toolBoundary});
       }
       const wanted=agentAccessRecord({...agent,...input});
-      if (wanted.toolBoundary==='working-directory' && !wanted.workingDirectory) {
-        return send(res,400,{error:'working_directory_required',toolBoundary:wanted.toolBoundary});
+      if (wanted.toolBoundary==='working-directory') {
+        if (!wanted.workingDirectory) {
+          return send(res,400,{error:'working_directory_required',toolBoundary:wanted.toolBoundary});
+        }
+        // A relative directory would resolve against the runtime's cwd, which is
+        // not a stable boundary. Refuse it here instead of storing a scope that
+        // changes meaning across restarts.
+        if (!path.isAbsolute(wanted.workingDirectory)) {
+          return send(res,400,{error:'working_directory_not_absolute',workingDirectory:wanted.workingDirectory});
+        }
+        // Store the canonical target, not a symlink that could be repointed later.
+        let canonical=null;
+        try { canonical=await realpath(wanted.workingDirectory); } catch {}
+        if (!canonical) return send(res,400,{error:'working_directory_not_found',workingDirectory:wanted.workingDirectory});
+        let info=null;
+        try { info=await stat(canonical); } catch {}
+        if (!info) return send(res,400,{error:'working_directory_not_found',workingDirectory:wanted.workingDirectory});
+        if (!info.isDirectory()) return send(res,400,{error:'working_directory_not_directory',workingDirectory:wanted.workingDirectory});
+        input={...input,workingDirectory:canonical};
+        wanted.workingDirectory=canonical;
       }
       const next=await agentsRegistry.setAccess(agentId,input);
       const access=agentAccessRecord(next);
@@ -1314,11 +1336,14 @@ const requestHandler = async (req,res) => {
       const [agentRows,personaRows,mappingRows]=await Promise.all([agentsRegistry.list(),personas.list(),store.read('agentModelMappings',[])]);
       const personaById=new Map(personaRows.map(p=>[p.id,p]));
       const mappingByAgent=new Map(mappingRows.map(m=>[m.agentId,m]));
+      const agentDefaultRoot=config.agentDefaultWorkingDirectory || projectContext.defaultRoot;
       const rows=agentRows.map(a=>{
         const p=personaById.get(a.id);
+        const effective=resolveAgentAccess(a,{defaultRoot:agentDefaultRoot});
         return {
           id:a.id,name:a.name,status:a.status??null,enabled:a.enabled!==false,
           capabilities:a.capabilities??[],toolBoundary:a.toolBoundary??null,workingDirectory:a.workingDirectory??null,
+          effectiveWorkingDirectory:effective.projectRoot??null,effectiveReason:effective.reason??null,
           persona:p?{id:p.id,name:p.name,role:p.role??'',title:p.title??'',callSign:p.callSign??'',priority:p.priority??null,enabled:p.enabled!==false}:null,
           mappedModel:mappingByAgent.get(a.id)?.model??null,
           // What a client actually sees: maskCanonicalResponse() replaces both the
@@ -2154,6 +2179,24 @@ const SSE_DELIVERY_MODE = 'http-response-mode';
 // Reconcile declared transport status with what actually started, so a disabled
 // or failed transport is never reported as VERIFIED.
 await transportsRegistry.syncRuntimeState({servers:transportServers, config, sseMode:SSE_DELIVERY_MODE});
+// Agent scope is a trust boundary, not a preference. Report it at boot so an
+// `unrestricted` tool-access mode plus a `global` agent is never silent.
+const agentScopeRows = await agentsRegistry.list();
+const globalScopeAgents = agentScopeRows.filter(item => item.toolBoundary === 'global');
+await logger.info('runtime.agent_scopes', {
+  total: agentScopeRows.length,
+  pinned: agentScopeRows.length - globalScopeAgents.length,
+  global: globalScopeAgents.length,
+  defaultWorkingDirectory: config.agentDefaultWorkingDirectory || projectContext.defaultRoot
+});
+if (config.toolAccessMode === 'unrestricted' && globalScopeAgents.length > 0) {
+  await logger.warn('runtime.agent_scope_unsafe', {
+    toolAccessMode: 'unrestricted',
+    globalAgentCount: globalScopeAgents.length,
+    globalAgents: globalScopeAgents.map(item => item.id),
+    advice: 'Pin these agents to working-directory (or set TOOL_ACCESS_MODE=permissioned) before exposing this runtime.'
+  });
+}
 await logger.info('runtime.started', {version:RUNTIME_VERSION,phase:RUNTIME_PHASE,runtimeId:runtimeIdentity.runtimeId,instanceId:runtimeIdentity.instanceId,transports:Object.fromEntries(Object.entries(transportServers).map(([key,server])=>[key,Boolean(server)])),sse:SSE_DELIVERY_MODE});
 // Memory is written at startup and then on an interval, so a leak has a history rather than
 // only a post-mortem. `MEMORY_LOG_INTERVAL_MS=0` keeps the startup line and stops the rest.

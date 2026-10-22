@@ -434,6 +434,7 @@
             <span><i class="live off"></i> disabled</span>
             <span class="mono" style="color:#6f7c76">public id = what the client sees · route = operator-only</span>
           </div>
+          <div id="scopeWarning"></div>
           <div id="agentsTable"><div class="empty">Connect to load agents.</div></div>
         </div>
         <div class="grid c2">
@@ -649,6 +650,38 @@ the router's candidate list and priority</div>
       <button class="btn ghost" data-close="agentTestModal">Cancel</button>
       <span class="spacer"></span>
       <span class="hint" style="margin:0">Counts as a real upstream request; it may cost tokens.</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── agent tool scope ── -->
+<div class="modal-backdrop" id="agentScopeModal" role="dialog" aria-modal="true" aria-labelledby="asTitle">
+  <div class="modal slim">
+    <div class="modal-head">
+      <h3 id="asTitle">Tool scope</h3>
+      <span class="tag" id="asTag">PATCH /v1/admin/registry/agents/{id}/boundary</span>
+      <button class="btn ghost icon close" data-close="agentScopeModal" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="kv"><span>agent</span><b id="asAgent">—</b></div>
+      <label class="field"><span>Boundary</span>
+        <select id="asBoundary">
+          <option value="working-directory">working-directory — pinned to one folder</option>
+          <option value="global">global — any path on the host (explicit risk)</option>
+        </select>
+        <div class="hint"><span class="mono">working-directory</span> is the default and the safe choice. <span class="mono">global</span> is only for an operator who deliberately trusts the agent with the whole machine.</div>
+      </label>
+      <label class="field"><span>Working directory</span>
+        <input type="text" id="asDirectory" placeholder="/home/operator/projects" autocomplete="off" spellcheck="false">
+        <div class="hint">Required for <span class="mono">working-directory</span>. Use an absolute path that already exists.</div>
+      </label>
+      <div class="hint" id="asEffective"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn primary" id="asSave">Save scope</button>
+      <button class="btn ghost" data-close="agentScopeModal">Cancel</button>
+      <span class="spacer"></span>
+      <span class="hint" style="margin:0">Scope is operator state; it never changes the client contract.</span>
     </div>
   </div>
 </div>
@@ -1310,7 +1343,12 @@ function agentState(a){
 }
 function paintAgents(){
   const wrap=$('#agentsTable'); if(!wrap) return;
-  $('#agentsTag').textContent=state.connected?(state.agents.length+' agents'):'–';
+  const globalCount=state.agents.filter(a=>a.toolBoundary==='global').length;
+  $('#agentsTag').textContent=state.connected?(state.agents.length+' agents · '+(globalCount?globalCount+' global':'all pinned')):'–';
+  const warn=$('#scopeWarning');
+  if(warn) warn.innerHTML=state.connected&&globalCount&&state.health?.toolAccessMode==='unrestricted'
+    ? '<div class="hint" style="margin:0 0 10px;color:var(--danger,#b42318)"><b>'+globalCount+' agent(s) still global.</b> With tool access <span class="mono">unrestricted</span>, any valid application can reach any path those agents run tools on. Open <b>Scope</b> and pin them to a working directory.</div>'
+    : '';
   const sel=$('#peSelect');
   if(sel && state.personas.length){
     const current=sel.value;
@@ -1320,7 +1358,7 @@ function paintAgents(){
   if(!state.connected){ wrap.innerHTML='<div class="empty">Connect to load agents.</div>'; return; }
   if(!state.agents.length){ wrap.innerHTML='<div class="empty">No agents registered.</div>'; return; }
   const t=document.createElement('table');
-  t.innerHTML='<thead><tr><th>Agent</th><th>Live</th><th>Public identity</th><th>Upstream route <span class="muted" style="text-transform:none;letter-spacing:0">(operator only)</span></th><th>Persona</th><th class="right">Actions</th></tr></thead>';
+  t.innerHTML='<thead><tr><th>Agent</th><th>Live</th><th>Public identity</th><th>Upstream route <span class="muted" style="text-transform:none;letter-spacing:0">(operator only)</span></th><th>Persona</th><th>Tool scope</th><th class="right">Actions</th></tr></thead>';
   const tb=document.createElement('tbody');
   state.agents.forEach(a=>{
     const tr=document.createElement('tr');
@@ -1331,8 +1369,10 @@ function paintAgents(){
       <td data-label="Route"><select id="map_${esc(a.id)}" style="min-width:150px">${modelOptions(a.mappedModel||'')}</select>
         <div class="caption">${esc(a.mappedModel||'not mapped — client requests fall back to the default route')}</div></td>
       <td data-label="Persona">${a.persona?'<span class="mono">'+esc(a.persona.id)+'</span><div class="caption">'+esc(a.persona.title||a.persona.role||'')+(a.persona.enabled===false?' · disabled':'')+'</div>':'<span class="pill warn">missing</span>'}</td>
+      <td data-label="Scope">${a.toolBoundary==='global'?'<span class="pill warn">global</span>':'<span class="pill ok">pinned</span>'}<div class="caption mono">${esc(a.effectiveWorkingDirectory||a.workingDirectory||'runtime default')}</div></td>
       <td class="right" data-label="Actions"><div class="row-actions">
         <button class="btn sm" data-savemap="${esc(a.id)}">Save route</button>
+        <button class="btn sm ghost" data-agentscope="${esc(a.id)}">Scope</button>
         <button class="btn sm ghost" data-agenttest="${esc(a.id)}">Test</button>
         <button class="btn sm ghost" data-personaedit="${esc(a.persona?.id||a.id)}">Persona</button>
         <button class="btn sm ghost" data-agenttoggle="${esc(a.id)}" data-on="${st.on?'1':'0'}">${st.on?'Disable':'Enable'}</button>
@@ -1354,6 +1394,35 @@ function openAgentTest(agentId){
   $('#atProjectRoot').value=a.workingDirectory||'';
   $('#atAllTools').checked=false;
   openModal('agentTestModal');
+}
+let asTarget=null;
+function openAgentScope(agentId){
+  const a=state.agents.find(x=>x.id===agentId)||{id:agentId};
+  asTarget=agentId;
+  $('#asTitle').textContent='Tool scope · '+agentId;
+  $('#asAgent').textContent=agentId;
+  $('#asBoundary').value=a.toolBoundary||'working-directory';
+  $('#asDirectory').value=a.workingDirectory||a.effectiveWorkingDirectory||'';
+  $('#asDirectory').disabled=$('#asBoundary').value!=='working-directory';
+  $('#asEffective').textContent='Effective now: '+(a.effectiveWorkingDirectory||'—')+(a.effectiveReason?' ('+a.effectiveReason+')':'');
+  openModal('agentScopeModal');
+}
+async function saveAgentScope(){
+  const agentId=asTarget; if(!agentId) return;
+  const toolBoundary=$('#asBoundary').value;
+  const workingDirectory=$('#asDirectory').value.trim();
+  const btn=$('#asSave'); btn.disabled=true; btn.textContent='Saving…';
+  try{
+    const d=await api('/v1/admin/registry/agents/'+encodeURIComponent(agentId)+'/boundary',{method:'PATCH',body:{toolBoundary,workingDirectory}});
+    const eff=d.effective||{};
+    toast('scope saved · '+(d.access?.toolBoundary||toolBoundary)+' → '+(eff.projectRoot||'—'));
+    closeModal('agentScopeModal');
+    await refreshAll({silent:true});
+  }catch(e){
+    toast('scope: '+e.message,true);
+  }finally{
+    btn.disabled=false; btn.textContent='Save scope';
+  }
 }
 async function runAgentTest(){
   const agentId=atTarget; if(!agentId) return;
@@ -1574,6 +1643,8 @@ document.addEventListener('click',async(ev)=>{
   const at=ev.target.closest('[data-agenttoggle]');
   if(at){ await toggleAgent(at.dataset.agenttoggle, at.dataset.on!=='1'); return; }
 
+  const asc=ev.target.closest('[data-agentscope]');
+  if(asc){ openAgentScope(asc.dataset.agentscope); return; }
   const agt=ev.target.closest('[data-agenttest]');
   if(agt){ openAgentTest(agt.dataset.agenttest); return; }
 
@@ -1619,6 +1690,8 @@ $('#pfBaseUrl').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDe
 $('#pfSave').addEventListener('click',saveProvider);
 $('#pfCancel').addEventListener('click',()=>closeModal('providerModal'));
 $('#atRun').addEventListener('click',runAgentTest);
+$('#asSave').addEventListener('click',saveAgentScope);
+$('#asBoundary').addEventListener('change',()=>{ $('#asDirectory').disabled=$('#asBoundary').value!=='working-directory'; });
 $('#atMode').addEventListener('change',()=>{
   $('#atPrompt').value=$('#atMode').value==='tool'
     ? 'Call a tool that can echo a value, then report the result.'

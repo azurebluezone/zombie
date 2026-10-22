@@ -29,8 +29,14 @@ export const TOOL_BOUNDARY_MODES = Object.freeze([
   TOOL_BOUNDARY_WORKING_DIRECTORY
 ]);
 
-/** Default reach for an agent that has never been configured: the whole host. */
-export const DEFAULT_TOOL_BOUNDARY = TOOL_BOUNDARY_GLOBAL;
+/** Default reach for an agent that has never been configured: its own directory.
+ *
+ * A fresh runtime must not hand every agent the whole host. `working-directory`
+ * with no stored directory resolves to the runtime's configured default working
+ * directory (or DATA_DIR), so the agent is bounded even before an operator names
+ * a project. `global` remains available, but only as an explicit choice.
+ */
+export const DEFAULT_TOOL_BOUNDARY = TOOL_BOUNDARY_WORKING_DIRECTORY;
 
 const ALIASES = new Map([
   ['global', TOOL_BOUNDARY_GLOBAL],

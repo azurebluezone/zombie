@@ -212,6 +212,12 @@ export const config = {
   // Any value other than the exact word `unrestricted` fails closed to
   // `permissioned`, so a typo cannot silently open every tool.
   toolAccessMode: env('TOOL_ACCESS_MODE', 'unrestricted') === 'unrestricted' ? 'unrestricted' : 'permissioned',
+  // Default directory for an agent whose persisted scope is `working-directory`
+  // but has no directory of its own. Empty keeps the historical DATA_DIR
+  // fallback; set it to the operator's real workspace (for example
+  // /home/operator/projects) so a fresh agent is bounded to a useful place
+  // instead of the runtime's own data directory.
+  agentDefaultWorkingDirectory: env('AGENT_DEFAULT_WORKING_DIRECTORY', '') ? resolveRuntimePath(env('AGENT_DEFAULT_WORKING_DIRECTORY')) : '',
   // What the runtime *offers* an agent, not what it *allows*. `narrowed` shows only the
   // tools the request's purpose needs, plus a small always-on set: that removes roughly
   // 1,900 tokens of tool definitions from every round of a tool loop. `full` shows every

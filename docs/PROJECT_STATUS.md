@@ -4,7 +4,7 @@
 > কোড আর টেস্ট চালিয়ে সংখ্যাগুলো মিলিয়ে নাও। কোড আর এই ডকুমেন্টের মধ্যে
 > অমিল থাকলে **কোড জেতে** — এই ফাইল তখন ভুল, ঠিক করে নিতে হবে।
 >
-> Baseline: code HEAD `596b1ff`; tool-access change + this document: `4fa1946`.
+> Baseline: tool access `4fa1946`; agent scope + this update: পরের commit।
 > Runtime: `/home/xubuntu/zombie`, v0.49.0, API `127.0.0.1:9999`.
 > Admin UI (dev): `http://127.0.0.1:8088`; nginx edge: `https://192.168.1.144:8443`.
 
@@ -14,18 +14,19 @@
 
 | বিষয় | এখনকার অবস্থা | প্রমাণ |
 | --- | --- | --- |
-| Tests | **423/423 pass, 0 fail, 0 skip, exit 0** | `npm test`, 2026-10-22 |
+| Tests | **428/428 pass, 0 fail, 0 skip, exit 0** | `npm test`, 2026-10-22 |
 | Runtime | active, `/health` 200 | `systemctl is-active`, `curl /health` |
 | Execution mode | `tools-enabled` | `/health.executionMode` |
 | Tool access mode | **`unrestricted` (new default)** | `/health.toolAccessMode`, `/v1/admin/tools/permissions` |
 | Runnable tools | 28 | `/v1/admin/registry/tools` |
-| Agents | 12, সবগুলো `global` boundary | SQLite `agents.tool_boundary` |
+| Agents | **12, সবগুলো `working-directory` (global 0)** | SQLite `agents.tool_boundary`, `/v1/admin/agents` |
 | Providers | 4 registered; Gemini live probe এখন quota-blocked | `/v1/admin/providers`, journal |
 | Admin UI | external client, base URL + token only | `admin-ui/index.html` |
-| Remote | HEAD == origin/main, dirty 0 (push-এর আগে) | `git rev-parse` |
+| Remote | HEAD == origin/main, dirty 0 | `git rev-parse` |
 
-**সবচেয়ে বড় ঝুঁকি:** `unrestricted` default + 12/12 agent `global` = যেকোনো
-valid app token read/write/terminal সব জায়গায় চালাতে পারে। §6 P0.1 দেখো।
+**সবচেয়ে বড় বাকি ঝুঁকি:** inbound MCP server-এ `TOOL_ACCESS_MODE=unrestricted`
+path boundary-ও খুলে দেয় (`/mcp` handler), যদিও agent chat/execution এখন pinned।
+§6 P0.2 দেখো। Agent scope-এর single-root tradeoff §6 P1-এ আছে।
 
 ---
 
@@ -114,7 +115,25 @@ valid app token read/write/terminal সব জায়গায় চালা
 - Live proof: **grant ছাড়া app** দিয়ে `/v1/execution/run` →
   `runtime_echo` echo `no-grant-ok`, HTTP 200, app-এর grants 0।
 
-### 2.6 Storage/schema
+### 2.6 Agent scope (P0.1 — resolved)
+
+- Default boundary এখন **`working-directory`** (`src/agents/access.js`); `global`
+  শুধু explicit operator choice। নতুন/unconfigured agent host পায় না।
+- Stored directory না থাকলে fallback: `AGENT_DEFAULT_WORKING_DIRECTORY` → `DATA_DIR`;
+  caller-এর `projectRoot` কখনোই fallback নয়।
+- `AGENT_DEFAULT_WORKING_DIRECTORY` env যোগ হয়েছে (`src/config/env.js`); live value
+  `/home/xubuntu/Documents`।
+- Admin UI-তে **Scope** editor (boundary select + directory + effective path);
+  Agents table-এ pinned/global badge ও effective root; global agent থাকলে
+  unrestricted mode-এ warning।
+- PATCH `/v1/admin/registry/agents/{id}/boundary` এখন absolute + existing directory
+  validate করে: `working_directory_not_absolute`, `working_directory_not_found`,
+  `working_directory_not_directory`।
+- Live migration: 12/12 agent PATCH করে `/home/xubuntu/Documents`-এ pin; global 0।
+- Boot audit: `runtime.agent_scopes` (total/pinned/global/default), এবং
+  unrestricted + global থাকলে `runtime.agent_scope_unsafe` warning।
+
+### 2.7 Storage/schema
 
 - Declarative SQLite: `BASE_COLUMNS`, `TABLE_COLUMNS`, `EXTRA_COLUMNS`,
   `INDEXES`; `init()` table বানায়, `_ensureColumns()` typed missing column
@@ -170,6 +189,9 @@ valid app token read/write/terminal সব জায়গায় চালা
 9. DB bootstrap runtime-এ; manual migration নয়। `EXTRA_COLUMNS` অবশ্যই
    `{column: type}`।
 10. `.env` boot-এ load; edit করলে restart লাগে।
+11. Agent default boundary `working-directory`; unset directory
+    `AGENT_DEFAULT_WORKING_DIRECTORY` → `DATA_DIR`, caller root নয়। Stored scope
+    absolute + existing directory হতে হবে; relative path 400।
 
 ---
 
@@ -178,7 +200,7 @@ valid app token read/write/terminal সব জায়গায় চালা
 ```
 npm test
 exit=0
-tests 423 / pass 423 / fail 0 / skipped 0
+tests 428 / pass 428 / fail 0 / skipped 0
 ```
 
 - `tests/phase81-tool-access-mode.test.js` — 3/3: permissioned grant লাগে;
@@ -186,7 +208,12 @@ tests 423 / pass 423 / fail 0 / skipped 0
 - `tests/phase58-mcp-server.test.js` — 8/8; grant-gate test এখন স্পষ্টভাবে
   `TOOL_ACCESS_MODE=permissioned` pin করে।
 - `tests/phase48-admin-control-plane.test.js` — 2/2; agent test context +
-  plain chat `context.compiled` + `meta.context` assertion।
+  plain chat `context.compiled` + `meta.context` assertion; pinned default root
+  (`DATA_DIR`) asserted.
+- `tests/phase82-agent-scope.test.js` — 5/5: default pinned; caller root ignored;
+  unset directory falls back to workspace; global explicit; live boundary PATCH,
+  relative-path 400, inside read 200, `/etc/passwd` refused; a symlinked scope is
+  stored canonically (realpath), so repointing the link cannot move the boundary।
 
 Live:
 
@@ -197,7 +224,11 @@ Live:
 | Grant ছাড়া `/v1/execution/run` (`runtime_echo`) | HTTP 200, nested `result.result.echo=no-grant-ok`, `result.status=awaiting_verification` (evidence observed, independently verified নয়) |
 | Admin agent test context | `context.available=true`; chat 618B / SSOT 1 / prompt 10580B; tool-all 911B / 28/28 / prompt 11279B |
 | Admin agent test provider call | **provider_http_error** (Gemini quota 429) — fresh model completion **NOT_TESTED** |
-| UI | `toolsMode` marker served; mode `unrestricted` দেখায় |
+| UI | `toolsMode` marker served; mode `unrestricted` দেখায়; Scope editor markers served |
+| Scope PATCH (live) | 12/12 → `working-directory`, `/home/xubuntu/Documents`; global 0 |
+| Boot audit | `runtime.agent_scopes` → total 12, pinned 12, global 0; কোনো unsafe warning নেই |
+| Boundary tool probe | throwaway app (0 grants), `read_file` `Default Project/.zombiecoder/SSOT.md` → 200; `/etc/passwd` → 400 `execution_path_outside_project_root` |
+| Relative scope PATCH | 400 `working_directory_not_absolute` |
 
 **Label discipline:** উপরের context/policy অংশ `LIVE_PROBE_PASSED`; model
 completion `NOT_TESTED` (upstream quota); 28/28 surface `LIVE_PROBE_PASSED`;
@@ -209,16 +240,14 @@ completion `NOT_TESTED` (upstream quota); 28/28 surface `LIVE_PROBE_PASSED`;
 
 ### P0 — security / trust boundary
 
-1. **12/12 agent `tool_boundary=global`।** এখন `unrestricted` default, তাই
-   যেকোনো valid app token read/write/terminal সব path-এ চালাতে পারে।
-   - প্রমাণ: `SELECT id,tool_boundary FROM agents` → 12 rows, সব `global`;
-     `code-guru`-এর `workingDirectory` set, বাকি 11টির নেই।
-   - Fix: agent scope `working-directory`-এ pin করা, নতুন agent-এর default
-     working-directory, admin UI-তে bulk scope editor, boot-এ
-     `unrestricted + global` warning।
-   - Acceptance: global count 0; boundary-র বাইরে `read_file` deny; test + live।
-2. **Inbound MCP server path widening।** `/mcp` handler
-   (`src/server.js:252-257`) `TOOL_ACCESS_MODE=unrestricted` হলে
+1. **✅ RESOLVED — 12/12 agent `tool_boundary=global`।**
+   - এখন 12/12 `working-directory`, `/home/xubuntu/Documents`; global 0।
+   - নতুন agent default pinned; unset directory workspace fallback; UI Scope editor;
+     boot `runtime.agent_scope_unsafe` warning।
+   - Live proof: boundary-র বাইরে `read_file /etc/passwd` → 400
+     `execution_path_outside_project_root`; ভিতরে SSOT read → 200।
+2. **Inbound MCP server path widening (এখনো খোলা)।** `/mcp` handler
+   (`src/server.js:258-261`) `TOOL_ACCESS_MODE=unrestricted` হলে
    `allowAnyRoot/allowAnyPath/allowAnyCommand=true` করে। Agent chat/execution
    এটা করে না, কিন্তু MCP server আলাদা surface।
    - Fix: `MCP_SERVER_PROJECT_ROOT`-কে সবসময় boundary করা, অথবা আলাদা
@@ -237,34 +266,37 @@ completion `NOT_TESTED` (upstream quota); 28/28 surface `LIVE_PROBE_PASSED`;
    dev-এ `http://127.0.0.1:8088` ব্যবহার করছি।
 7. **Tool mode visibility** — admin UI-তে per-app grant list নেই; API
    `/v1/admin/tools/permissions` আছে, unrestricted-এ প্রায় অপ্রয়োজনীয়।
+8. **Single-root tradeoff** — সব agent `/home/xubuntu/Documents`-এ pinned। অন্য
+   root (যেমন runtime repo `/home/xubuntu/zombie`) দরকার হলে operator-কে Scope
+   editor/PATCH দিয়ে বদলাতে হবে; এক agent-এর জন্য একাধিক root allowlist এখনো নেই।
+   Multi-root scope ভবিষ্যতের কাজ, কিন্তু এখন least privilege বজায় রাখে।
 
 ### P2 — polish / docs
 
-8. Agent test result table-এ দেখা যায় না, শুধু popup।
-9. `docs/JOURNEY.md` §2-এর measured numbers 2026-10-17-এর; এই ডক এখন resume
+9. Agent test result table-এ দেখা যায় না, শুধু popup।
+10. `docs/JOURNEY.md` §2-এর measured numbers 2026-10-17-এর; এই ডক এখন resume
    point, JOURNEY history।
-10. `/tmp` invisible (PrivateTmp); sandbox path `data/`-এর ভিতরে রাখতে হবে।
-11. Secret incident: একটা throwaway app key একবার tool output-এ এসেছিল;
+11. `/tmp` invisible (PrivateTmp); sandbox path `data/`-এর ভিতরে রাখতে হবে।
+12. Secret incident: একটা throwaway app key একবার tool output-এ এসেছিল;
     app সাথে সাথে revoke; key file remove। ভবিষ্যতে app create-এর response
     কখনো print না করে সরাসরি file-এ লেখো।
-12. 28 tools offered, কিন্তু narrowed selection default 12-cap; দরকারে
+13. 28 tools offered, কিন্তু narrowed selection default 12-cap; দরকারে
     `toolSurface:"full"`।
 
 ---
 
 ## 7. পরবর্তী পরিকল্পনা (ক্রম অনুযায়ী)
 
-1. **P0.1 agent scope** — 12 agent-কে তাদের প্রকৃত project directory-তে pin;
-   নতুন agent default `working-directory`; admin UI bulk editor; boot warning।
-   মাপকাঠি: global 0, boundary escape test pass, live read deny।
-2. **P0.2 MCP path decoupling** — inbound MCP-কে agent scope বা explicit root-এ
+1. **P0.2 MCP path decoupling** — inbound MCP-কে agent scope বা explicit root-এ
    সীমিত করা; unrestricted-এ `allowAny*` না করা। মাপকাঠি: root-এর বাইরে deny।
-3. **Provider live proof** — quota reset হলে code-guru chat + tool call;
+2. **Provider live proof** — quota reset হলে code-guru chat + tool call;
    মাপকাঠি: `content` non-null, `toolCallCount>=1`, `context.available=true`।
-4. **Consent/tool execution UX** — admin test-এ optional "execute with consent"
+3. **Consent/tool execution UX** — admin test-এ optional "execute with consent"
    (আলাদা explicit checkbox), অথবা execution probe shortcut।
-5. **Grant visibility** — Tools page-এ per-app grants table + "grant all"
+4. **Grant visibility** — Tools page-এ per-app grants table + "grant all"
    (permissioned mode-এর জন্য)।
+5. **Multi-root scope (design)** — এক agent एकাধিক root (allowlist) নাকি single
+   root; decision + test। এখন single-root intentionally।
 6. **TLS** — trusted cert বা browser exception; nginx-এ admin UI verify।
 7. **Docs** — প্রতি বড় step-এ এই ফাইলের snapshot + commit hash update।
 
@@ -280,7 +312,7 @@ git rev-parse HEAD && git status --porcelain=v1
 systemctl is-active zombiecoder-runtime
 curl -s http://127.0.0.1:9999/health | python3 -m json.tool | head -20
 
-# tests (expect 423/423, exit 0)
+# tests (expect 428/428, exit 0)
 npm test
 
 # logs
@@ -290,7 +322,12 @@ journalctl -u zombiecoder-runtime -n 50 --no-pager
 # http://127.0.0.1:8088  → base URL http://127.0.0.1:9999 + ADMIN_TOKEN
 ```
 
-- `.env` gitignored; deploy-এ `TOOL_ACCESS_MODE` আলাদা করে set করতে হবে।
+- `.env` gitignored; deploy-এ `TOOL_ACCESS_MODE` ও
+  `AGENT_DEFAULT_WORKING_DIRECTORY` আলাদা করে set করতে হবে।
+- Agent scope বদলাতে admin UI → Agents → Scope, অথবা
+  `PATCH /v1/admin/registry/agents/{id}/boundary`
+  `{ "toolBoundary": "working-directory", "workingDirectory": "/absolute/path" }`।
+  Absolute + existing directory না হলে 400।
 - Provider key কোথাও print করবে না; app create-এর response file-এ লিখে
   সাথে সাথে revoke/remove।
 - `npm run build` → `systemctl restart zombiecoder-runtime` (src বদলালে)।
@@ -311,7 +348,7 @@ journalctl -u zombiecoder-runtime -n 50 --no-pager
 | `1a5fce8` | storage durability + consistent backups |
 | `8f42425` | nginx edge TLS + control-plane rate limit |
 
-এই ডকুমেন্ট + tool-access default change পরের commit-এ।
+এই ডকুমেন্টের সর্বশেষ update agent-scope commit-এ; hash commit trail-এ যোগ করা হবে।
 
 ---
 

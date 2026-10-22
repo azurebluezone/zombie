@@ -238,7 +238,10 @@ mode**. Tool availability never implies permission.
 **Path boundary.** An agent's persisted scope decides where its declared paths resolve:
 
 - `global` — any existing folder; the agent may name any root it is allowed to reach.
-- `working-directory` — all tools, but confined to that directory.
+  This is an explicit opt-in, not a default.
+- `working-directory` — **the default.** All tools, but confined to that directory.
+  An agent that has no stored directory falls back to `AGENT_DEFAULT_WORKING_DIRECTORY`,
+  then `DATA_DIR` — never to the caller's root.
 
 Symlink-escape and must-exist checks still apply in both modes: "any folder" is not
 "no sandbox". `TOOL_ACCESS_MODE=unrestricted` (default since 2026-10-22) drops the
@@ -696,6 +699,9 @@ Three switches worth knowing:
   routes answer `503 tool_execution_not_verified` until this is `tools-enabled`.
 - `TOOL_ACCESS_MODE` — `unrestricted` (default) or `permissioned`. `unrestricted` drops
   the per-application grant gate; it does not change an agent's path scope. See §5.
+- `AGENT_DEFAULT_WORKING_DIRECTORY` — the directory a `working-directory` agent uses
+  when it has no stored directory. Empty falls back to `DATA_DIR`; set it to the
+  operator's real workspace so a fresh agent is not pinned inside the runtime state.
 - `TOOL_SURFACE_MODE` — `narrowed` (default) or `full`. What an agent is *offered*, never
   what it is *allowed*; see §5. `TOOL_SURFACE_MAX` (default 12) caps the optional tool
   families, and `COMPILED_CONTEXT_BYTES` (default 20 KB) bounds the compiled context; see §8.

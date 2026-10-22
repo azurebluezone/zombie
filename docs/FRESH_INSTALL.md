@@ -153,6 +153,7 @@ The keys that decide whether an agent's tools work at all:
 | `TOKEN_ENCRYPTION_KEY` | empty | seals each client's token with AES-256-GCM so an operator can read it back later. **Set it before you create any user.** Without it, tokens are stored hash-only and cannot be revealed — the API answers `token_not_recoverable` rather than pretending. Changing it later does not recover older rows: it makes them unreadable on purpose (`token_vault_key_changed`), so rotate those users instead. Minimum 24 characters |
 | `ZOMBICODER_EXECUTION_MODE` | `chat-only` | **`tools-enabled` is required for any tool to run.** `chat-only` answers `503 tool_execution_not_verified` |
 | `TOOL_ACCESS_MODE` | `unrestricted` | drops the per-application tool-grant gate. `permissioned` requires an explicit grant per application. On the inbound MCP server surface it still widens the path boundary; agent chat and `/v1/execution/run` take path scope from the agent's own tool boundary |
+| `AGENT_DEFAULT_WORKING_DIRECTORY` | empty (`DATA_DIR`) | the directory a `working-directory` agent uses when it has no stored directory. Set it to the operator's workspace (for example `/srv/projects`); a relative path is never accepted as a stored scope |
 | `DATA_DIR` | `./data` | storage, logs' sibling, and the default tool root (see §8.6) |
 | `MCP_SERVER_ENABLED` | `false` | **`true` to serve MCP at `POST /mcp`** |
 | `MCP_SERVER_PROJECT_ROOT` | empty | the root the MCP server's tools operate inside. Empty falls back to the runtime's own root — which is **not** your project |
