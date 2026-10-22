@@ -1,0 +1,22 @@
+# ZombieCoder Admin UI — reference systemd unit.
+# Copy to /etc/systemd/system/, then: sudo systemctl daemon-reload && sudo systemctl enable --now zombiecoder-admin-ui
+# Adjust WorkingDirectory if the repository is not at %h/zombie.
+
+[Unit]
+Description=ZombieCoder Admin UI (static, third-party client)
+After=network.target
+
+[Service]
+Type=simple
+User=%u
+WorkingDirectory=%h/zombie/admin-ui
+Environment=ADMIN_UI_PORT=8088
+Environment=ADMIN_UI_HOST=127.0.0.1
+ExecStart=/usr/bin/env node serve.mjs
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

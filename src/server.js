@@ -1,4 +1,5 @@
 import { mkdir, readFile, open, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { config } from './config/env.js';
 import { PROJECT_ROOT, fromRoot } from './runtime/paths.js';
@@ -359,9 +360,26 @@ function maskUrlSecrets(value) {
     return u.toString();
   } catch { return String(value).replace(/(key|token|secret|password)=([^&]+)/ig, '$1=***'); }
 }
+// A provider key is write-only. The console must be able to answer "is a key
+// configured, and is it the one I think it is?" without ever receiving the key,
+// so we publish presence plus a truncated SHA-256 fingerprint. The fingerprint is
+// one-way and useless for authentication; it only distinguishes key A from key B.
+export function providerKeyFacts(provider, apiKeys = config.providerApiKeys ?? {}) {
+  const id=String(provider?.id ?? '');
+  const key=String(apiKeys?.[id] ?? '');
+  return {
+    keyPresent:Boolean(key),
+    keyFingerprint:key ? createHash('sha256').update(key).digest('hex').slice(0,12) : null,
+    // Provider keys are env-only. Persisting them in SQLite would put a secret in
+    // the one file that gets copied by every backup, so the API refuses to accept
+    // one at all (see the 400 below) and only reports presence here.
+    keySource:key ? 'env' : 'none',
+    keyEnvVar:`PROVIDER_KEY_${id.toUpperCase().replace(/[^A-Z0-9]+/g,'_')}`
+  };
+}
 function publicProvider(provider) {
   const {apiKey, api_key, secret, token, ...safe} = provider ?? {};
-  return {...safe, baseUrl:maskUrlSecrets(safe.baseUrl), syncUrl:maskUrlSecrets(safe.syncUrl)};
+  return {...safe, baseUrl:maskUrlSecrets(safe.baseUrl), syncUrl:maskUrlSecrets(safe.syncUrl), ...providerKeyFacts(provider)};
 }
 
 const applications = async () => store.read('applications', []);
@@ -965,7 +983,12 @@ const requestHandler = async (req,res) => {
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/providers') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
-      return send(res,201,{provider:publicProvider(await providers.register(await body(req, config.maxBodyBytes)))});
+      const input=await body(req, config.maxBodyBytes);
+      if (input && (input.apiKey!==undefined || input.api_key!==undefined || input.secret!==undefined || input.token!==undefined)) {
+        const providerId=String(input.id ?? '').toUpperCase().replace(/[^A-Z0-9]+/g,'_');
+        return send(res,400,{error:'provider_keys_are_env_only',message:'Set PROVIDER_KEY_'+providerId+' in the runtime environment; provider secrets are never accepted over HTTP or stored in SQLite.'});
+      }
+      return send(res,201,{provider:publicProvider(await providers.register(input))});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/masking-models') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -1007,6 +1030,11 @@ const requestHandler = async (req,res) => {
       const current=(await providers.list()).find(p=>p.id===providerId);
       if (!current) return send(res,404,{error:'provider_not_found'});
       const patch=await body(req,config.maxBodyBytes);
+      if (patch && (patch.apiKey!==undefined || patch.api_key!==undefined || patch.secret!==undefined || patch.token!==undefined)) {
+        return send(res,400,{error:'provider_keys_are_env_only',message:'Provider keys are read from the environment only; edit PROVIDER_KEY_'+providerId.toUpperCase().replace(/[^A-Z0-9]+/g,'_')+' instead.'});
+      }
+      // apiKey is stripped as defence in depth: even an old row that somehow holds
+      // one must not survive a config edit.
       const merged={...current,...patch,id:providerId}; delete merged.apiKey; delete merged.api_key;
       return send(res,200,{provider:publicProvider(await providers.register(merged))});
     }

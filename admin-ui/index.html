@@ -85,6 +85,9 @@
   /* ── table ── */
   table{width:100%;border-collapse:collapse}
   th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
+  #providersTable,#modelsList,#toolsTable,#mcpTable{overflow-x:auto}
+  #providersTable table{min-width:700px}
+  #toolsTable table,#mcpTable table{min-width:560px}
   th{font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:#6f7c76;font-weight:600}
   tbody tr:hover{background:var(--card-hover)}
   tbody tr:last-child td{border-bottom:none}
@@ -259,6 +262,26 @@
           </div>
           <div id="providersTable"><div class="empty">Connect to load providers.</div></div>
         </div>
+        <div class="card" id="providerFormCard">
+          <h2 id="providerFormTitle">Add provider <span class="tag">POST /v1/admin/providers</span></h2>
+          <div class="grid c3">
+            <label class="field"><span>Provider id</span><input type="text" id="pfId" placeholder="my-endpoint" autocomplete="off"></label>
+            <label class="field"><span>Name</span><input type="text" id="pfName" placeholder="My Endpoint" autocomplete="off"></label>
+            <label class="field"><span>Driver</span><input type="text" id="pfDriver" placeholder="openai-compatible" autocomplete="off"></label>
+            <label class="field"><span>Base URL</span><input type="text" id="pfBaseUrl" placeholder="https://api.example.com/v1" autocomplete="off"></label>
+            <label class="field"><span>Default model</span><input type="text" id="pfDefaultModel" placeholder="model-id" autocomplete="off"></label>
+            <label class="field"><span>Priority (1–10)</span><input type="text" id="pfPriority" placeholder="10" autocomplete="off"></label>
+            <label class="field" style="grid-column:1/-1"><span>Models (comma separated)</span><input type="text" id="pfModels" placeholder="model-a, model-b" autocomplete="off"></label>
+          </div>
+          <div class="inline">
+            <button class="btn primary" id="pfSave">Save provider</button>
+            <button class="btn ghost" id="pfCancel">Cancel</button>
+            <label class="inline" style="margin-left:auto;gap:6px"><span class="hint" style="margin:0">enabled</span><span class="switch"><input type="checkbox" id="pfEnabled" checked><span class="slider"></span></span></label>
+          </div>
+          <div class="hint">Provider keys are <b>environment-only</b>. The API refuses a key over HTTP (400 <span class="mono">provider_keys_are_env_only</span>); set <span class="mono" id="pfEnvHint">PROVIDER_KEY_&lt;ID&gt;</span> in the runtime environment and restart. This page shows presence and a one-way fingerprint, never the value.</div>
+          <div class="out" id="providerFormOut" style="display:none"></div>
+        </div>
+
         <div class="card">
           <h2>Provider probe <span class="tag">one real completion</span></h2>
           <div class="inline" style="margin-bottom:8px">
@@ -506,7 +529,7 @@ function paintProviders(){
   if(!state.connected){ wrap.innerHTML='<div class="empty">Connect to load providers.</div>'; return; }
   if(!state.providers.length){ wrap.innerHTML='<div class="empty">No providers registered.</div>'; return; }
   const t=document.createElement('table');
-  t.innerHTML='<thead><tr><th>Provider</th><th>Driver</th><th>API</th><th>Health</th><th class="right">Models</th><th class="right">Actions</th></tr></thead>';
+  t.innerHTML='<thead><tr><th>Provider</th><th>Driver</th><th>API</th><th>Health</th><th>Key</th><th class="right">Models</th><th class="right">Actions</th></tr></thead>';
   const tb=document.createElement('tbody');
   state.providers.forEach(p=>{
     const tr=document.createElement('tr');
@@ -516,10 +539,12 @@ function paintProviders(){
       <td class="mono muted">${esc(p.driver||'?')}</td>
       <td><label class="switch"><input type="checkbox" data-toggle="${esc(p.id)}" ${on?'checked':''}><span class="slider"></span></label></td>
       <td>${healthPill(p)}</td>
+      <td>${keyPill(p)}</td>
       <td class="right mono">${(p.models||[]).length}</td>
       <td class="right"><div class="row-actions">
         <button class="btn sm" data-test="${esc(p.id)}">Test</button>
         <button class="btn sm ghost" data-health="${esc(p.id)}">Health</button>
+        <button class="btn sm ghost" data-edit="${esc(p.id)}">Edit</button>
       </div></td>`;
     tb.appendChild(tr);
   });
@@ -552,6 +577,62 @@ async function testProvider(id,model){
     }
     await refreshAll({silent:true});
   }catch(e){ out.className='out err'; out.textContent='test failed: '+e.message; }
+}
+
+function keyPill(p){
+  if(!p.keyPresent) return '<span class="pill off" title="'+esc(p.keyEnvVar||'')+'">absent</span>';
+  const src=p.keySource==='env'?'env':'stored';
+  return '<span class="pill ok" title="sha256 '+esc(p.keyFingerprint||'')+' · set via '+esc(p.keyEnvVar||src)+'">'+esc(src)+' · '+esc(p.keyFingerprint||'')+'</span>';
+}
+
+/* ── provider form (add/edit) ── */
+let editingProvider=null;
+function openProviderForm(id){
+  editingProvider=id||null;
+  const p=state.providers.find(x=>x.id===id);
+  $('#providerFormTitle').innerHTML=(p?'Edit provider':'Add provider')+' <span class="tag">'+(p?'PATCH /v1/admin/providers/{id}':'POST /v1/admin/providers')+'</span>';
+  $('#pfId').value=p?p.id:''; $('#pfId').disabled=Boolean(p);
+  $('#pfName').value=p?.name||'';
+  $('#pfDriver').value=p?.driver||'openai-compatible';
+  $('#pfBaseUrl').value=p?.baseUrl||'';
+  $('#pfDefaultModel').value=p?.defaultModel||'';
+  $('#pfPriority').value=p?.priority??10;
+  $('#pfModels').value=(p?.models||[]).join(', ');
+  $('#pfEnvHint').textContent=p?.keyEnvVar||('PROVIDER_KEY_'+(id||'').toUpperCase().replace(/[^A-Z0-9]+/g,'_'));
+  $('#pfEnabled').checked=p?p.enabled!==false:true;
+  $('#providerFormOut').style.display='none';
+  document.querySelector('#providerFormCard').scrollIntoView({behavior:'smooth',block:'center'});
+}
+function resetProviderForm(){ openProviderForm(null); }
+async function saveProvider(){
+  const out=$('#providerFormOut'); out.style.display='block'; out.className='out';
+  const id=$('#pfId').value.trim();
+  const body={
+    name:$('#pfName').value.trim()||id,
+    baseUrl:$('#pfBaseUrl').value.trim(),
+    driver:$('#pfDriver').value.trim()||'openai-compatible',
+    protocol:$('#pfDriver').value.trim()||'openai-compatible',
+    defaultModel:$('#pfDefaultModel').value.trim(),
+    priority:Number($('#pfPriority').value||10),
+    models:$('#pfModels').value.split(',').map(x=>x.trim()).filter(Boolean),
+    enabled:$('#pfEnabled').checked
+  };
+  if(!body.baseUrl){ out.className='out err'; out.textContent='baseUrl is required'; return; }
+  try{
+    let d;
+    if(editingProvider){
+      d=await api('/v1/admin/providers/'+encodeURIComponent(editingProvider),{method:'PATCH',body});
+    }else{
+      if(!id){ out.className='out err'; out.textContent='provider id is required'; return; }
+      body.id=id; d=await api('/v1/admin/providers',{method:'POST',body});
+    }
+    out.className='out ok';
+    out.textContent=JSON.stringify({id:d.provider.id,enabled:d.provider.enabled,keyPresent:d.provider.keyPresent,keySource:d.provider.keySource,keyFingerprint:d.provider.keyFingerprint,models:d.provider.models},null,2);
+    toast((editingProvider?'updated ':'created ')+d.provider.id);
+    editingProvider=d.provider.id;
+    await refreshAll({silent:true});
+    openProviderForm(d.provider.id);
+  }catch(e){ out.className='out err'; out.textContent='failed: '+e.message; }
 }
 
 /* ── models ── */
@@ -726,6 +807,9 @@ document.addEventListener('click',async(ev)=>{
   const tg=ev.target.closest('[data-toggle]');
   if(tg){ toggleProvider(tg.dataset.toggle,tg.checked,tg); return; }
 
+  const ed=ev.target.closest('[data-edit]');
+  if(ed){ openProviderForm(ed.dataset.edit); return; }
+
   const tst=ev.target.closest('[data-test]');
   if(tst){ await testProvider(tst.dataset.test,''); return; }
 
@@ -768,6 +852,8 @@ $('#btnSyncAll').addEventListener('click',async()=>{
   catch(e){ toast('sync failed: '+e.message,true); }
 });
 $('#btnProbe').addEventListener('click',()=>testProvider($('#probeProvider').value,$('#probeModel').value.trim()));
+$('#pfSave').addEventListener('click',saveProvider);
+$('#pfCancel').addEventListener('click',resetProviderForm);
 
 /* ───────────────────────── boot ───────────────────────── */
 (async function boot(){

@@ -15,6 +15,13 @@ node serve.mjs            # http://127.0.0.1:8088
 ADMIN_UI_PORT=9000 node serve.mjs
 ```
 
+Keep it running across reboots with the reference unit:
+
+```bash
+sudo cp zombiecoder-admin-ui.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now zombiecoder-admin-ui
+```
+
 Open the page, set **Base URL** (for example `http://127.0.0.1:9999` or
 `https://runtime.example.com`) and the runtime's `ADMIN_TOKEN`, then **Connect**.
 
