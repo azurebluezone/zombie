@@ -4,7 +4,7 @@
 > কোড আর টেস্ট চালিয়ে সংখ্যাগুলো মিলিয়ে নাও। কোড আর এই ডকুমেন্টের মধ্যে
 > অমিল থাকলে **কোড জেতে** — এই ফাইল তখন ভুল, ঠিক করে নিতে হবে।
 >
-> Baseline: tool access `4fa1946`; agent scope + this update: পরের commit।
+> Baseline: tool access `4fa1946`; agent scope `e935981`।
 > Runtime: `/home/xubuntu/zombie`, v0.49.0, API `127.0.0.1:9999`.
 > Admin UI (dev): `http://127.0.0.1:8088`; nginx edge: `https://192.168.1.144:8443`.
 
@@ -132,6 +132,9 @@ path boundary-ও খুলে দেয় (`/mcp` handler), যদিও agent
 - Live migration: 12/12 agent PATCH করে `/home/xubuntu/Documents`-এ pin; global 0।
 - Boot audit: `runtime.agent_scopes` (total/pinned/global/default), এবং
   unrestricted + global থাকলে `runtime.agent_scope_unsafe` warning।
+- Live workspace `/home/xubuntu/Documents`-এ প্রথম agent request-এ auto-setup
+  `.zombiecoder/` (SSOT 64B, syllabus 48B, memory empty) তৈরি করেছে; এটি project
+  state, repo নয়, এবং secret scan clean।
 
 ### 2.7 Storage/schema
 
@@ -344,11 +347,12 @@ journalctl -u zombiecoder-runtime -n 50 --no-pager
 | `4bcd255` | multi-select provider model picker |
 | `f2c7daf` | declarative SQLite schema, env base URL, generic custom provider |
 | `99472d7` | admin UI redesign, provider modal/probe, agent/tool tests |
+| `e935981` | agent scope default `working-directory`; 12 agents pinned; Scope editor; validation; boot audit |
 | `4fa1946` | tool access default `unrestricted`; status doc, changelog, docs |
 | `1a5fce8` | storage durability + consistent backups |
 | `8f42425` | nginx edge TLS + control-plane rate limit |
 
-এই ডকুমেন্টের সর্বশেষ update agent-scope commit-এ; hash commit trail-এ যোগ করা হবে।
+এই ডকুমেন্টের সর্বশেষ update agent-scope commit `e935981`-এ।
 
 ---
 
