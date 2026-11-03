@@ -25,7 +25,7 @@ import { McpServerAuth } from './mcp/server-auth.js';
 import { McpReconciliation } from './mcp/reconciliation.js';
 import { ProjectContextStore } from './context/project-context.js';
 import { EntityDoor } from './entities/entity-door.js';
-import { CanonicalResponseNormalizer } from './providers/normalizer/canonical-response.js';
+import { CanonicalResponseNormalizer, hasCanonicalChoices } from './providers/normalizer/canonical-response.js';
 import { PersonaRegistry } from './agents/persona-registry.js';
 import { AdminService } from './admin/admin-service.js';
 import { RequestLog } from './admin/request-log.js';
@@ -66,7 +66,7 @@ import { ProjectMemoryService } from './context/memory.js';
 import { NoteStore } from './notes/note.js';
 import { AutoSetupService } from './context/auto-setup.js';
 import { SmartRouter } from './providers/router/smart-router.js';
-import { maskCanonicalResponse, maskEvidenceForPublic, maskRouteForPublic } from './providers/masking/provider-mask.js';
+import { maskCanonicalResponse, maskEvidenceForPublic, maskRouteForPublic, ZOMBIE_PROVIDER_NAME } from './providers/masking/provider-mask.js';
 import { ZOMBIECODER_MODELS } from './providers/masking/zombie-models.js';
 import { completionToStreamChunk } from './providers/normalizer/stream-chunk.js';
 import { createRuntimeIdentity, acquireRuntimeLock } from './runtime/identity.js';
@@ -348,6 +348,27 @@ async function streamJsonLines(req, res, { backfill = 40 } = {}) {
   res.on('close', cleanup);
 }
 async function applyAgentModelMapping(input) {
+  // A public agent model (`zombiecoder/code-guru`) is a request for that agent,
+  // not for an upstream model. Resolve it to the configured provider/model
+  // before the router sees it, and keep the public id in `meta` so every masked
+  // projection can echo what the client asked for instead of the alias it
+  // resolved to. The real upstream id stays in the runtime log.
+  const requestedModel=String(input?.model??'').trim().split('#')[0];
+  const binding=requestedModel?config.agentModelBindings?.[requestedModel.toLowerCase()]:null;
+  if(binding){
+    const agentExists=(await agentsRegistry.list()).some(agent=>agent.id===binding.agent);
+    if(agentExists){
+      return {
+        ...input,
+        agent:binding.agent,
+        persona:input.persona??binding.agent,
+        provider:binding.provider||input.provider,
+        model:binding.model,
+        meta:{...(input.meta??{}),agentModelBinding:{publicModel:requestedModel,agentId:binding.agent,providerId:binding.provider||null,model:binding.model}}
+      };
+    }
+    await logger.warn('agent_model_binding.unknown_agent',{publicModel:requestedModel,agentId:binding.agent});
+  }
   const agentId=String(input?.agent??input?.persona??'code-guru');
   const mapping=(await store.read('agentModelMappings',[])).find(item=>item.agentId===agentId);
   // An agent mapping only supplies the DEFAULT model. A model the client named
@@ -357,6 +378,15 @@ async function applyAgentModelMapping(input) {
     return {...input,model:mapping.model,meta:{...(input.meta??{}),agentModelMapping:{agentId,model:mapping.model}}};
   }
   return input;
+}
+
+// The client-facing identity is also visible in response headers, so a client
+// that logs headers never has to infer the provider from the body. No upstream
+// header is forwarded; these are the only identity headers the runtime adds.
+function setPublicIdentityHeaders(res, {model=null, agentId=null}={}) {
+  res.setHeader('x-zombie-provider', ZOMBIE_PROVIDER_NAME);
+  if (model) res.setHeader('x-zombie-model', String(model));
+  if (agentId) res.setHeader('x-zombie-agent', String(agentId));
 }
 
 function maskUrlSecrets(value) {
@@ -633,7 +663,7 @@ const requestHandler = async (req,res) => {
     }
     // Legacy frontend read contracts. These are compatibility envelopes, not provider disclosure.
     if (req.method==='GET' && url.pathname==='/v1/models') {
-      return send(res,200,legacyModelList({agents:await agentsRegistry.list(),providers:await providers.list()}));
+      return send(res,200,legacyModelList({agents:await agentsRegistry.list(),providers:await providers.list(),bindings:config.agentModelBindings}));
     }
     if (req.method==='GET' && (url.pathname==='/api/v0/models' || url.pathname==='/api/v1/models')) {
       return send(res,200,legacyProviderModelList(await providers.list()));
@@ -2084,6 +2114,7 @@ const requestHandler = async (req,res) => {
         // tool.execution.*).
         const toolLoopPublicModel=result.response?.model ?? route.publicModel ?? null;
         const toolLoopRoute={routeId:route.routeId,providerId:'masked',model:route.publicModel || toolLoopPublicModel,publicModel:route.publicModel || toolLoopPublicModel,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status};
+        setPublicIdentityHeaders(res,{model:route.publicModel||toolLoopPublicModel,agentId:agentPrepared.agent?.id??agentId});
         return send(res,200,{...(result.response??{choices:[{index:0,message:{role:'assistant',content:null},finish_reason:'tool_calls'}]}),applicationId:app.id,meta:{runtime:'ZombieCoder',phase:RUNTIME_PHASE,executionMode:config.executionMode,route:toolLoopRoute,provider:{name:'ZombieCoder',id:'masked'},model:toolLoopPublicModel,agent:agentPrepared.agent,persona:agentPrepared.persona,agentAccess:agentScope.access,context:compiledContextSummary(toolLoopCompiledContext,{persona:{id:agentPrepared.persona?.id??agentId,name:agentPrepared.persona?.name??null},toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id),allowedCount:fullSurface.length,mode:surfaceSelection?.mode??'full',reason:surfaceSelection?.reason??(requestedChatTools.length?'request_named_tools':'full_surface')}}),toolSurface:{count:registeredNativeTools.length,toolIds:registeredNativeTools.map(t=>t.id),allowedCount:fullSurface.length,mode:surfaceSelection?.mode??'full',reason:surfaceSelection?.reason??(requestedChatTools.length?'request_named_tools':'full_surface'),groups:surfaceSelection?.groups??[],dropped:surfaceSelection?.dropped??[],external:{count:externalSurface.entries.length,endpoints:externalSurface.endpointIds,tools:externalSurface.entries.map(e=>e.qualifiedName),dropped:externalSurface.dropped}},evidence:maskEvidenceForPublic(result.evidence),verified:result.verified,verificationRequired:true,toolLoop:{status:result.status,stoppedReason:result.stoppedReason,rounds:result.rounds,roundCount:result.rounds.length,evidenceCount:result.evidence.length,verified:result.verified},taskPolicy:reportedTaskPolicy}});
       }
       if (input.stream === true) {
@@ -2117,6 +2148,7 @@ const requestHandler = async (req,res) => {
         const streamCompiledContext=compileContext({goal:streamGoal,userInput:streamUserMessage.content,recent:userMessages,memory:streamMemory ?? [],ssot:streamProject,syllabus:streamSyllabus,projectRoot:streamProjectRoot,workingDirectory:input.workingDirectory ?? streamProjectRoot,sessionId:currentStreamSession?.id ?? input.sessionId ?? null,taskPolicy,evidence:streamEvidence,maxBytes:config.compiledContextBytes,recentLimit:config.contextRecentMessages});
         const systemMessage = buildSystemMessage({constitution:CORE_CONSTITUTION,agent:streamAgent.agent,persona:streamAgent.persona,goal:streamGoal,expectedOutcome:input.expectedOutcome,projectRoot:streamProjectRoot,ssot:streamProject,syllabus:streamSyllabus,memory:streamMemory,session:currentStreamSession,route,tools:input.toolIds,compiledContext:streamCompiledContext});
         input = {...input,provider:undefined,model,messages:[systemMessage,...userMessages],stream:true,sessionId:currentStreamSession?.id ?? input.sessionId};
+        setPublicIdentityHeaders(res,{model:route.publicModel||model,agentId:streamAgent.agent?.id??streamAgentId});
         res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'});
         let streamText='';
         let streamToolCalls=[];
@@ -2131,19 +2163,31 @@ const requestHandler = async (req,res) => {
               provider = await providers.resolve(providerId);
               model = await providers.resolveModel(providerId, route.publicModel ? candidate.model : (input.model || candidate.model));
               if (typeof provider.streamChat !== 'function') throw new Error('provider_streaming_not_supported');
+              let streamCallbackError = null;
               await provider.streamChat({...input, model, stream:true}, raw => {
-                if (raw?.done === true && !raw?.choices) return;
-                const canonicalInput = typeof provider.streamChunk === 'function' ? provider.streamChunk(raw) : raw;
-                const chunk = canonicalInput?.choices ? normalizer.normalize(canonicalInput,{model,providerId:provider.id}) : null;
-                if (chunk) {
+                if (streamCallbackError) return;
+                try {
+                  if (raw?.done === true && !raw?.choices) return;
+                  const canonicalInput = typeof provider.streamChunk === 'function' ? provider.streamChunk(raw) : raw;
+                  // Ollama ends a stream with a usage-only event whose choices
+                  // array is empty. It is not a completion chunk.
+                  if (!hasCanonicalChoices(canonicalInput)) return;
+                  const chunk = normalizer.normalize(canonicalInput,{model,providerId:provider.id});
                   streamChunkCount += 1;
                   const masked = maskCanonicalResponse(chunk,{agentId:streamAgent.agent?.id ?? streamAgentId,configuredModel:route.publicModel || '',capabilities:Object.keys(provider.capabilities ?? {}).filter(k=>provider.capabilities[k])});
                   const delta=masked?.choices?.[0]?.delta;
                   if (typeof delta?.content === 'string') streamText += delta.content;
                   if (Array.isArray(delta?.tool_calls)) streamToolCalls.push(...delta.tool_calls);
                   res.write(`data: ${JSON.stringify(masked)}\n\n`);
+                } catch (error) {
+                  // This callback runs inside the provider socket's event
+                  // handler. A throw here would kill the process instead of
+                  // failing the request, so remember it and fail the candidate
+                  // after the stream has closed.
+                  streamCallbackError = error;
                 }
               });
+              if (streamCallbackError) throw streamCallbackError;
               if (streamChunkCount === beforeCandidateChunks) {
                 // A 200 response without chunks is not a completed answer: retry via non-streaming.
                 const fallbackRaw = await provider.chatCompletions({...input, model, stream:false});
@@ -2257,6 +2301,7 @@ const requestHandler = async (req,res) => {
       requestState.agentId=agentPrepared.agent?.id ?? null;
       await recordAgentRun(agentPrepared.agent?.id, 'success', {latencyMs:Date.now()-startedAt, model, providerId:provider.id, path:'chat'});
       await requestLog.info('chat.completed',{applicationId:app.id,agentId:agentPrepared.agent?.id,personaId:agentPrepared.persona?.id,providerId:provider.id,model,sessionId:currentSession?.id ?? null,evidenceStatus:'observed',verified:false,routeId:route.routeId,contextInjected:true});
+      setPublicIdentityHeaders(res,{model:route.publicModel||masked.model,agentId:agentPrepared.agent?.id??personaId});
       return send(res,200,{...masked,applicationId:app.id,context:{...context,compiled:compiledContextSummary(compiledContext,{persona:{id:personaId,name:agentPrepared.persona?.name??null},toolSurface:{count:requestedToolIds.length,toolIds:requestedToolIds,allowedCount:allToolDefinitions.length}})},meta:{phase:RUNTIME_PHASE,taskPolicy,agentAccess:plainScope.access,route:{routeId:route.routeId,providerId:'masked',model:route.publicModel || masked.model,publicModel:route.publicModel || masked.model,requiredCapabilities:route.requiredCapabilities,candidateCount:route.candidates.length,reason:route.reason,status:route.status},provider:{name:'ZombieCoder',id:'masked'},model:masked.model,session:currentSession,context:{...context,compiled:compiledContextSummary(compiledContext,{persona:{id:personaId,name:agentPrepared.persona?.name??null},toolSurface:{count:requestedToolIds.length,toolIds:requestedToolIds,allowedCount:allToolDefinitions.length}})},project,syllabus:syllabusDoc,memory:memoryDoc,entities,agent:agentPrepared.agent,persona:agentPrepared.persona,constitution:CORE_CONSTITUTION,sessionMetadata:currentSession?.metadata ?? incomingMetadata,systemPrompt:{injected:true,visibleToClient:false,contextCompiled:true},receivedMessages:Array.isArray(input.messages)?input.messages.length:0,evidence:maskEvidenceForPublic(evidence),verified:false,verificationRequired}});
     }
     if (req.method==='GET' && url.pathname==='/api/syllabus') {
@@ -2350,6 +2395,22 @@ if (config.toolAccessMode === 'unrestricted' && globalScopeAgents.length > 0) {
     advice: 'Pin these agents to working-directory (or set TOOL_ACCESS_MODE=permissioned) before exposing this runtime.'
   });
 }
+// A public agent model is a routing promise: the id says which agent answers
+// and the binding says which provider/model it resolves to. Log both halves at
+// boot, and refuse silently offering a binding whose agent does not exist.
+for (const error of config.agentModelBindingErrors ?? []) await logger.warn('runtime.agent_model_binding_invalid', {error});
+const agentIds = new Set(agentScopeRows.map(item => item.id));
+for (const [publicModel, binding] of Object.entries(config.agentModelBindings ?? {})) {
+  const known = agentIds.has(binding.agent);
+  await logger.info('runtime.agent_model_binding', {
+    publicModel,
+    agentId: binding.agent,
+    providerId: binding.provider,
+    model: binding.model,
+    agentExists: known
+  });
+  if (!known) await logger.warn('runtime.agent_model_binding_unknown_agent', {publicModel, agentId: binding.agent});
+}
 // One startup line per provider plus a single summary line. The JSONL keeps the
 // same data for post-mortems; the console line is what an operator reads live.
 const startupProviders = (await providers.list()).map(provider => ({
@@ -2368,8 +2429,8 @@ await logger.info('runtime.startup_summary', {
   providers: startupProviders.length,
   providersEnabled: startupProviders.filter(provider => provider.enabled).length,
   models: startupProviders.reduce((total, provider) => total + provider.modelCount, 0),
-  publicModels: ZOMBIECODER_MODELS.length,
-  publicModelIds: ZOMBIECODER_MODELS.map(model => model.id),
+  publicModels: ZOMBIECODER_MODELS.length + Object.keys(config.agentModelBindings ?? {}).length,
+  publicModelIds: [...Object.keys(config.agentModelBindings ?? {}), ...ZOMBIECODER_MODELS.map(model => model.id)],
   agents: agentScopeRows.length,
   agentsPinned: agentScopeRows.length - globalScopeAgents.length,
   agentsGlobal: globalScopeAgents.length,

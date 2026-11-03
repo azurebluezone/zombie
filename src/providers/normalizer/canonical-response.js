@@ -54,6 +54,13 @@ function safeMessage(message = {}) {
 // tool-call correction is the important one: Gemini and Ollama native both
 // return STOP next to a functionCall, and a client that trusts finish_reason
 // would discard a valid tool call.
+// A stream can legally carry a usage-only event with `choices: []` (Ollama
+// sends one when the client asks for usage). That is not a completion chunk,
+// so callers must skip it before asking the normalizer for a message.
+export function hasCanonicalChoices(raw) {
+  return Array.isArray(raw?.choices) && raw.choices.length > 0;
+}
+
 export function normalizeFinishReason(reason, hasToolCalls = false) {
   const raw = reason == null ? '' : String(reason).trim().toLowerCase();
   if (raw === 'length' || raw === 'max_tokens' || raw === 'max_output_tokens' || raw === 'max_completion_tokens') return 'length';

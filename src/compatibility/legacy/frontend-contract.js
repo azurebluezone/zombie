@@ -6,10 +6,14 @@ import { ZOMBIECODER_MODELS } from '../../providers/masking/zombie-models.js';
  * They do not claim behavioral parity for actions that are not implemented in the modular runtime.
  */
 
-export function legacyModelList({agents=[], providers=[]}={}) {
+export function legacyModelList({agents=[], providers=[], bindings={}}={}) {
   const now = Math.floor(Date.now()/1000);
   // Agent-facing API intentionally exposes only stable ZombieCoder aliases.
   // Raw upstream model IDs remain available through authenticated admin routes.
+  // A configured public agent model (`zombiecoder/<agent>`) is listed first: it
+  // is the id a client such as OpenCode selects, and the runtime resolves it to
+  // the provider/model binding before routing.
+  const bound = Object.keys(bindings ?? {}).map(id => ({id, object:'model', created:now, owned_by:'ZombieCoder'}));
   const routable = (providers ?? []).some(provider => {
     if (provider.enabled === false) return false;
     const models = Array.isArray(provider.models) ? provider.models : [];
@@ -20,10 +24,8 @@ export function legacyModelList({agents=[], providers=[]}={}) {
     });
     return hasTarget;
   });
-  return {
-    object: 'list',
-    data: routable ? ZOMBIECODER_MODELS.map(model => ({id:model.id, object:'model', created:now, owned_by:'ZombieCoder'})) : []
-  };
+  const aliases = routable ? ZOMBIECODER_MODELS.map(model => ({id:model.id, object:'model', created:now, owned_by:'ZombieCoder'})) : [];
+  return { object: 'list', data: [...bound, ...aliases] };
 }
 
 export function legacyProviderModelList(providers=[]) {

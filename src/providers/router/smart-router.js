@@ -92,11 +92,15 @@ export class SmartRouter {
     const {caps, candidates} = await this.candidates(input);
     if (!candidates.length) throw new Error('no_provider_route_available');
     const selected = candidates[0];
+    // A bound public agent model (`zombiecoder/<agent>`) is what the client
+    // asked for. The provider alias it resolved to is an internal step, so the
+    // route echoes the bound id to every masked projection.
+    const boundPublicModel = String(input?.meta?.agentModelBinding?.publicModel ?? '').trim();
     const route = {
       routeId: `route_${randomUUID()}`,
       providerId: selected.providerId,
       model: selected.model || null,
-      publicModel: selected.publicModel || null,
+      publicModel: boundPublicModel || selected.publicModel || null,
       requiredCapabilities: caps,
       candidates: candidates.map(c => ({providerId:c.providerId, model:c.model || null, priority:c.priority, nativeFunctionCalling:c.nativeFunctionCalling, explicitAlias:c.explicitAlias === true})),
       reason: input.provider ? 'explicit_constraint_then_priority' : (selected.explicitAlias ? 'explicit_model_alias' : (input.model ? 'explicit_constraint_then_priority' : 'capability_then_priority')),

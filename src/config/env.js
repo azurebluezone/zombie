@@ -101,6 +101,45 @@ export function reloadProviderEnv() {
   return reloaded;
 }
 
+// A public model id (`zombiecoder/<agent>`) is the client-facing name of an
+// agent, not of an upstream model. The binding says which provider and which
+// model alias the runtime resolves it to; the alias itself stays in the
+// provider's `modelAliases`, so the real upstream id never reaches a client.
+// Invalid entries are reported instead of silently dropped: a typo in a public
+// name would otherwise look like a routing failure at request time.
+const PUBLIC_AGENT_MODEL = /^zombiecoder\/[a-z0-9][a-z0-9._-]*$/i;
+
+export function parseAgentModelBindings(raw) {
+  const bindings = {};
+  const errors = [];
+  let parsed;
+  try { parsed = JSON.parse(String(raw ?? '').trim() || '{}'); }
+  catch { return { bindings, errors: ['AGENT_MODEL_BINDINGS is not valid JSON'] }; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { bindings, errors: ['AGENT_MODEL_BINDINGS must be a JSON object'] };
+  }
+  for (const [rawModel, rawBinding] of Object.entries(parsed)) {
+    const publicModel = String(rawModel ?? '').trim().toLowerCase();
+    if (!PUBLIC_AGENT_MODEL.test(publicModel)) {
+      errors.push(`${rawModel}: public model must look like zombiecoder/<agent>`);
+      continue;
+    }
+    if (!rawBinding || typeof rawBinding !== 'object' || Array.isArray(rawBinding)) {
+      errors.push(`${rawModel}: binding must be an object`);
+      continue;
+    }
+    const model = String(rawBinding.model ?? '').trim();
+    const agent = String(rawBinding.agent ?? publicModel.slice('zombiecoder/'.length)).trim();
+    const provider = String(rawBinding.provider ?? '').trim();
+    if (!agent) { errors.push(`${rawModel}: agent is required`); continue; }
+    if (!model) { errors.push(`${rawModel}: model is required`); continue; }
+    bindings[publicModel] = { agent, provider: provider || null, model };
+  }
+  return { bindings, errors };
+}
+
+const agentModelBindingConfig = parseAgentModelBindings(env('AGENT_MODEL_BINDINGS', ''));
+
 export const config = {
   host: env('HOST', '127.0.0.1'),
   port: numberEnv('PORT', 9999, {min:1,max:65535}),
@@ -235,6 +274,10 @@ export const config = {
   // /home/operator/projects) so a fresh agent is bounded to a useful place
   // instead of the runtime's own data directory.
   agentDefaultWorkingDirectory: env('AGENT_DEFAULT_WORKING_DIRECTORY', '') ? resolveRuntimePath(env('AGENT_DEFAULT_WORKING_DIRECTORY')) : '',
+  // Public agent model ids (`zombiecoder/<agent>`) exposed on /v1/models and
+  // resolved to a provider/model before routing. See parseAgentModelBindings().
+  agentModelBindings: agentModelBindingConfig.bindings,
+  agentModelBindingErrors: agentModelBindingConfig.errors,
   // What the runtime *offers* an agent, not what it *allows*. `narrowed` shows only the
   // tools the request's purpose needs, plus a small always-on set: that removes roughly
   // 1,900 tokens of tool definitions from every round of a tool loop. `full` shows every
