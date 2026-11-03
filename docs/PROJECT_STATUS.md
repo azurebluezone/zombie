@@ -266,13 +266,15 @@ node scripts/verify-remote-agents.mjs
 exit=0
 REMOTE_AGENTS_OK providers=3 agents=12 tool_calls=12 tool_loop=ok models=loaded placeholder_recovery=ok
 report=data/remote-agents-verification.json
-provider gemini model=gemini-3.5-flash-lite catalog=50 chat=ok tool_call=runtime_echo latency_ms=1221
-provider groq model=openai/gpt-oss-20b catalog=11 chat=ok tool_call=runtime_echo latency_ms=398
-provider ollama-cloud-openai model=gpt-oss:20b catalog=25 chat=ok tool_call=runtime_echo latency_ms=942
+provider gemini model=gemini-3.5-flash-lite catalog=50 chat=ok tool_call=runtime_echo
+provider groq model=openai/gpt-oss-20b catalog=11 chat=ok tool_call=runtime_echo
+provider ollama-cloud-openai model=gpt-oss:20b catalog=25 chat=ok tool_call=runtime_echo
 agents provider=gemini model=gemini-3.5-flash-lite tool_calls=code-guru,bug-hunter,security-hero,perf-wizard,doc-king,qa-tyrant,planner,researcher,integrator,customer-experience-specialist,ecommerce-operations-analyst,team-heart
-tool_loop provider=gemini rounds=2 evidence=1 latency_ms=2316
-placeholder_recovery model=gemini-2.5-flash latency_ms=1584
+tool_loop provider=gemini rounds=2 evidence=1
+placeholder_recovery model=gemini-2.5-flash
 ```
+
+Per-run timings and the exact timestamp live in `data/remote-agents-verification.json`.
 
 - Every provider call above went to the real upstream with the key from `.env`;
   no fixture stood in for a provider. Agent mappings were restored by the script.
