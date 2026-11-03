@@ -119,6 +119,13 @@ export const config = {
   sqlitePath: resolveRuntimePath(env('SQLITE_PATH', './data/runtime.sqlite')),
   migrateJsonOnStart: env('MIGRATE_JSON_ON_START', 'false') === 'true',
   allowPlaintextHttp: env('ALLOW_PLAINTEXT_HTTP', 'false') === 'true',
+  // web_search is an operator-selected backend. Keeping the values on config
+  // lets /health report whether the tool is configured without a network call
+  // and without exposing the API key.
+  webSearchEndpoint: env('WEB_SEARCH_ENDPOINT', ''),
+  webSearchApiKey: env('WEB_SEARCH_API_KEY', ''),
+  webSearchResults: numberEnv('WEB_SEARCH_RESULTS', 8, {min:1,max:25}),
+  webSearchTimeoutMs: numberEnv('WEB_SEARCH_TIMEOUT_MS', 15000, {min:1000,max:60000}),
   // Tool execution remains disabled until the deployment verification loop passes.
   executionMode: ['tools-enabled', 'chat-only'].includes(env('ZOMBIECODER_EXECUTION_MODE', 'chat-only')) ? env('ZOMBIECODER_EXECUTION_MODE', 'chat-only') : 'chat-only',
   ollamaBaseUrl: env('OLLAMA_BASE_URL', 'http://127.0.0.1:11434/v1'),

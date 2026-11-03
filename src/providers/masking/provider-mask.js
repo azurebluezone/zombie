@@ -2,9 +2,21 @@ export const ZOMBIE_PROVIDER_NAME = 'ZombieCoder';
 
 export function maskProviderName() { return ZOMBIE_PROVIDER_NAME; }
 
+// The public surface may only name a routing alias it created itself. Anything
+// else — an upstream model id such as `gpt-oss:20b` or `gemini-2.5-flash` — is
+// provider identity and must be replaced. The previous implementation echoed
+// whatever `configuredName` it was given, so one caller passing a real model
+// name was enough to leak it.
+const PUBLIC_MODEL_PATTERN = /^(?:zombie-[a-z0-9][a-z0-9._-]*|zombiecoder\/[a-z0-9][a-z0-9._-]*)$/i;
+
+export function isPublicModelName(value) {
+  return PUBLIC_MODEL_PATTERN.test(String(value ?? '').trim());
+}
+
 export function maskModelName({agentId='code-guru', configuredName='' }={}) {
   const safeAgent = String(agentId || 'code-guru').replace(/[^a-zA-Z0-9._-]/g, '-');
-  return String(configuredName || '').trim() || `zombiecoder/${safeAgent}`;
+  const configured = String(configuredName ?? '').trim();
+  return isPublicModelName(configured) ? configured : `zombiecoder/${safeAgent}`;
 }
 
 export function createAgentProviderIdentity({agentId='code-guru', configuredModel='', capabilities=[]}={}) {
@@ -60,7 +72,10 @@ export function maskEvidenceForPublic(evidence) {
 export function maskRouteForPublic(route, {publicModel=null}={}) {
   if (!route || typeof route !== 'object') return route ?? null;
   const candidates = Array.isArray(route.candidates) ? route.candidates : [];
-  const model = publicModel ?? route.publicModel ?? null;
+  const requested = publicModel ?? route.publicModel ?? null;
+  // A route summary without a public alias says `model: null`; it never falls
+  // back to the upstream model name just to fill the field.
+  const model = isPublicModelName(requested) ? requested : null;
   return {
     routeId: route.routeId ?? null,
     providerId: 'masked',

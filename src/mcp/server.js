@@ -32,9 +32,13 @@ export function mcpServerToolCatalog(tools = []) {
   }));
 }
 
+export function isSupportedProtocolVersion(value) {
+  return MCP_PROTOCOL_VERSIONS.includes(String(value ?? ''));
+}
+
 export function negotiateProtocolVersion(requested) {
   const value = String(requested ?? '');
-  return MCP_PROTOCOL_VERSIONS.includes(value) ? value : LATEST_MCP_PROTOCOL_VERSION;
+  return isSupportedProtocolVersion(value) ? value : LATEST_MCP_PROTOCOL_VERSION;
 }
 
 function rpcResult(id, result) { return { jsonrpc: JSONRPC, id: id ?? null, result }; }
@@ -60,13 +64,17 @@ export async function handleMcpServerMessage(message, { tools = [], executeTool,
 
   switch (message.method) {
     case 'initialize': {
-      const requested = message.params?.protocolVersion;
+      const protocolVersion = negotiateProtocolVersion(message.params?.protocolVersion);
       return {
         body: rpcResult(id, {
-          protocolVersion: negotiateProtocolVersion(requested),
+          protocolVersion,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: MCP_SERVER_NAME, version: RUNTIME_VERSION }
         }),
+        // The HTTP layer echoes this value in MCP-Protocol-Version. Returning
+        // the negotiated version (not the newest one) keeps the header and the
+        // body in agreement for clients that negotiate an older revision.
+        protocolVersion,
         sessionId: sessionId ?? `mcp-${randomUUID()}`
       };
     }

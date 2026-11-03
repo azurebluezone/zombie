@@ -50,13 +50,13 @@ own Laravel is. The runtime only answers when the client's Laravel asks it to.
 
 ---
 
-## 2. Where we stand (measured 2026-10-17)
+## 2. Where we stand (historical snapshot, measured 2026-10-17; current suite is 450/450 on 2026-11-03)
 
 | Fact | Value | How to re-measure |
 | --- | --- | --- |
-| Branch state | `main` at `87620ce`, equal to `origin/main` | `git status -sb` |
-| Regression suite | **409 tests, 408 pass, 0 fail, 1 skipped** | `npm test` |
-| The skip | PHP syntax check — no `php` binary here, reported `NOT_TESTED` | `npm test \| grep skipped` |
+| Branch state | `main` equal to `origin/main` after the round-4 push | `git status -sb` |
+| Regression suite | **450 tests, 450 pass, 0 fail, 0 skipped** (2026-11-03) | `npm test` |
+| The skip | none in the 2026-11-03 run; a missing `php` binary is still reported `NOT_TESTED` | `npm test \| grep skipped` |
 | Zero-dependency rule | clean (no `node_modules`, no lockfile) | `node scripts/check-zero-deps.mjs` |
 | Route inventory | 98 concrete routes, 59 handler blocks, 10 notes | `curl -s localhost:9999/v1/admin/routes` |
 | User rows in the store | 20 rows: 10 active, 10 revoked (all are our own test rows) | `GET /v1/admin/applications` |
@@ -197,9 +197,9 @@ know it worked, and the evidence gate that has to pass before it may be called d
 ## 6. How to pick this up
 
 ```bash
-cd /home/xubuntu/zombie
-git status -sb                 # expect: clean, main == origin/main
-npm test                       # expect: 409 tests, 408 pass, 0 fail, 1 skipped
+cd /home/sahon/zombie
+git status -sb                 # expect: clean, main == origin/main after the round-4 push
+npm test                       # expect: 450 tests, 450 pass, 0 fail, 0 skipped
 node scripts/check-zero-deps.mjs
 curl -s localhost:9999/health  # if nothing answers: node start.js --stop && npm start
 

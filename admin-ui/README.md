@@ -64,6 +64,45 @@ Boundary evidence: `ss -lntp` shows the runtime on `127.0.0.1:9999`/`10443` only
 nginx on `8080`/`8443`; `tests/phase62-remote-admin-edge.test.js` pins TLS,
 loopback upstream, the rate limit and the absence of an edge-level CORS header.
 
+## Local Caddy TLS edge (installer path)
+
+`install.sh` installs or reuses Caddy and starts `deploy/caddy/Caddyfile.runtime`.
+It terminates TLS with Caddy's internal CA on loopback only:
+
+| URL | Upstream |
+| --- | --- |
+| `https://localhost:9443` | runtime `127.0.0.1:9999` |
+| `https://localhost:9444` | this admin UI `127.0.0.1:8088` |
+
+The CA root lives at `~/.local/share/caddy/pki/authorities/local/root.crt`. Verify
+without disabling certificate checks:
+
+```bash
+curl -fsS --cacert ~/.local/share/caddy/pki/authorities/local/root.crt \
+  https://localhost:9443/health
+curl -fsS --cacert ~/.local/share/caddy/pki/authorities/local/root.crt \
+  https://localhost:9444/
+```
+
+Open `https://localhost:9444/`, set Base URL to `https://localhost:9443` (or the
+loopback HTTP origin if you are not using Caddy), paste `ADMIN_TOKEN`, and
+**Connect**. `install.sh` writes both origins into `CORS_ALLOW_ORIGINS` already.
+Ports are configurable with `ZC_CADDY_HTTPS_PORT` and `ZC_ADMIN_HTTPS_PORT`.
+
+## Web search and external MCP
+
+The Tools page shows a banner for the `web_search` backend and the MCP page shows
+the spec-gap banner plus the live external endpoint status:
+
+- `web_search` uses `WEB_SEARCH_ENDPOINT` (SearXNG-compatible JSON). The bundled
+  `scripts/web-search-mcp-server.mjs` serves `/search` on `127.0.0.1:8091`.
+- The same process serves MCP Streamable HTTP on `/mcp`; `external-mcp/servers.json`
+  declares it as `web-search` and `install.sh` registers/discover it.
+- `GET /health` reports `externalMcp.registered`, `externalMcp.discovered`,
+  `externalMcp.tools`, and `webSearch.configured`. `GET /api/config/mcp` reports
+  `current_spec_version`/`spec_gap`; the runtime speaks session-based MCP through
+  `2025-11-25`, and the current `2026-07-28` stateless revision is not implemented.
+
 ## Pages
 
 | Page | Endpoint(s) | What it proves |

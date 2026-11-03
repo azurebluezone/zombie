@@ -15,8 +15,8 @@ import { extractModelIds, pickDefaultModel } from './providers/model-catalog.js'
 import { ContextResolver } from './context/resolver.js';
 import { McpPermissions } from './mcp/permissions.js';
 import { McpAudit } from './mcp/audit.js';
-import { callMcpTool, LATEST_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSIONS } from './mcp/client.js';
-import { handleMcpServerMessage, mcpServerToolCatalog, negotiateProtocolVersion, MCP_SERVER_NAME } from './mcp/server.js';
+import { callMcpTool, CURRENT_MCP_SPEC_VERSION, LATEST_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSIONS, MCP_SPEC_GAP } from './mcp/client.js';
+import { handleMcpServerMessage, mcpServerToolCatalog, negotiateProtocolVersion, isSupportedProtocolVersion, MCP_SERVER_NAME } from './mcp/server.js';
 import { validateToolArguments } from './mcp/schema.js';
 import { AppLimits } from './mcp/limits.js';
 import { McpConnections } from './mcp/connections.js';
@@ -28,10 +28,11 @@ import { EntityDoor } from './entities/entity-door.js';
 import { CanonicalResponseNormalizer } from './providers/normalizer/canonical-response.js';
 import { PersonaRegistry } from './agents/persona-registry.js';
 import { AdminService } from './admin/admin-service.js';
+import { RequestLog } from './admin/request-log.js';
 import { createTokenVault } from './auth/token-vault.js';
 import { CORE_CONSTITUTION, CONSTITUTION_STATEMENTS } from './policy/constitution.js';
 import { send, body, bearer } from './http/json.js';
-import { applySecurityHeaders, isTlsRequest } from './http/security-headers.js';
+import { applySecurityHeaders, isTlsRequest, matchesAllowedOrigin } from './http/security-headers.js';
 import { providerErrorDetail, retryAfterMsFrom } from './providers/adapters/request-shape.js';
 import { ExecutionOrchestrator } from './execution/orchestrator.js';
 import { ToolRegistry } from './tools/registry.js';
@@ -101,6 +102,8 @@ process.env.INSTANCE_ID = runtimeIdentity.instanceId;
 if (config.uds.enabled && (!process.env.UDS_PATH || process.env.UDS_PATH === './data/runtime.sock')) config.uds.path = path.resolve(config.dataDir, `runtime-${runtimeIdentity.runtimeId.replace(/[^a-zA-Z0-9._-]/g,'_')}.sock`);
 await logger.info('runtime.env_loaded', {path:envLoadResult.path,loaded:envLoadResult.loaded,keys:envLoadResult.keys,totalKeys:envLoadResult.totalKeys,skipped:envLoadResult.skipped});
 const store = await createStore(config);
+const trafficLog = new RequestLog({ store });
+await trafficLog.init();
 const mcp = new McpRegistry(store, {networkPolicy:config.mcpNetworkPolicy});
 const externalMcp = new ExternalMcpRegistry({store, mcpRegistry:mcp, root:fromRoot('external-mcp'), logger});
 const providers = new ProviderRegistry(store, config);
@@ -533,7 +536,7 @@ const requestHandler = async (req,res) => {
   const requestId = String(req.headers['x-request-id'] || id('req'));
   const traceId = String(req.headers['x-trace-id'] || id('trace'));
   const startedAt = Date.now();
-  const requestState = {applicationId:null, operation:null, outcome:'unknown', agentId:null};
+  const requestState = {applicationId:null, operation:null, outcome:'unknown', agentId:null, providerId:null, model:null, stream:false, path:null};
   // Agent run accounting. Failures are recorded once, from the outer catch, so
   // every path (chat, tool loop, stream, execution) is covered even when it
   // throws before its own completion hook runs.
@@ -546,14 +549,36 @@ const requestHandler = async (req,res) => {
   applySecurityHeaders(res, {isTls:isTlsRequest(req), origin:req.headers.origin, allowedOrigins:config.corsAllowOrigins});
   const requestLog = logger.child({requestId, traceId, runtimeId:runtimeIdentity.runtimeId, instanceId:runtimeIdentity.instanceId, method:req.method, path:req.url});
   const originalEnd = res.end.bind(res);
+  let requestRecorded = false;
   res.end = (...args) => {
     const outcome = requestState.outcome === 'unknown'
       ? (res.statusCode >= 400 ? 'failure' : 'success')
       : requestState.outcome;
     requestLog.info('http.response', {statusCode:res.statusCode, durationMs:Date.now()-startedAt, applicationId:requestState.applicationId, operation:requestState.operation, outcome});
+    // Real API traffic, metadata only. The request log is a separate admin
+    // feature: it must never delay or fail the response it describes.
+    if (!requestRecorded && requestState.operation === 'POST /v1/chat/completions') {
+      requestRecorded = true;
+      trafficLog.record({
+        requestId,
+        applicationId: requestState.applicationId,
+        operation: requestState.operation,
+        method: req.method,
+        path: requestState.path,
+        status: res.statusCode,
+        ok: res.statusCode < 400,
+        outcome,
+        agentId: requestState.agentId,
+        providerId: requestState.providerId,
+        model: requestState.model,
+        stream: requestState.stream === true,
+        latencyMs: Date.now() - startedAt
+      });
+    }
     return originalEnd(...args);
   };
   requestState.operation = `${req.method} ${new URL(req.url, `http://${req.headers.host ?? 'localhost'}`).pathname}`;
+  requestState.path = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`).pathname;
   requestLog.info('http.request', {operation:requestState.operation});
   try {
     const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
@@ -596,8 +621,15 @@ const requestHandler = async (req,res) => {
         commonTools: typeof toolsRegistry?.list === 'function', agentToolBoundaries: Object.keys(ECOMMERCE_AGENT_TOOL_BOUNDARIES).length > 0, sessionMetadata: typeof sanitizeSessionMetadata === 'function', circuitBreaker: Boolean(sharedOutboundCircuitBreaker), mcpClient: typeof mcp?.tools === 'function', mcpServer: config.mcpServerEnabled===true
       };
       const agentAudit = await auditAgentRuntime({registry:agentsRegistry,personas,boundaryResolver:getAgentToolBoundary});
+      // The bootstrap result only describes the first sync. An endpoint that was
+      // registered by an earlier boot reported registered:0 forever, which is the
+      // exact "0 registered" lie the admin console showed. Read the live registry.
+      const externalMcpServers = await externalMcp.status();
+      const externalMcpEndpoints = await mcp.list();
+      let webSearchOrigin = null;
+      try { webSearchOrigin = config.webSearchEndpoint ? new URL(config.webSearchEndpoint).origin : null; } catch {}
       requestState.outcome = 'success';
-      return send(res,200,{ok:true,service:'zombiecoder-runtime',version:RUNTIME_VERSION,phase:RUNTIME_PHASE,runtime:runtimeIdentity,executionMode:config.executionMode,toolAccessMode:config.toolAccessMode,providerMode:'configured-compatible-endpoint',providerBootstrap:{registered:providerBootstrap.registered.length,sync:providerBootstrap.sync ? {ok:providerBootstrap.sync.ok !== false,providerCount:providerBootstrap.sync.providerCount ?? null,modelCount:providerBootstrap.sync.modelCount ?? null} : null},externalMcp:{folderCount:externalMcpBootstrap.folderCount,environmentCount:externalMcpBootstrap.environmentCount,registered:externalMcpBootstrap.definitions.filter(x=>x.status==='registered').length},legacyFeatureAudit:{source:legacyAudit.source,behaviorParityVerified:legacyAudit.behaviorParityVerified,counts:legacyAudit.counts,warnings:legacyAudit.warnings.length},legacyPurposeReconciliation:{behaviorParityVerified:legacyReconciliation.behaviorParityVerified,counts:legacyReconciliation.counts},coreModules,agentRuntime:agentAudit,circuitBreaker:{failureThreshold:sharedOutboundCircuitBreaker.failureThreshold,resetTimeoutMs:sharedOutboundCircuitBreaker.resetTimeoutMs,halfOpenMaxCalls:sharedOutboundCircuitBreaker.halfOpenMaxCalls}});
+      return send(res,200,{ok:true,service:'zombiecoder-runtime',version:RUNTIME_VERSION,phase:RUNTIME_PHASE,runtime:runtimeIdentity,executionMode:config.executionMode,toolAccessMode:config.toolAccessMode,providerMode:'configured-compatible-endpoint',providerBootstrap:{registered:providerBootstrap.registered.length,sync:providerBootstrap.sync ? {ok:providerBootstrap.sync.ok !== false,providerCount:providerBootstrap.sync.providerCount ?? null,modelCount:providerBootstrap.sync.modelCount ?? null} : null},externalMcp:{folderCount:externalMcpBootstrap.folderCount,environmentCount:externalMcpBootstrap.environmentCount,registered:externalMcpServers.filter(x=>x.configured).length,discovered:externalMcpServers.filter(x=>x.status==='discovered').length,tools:externalMcpEndpoints.reduce((total,endpoint)=>total+(Array.isArray(endpoint.tools)?endpoint.tools.length:0),0),servers:externalMcpServers.map(server=>({id:server.id,status:server.status,configured:server.configured,tools:server.tools,transport:server.transport}))},webSearch:{configured:Boolean(config.webSearchEndpoint),endpoint:webSearchOrigin,results:config.webSearchResults,apiKeyConfigured:Boolean(config.webSearchApiKey)},legacyFeatureAudit:{source:legacyAudit.source,behaviorParityVerified:legacyAudit.behaviorParityVerified,counts:legacyAudit.counts,warnings:legacyAudit.warnings.length},legacyPurposeReconciliation:{behaviorParityVerified:legacyReconciliation.behaviorParityVerified,counts:legacyReconciliation.counts},coreModules,agentRuntime:agentAudit,circuitBreaker:{failureThreshold:sharedOutboundCircuitBreaker.failureThreshold,resetTimeoutMs:sharedOutboundCircuitBreaker.resetTimeoutMs,halfOpenMaxCalls:sharedOutboundCircuitBreaker.halfOpenMaxCalls}});
     }
     // Legacy frontend read contracts. These are compatibility envelopes, not provider disclosure.
     if (req.method==='GET' && url.pathname==='/v1/models') {
@@ -627,16 +659,28 @@ const requestHandler = async (req,res) => {
         // Honest answer instead of a bare 404. Without MCP_SERVER_ENABLED=true this
         // runtime consumes MCP servers as a CLIENT only; the API must not advertise
         // a server capability that is switched off.
-        return send(res,501,{error:'mcp_server_not_implemented',role:'mcp-client',protocol:'JSON-RPC 2.0',supported_protocol_versions:MCP_PROTOCOL_VERSIONS,note:'This runtime consumes MCP servers as a client; it does not expose an MCP server endpoint.'});
+        return send(res,501,{error:'mcp_server_not_implemented',role:'mcp-client',protocol:'JSON-RPC 2.0',current_spec_version:CURRENT_MCP_SPEC_VERSION,spec_gap:MCP_SPEC_GAP,supported_protocol_versions:MCP_PROTOCOL_VERSIONS,note:'This runtime consumes MCP servers as a client; it does not expose an MCP server endpoint. It speaks session-based MCP through 2025-11-25; the current 2026-07-28 stateless revision is not implemented.'});
       }
       // Inbound MCP (Streamable HTTP server). POST carries JSON-RPC 2.0;
-      // GET/DELETE are the optional session-channel/termination verbs.
-      if (req.method==='DELETE') {
-        const ended=req.headers['mcp-session-id'] ? String(req.headers['mcp-session-id']) : '';
-        if (ended) await mcpClients.close(ended).catch(()=>{});
-        res.writeHead(204,{'mcp-session-id':ended}); return res.end();
+      // DELETE is the optional session-termination verb. GET is answered with
+      // 405 per spec because this server does not offer a server-initiated SSE
+      // stream.
+      //
+      // The spec requires Origin validation to stop DNS rebinding. A missing
+      // Origin (curl, server-side client) is fine; a browser-supplied Origin
+      // must be this runtime or an explicitly allowlisted proxy.
+      const requestOrigin=String(req.headers.origin??'').trim();
+      if (requestOrigin) {
+        const forwardedProto=String(req.headers['x-forwarded-proto']??'').split(',')[0].trim()||(req.socket.encrypted?'https':'http');
+        const selfOrigin=`${forwardedProto}://${String(req.headers.host??'')}`;
+        const allowedOrigins=[...config.corsAllowOrigins,selfOrigin].filter(Boolean);
+        if (!matchesAllowedOrigin(requestOrigin,allowedOrigins)) {
+          requestState.outcome='forbidden';
+          await requestLog.warn('mcp.server.origin_rejected',{origin:requestOrigin});
+          return send(res,403,{jsonrpc:'2.0',id:null,error:{code:-32000,message:'origin_not_allowed'}});
+        }
       }
-      if (req.method!=='POST') { res.writeHead(405,{'allow':'POST, DELETE'}); return res.end(); }
+      if (req.method!=='POST' && req.method!=='DELETE') { res.writeHead(405,{'allow':'POST, DELETE'}); return res.end(); }
       // A presented key always wins, so an authenticated client is attributed to
       // its own application even while authentication is disabled. Only when no
       // key is presented (or the key is invalid) does the policy decide: either
@@ -655,15 +699,46 @@ const requestHandler = async (req,res) => {
         // to a static token instead of attempting Dynamic Client Registration.
         return send(res,401,{jsonrpc:'2.0',id:null,error:{code:-32001,message:'unauthorized'}},{'www-authenticate':'Bearer realm="zombiecoder", error="invalid_token"'});
       }
+      if (req.method==='DELETE') {
+        const ended=req.headers['mcp-session-id'] ? String(req.headers['mcp-session-id']) : '';
+        if (!ended) return send(res,400,{jsonrpc:'2.0',id:null,error:{code:-32000,message:'mcp_session_id_required'}});
+        const endedSession=await mcpClients.get(ended);
+        if (!endedSession || endedSession.status==='closed') return send(res,404,{jsonrpc:'2.0',id:null,error:{code:-32000,message:'mcp_session_not_found'}});
+        await mcpClients.close(ended).catch(()=>{});
+        res.writeHead(204,{'mcp-session-id':ended,...(endedSession.protocolVersion?{'mcp-protocol-version':endedSession.protocolVersion}:{})}); return res.end();
+      }
       let mcpMessage;
       try { mcpMessage=await body(req, config.maxBodyBytes); }
       catch (error) { return send(res, Number(error?.statusCode)||400, {jsonrpc:'2.0',id:null,error:{code:-32700,message:'parse_error'}}); }
       const mcpRequestId=String(mcpMessage?.id ?? id('req'));
       const inboundSession=req.headers['mcp-session-id'] ? String(req.headers['mcp-session-id']) : null;
       requestState.operation='POST /mcp';
+      const validEnvelope=Boolean(mcpMessage)&&typeof mcpMessage==='object'&&!Array.isArray(mcpMessage)&&mcpMessage.jsonrpc==='2.0'&&typeof mcpMessage.method==='string';
+      const isInitialize=validEnvelope&&mcpMessage.method==='initialize';
+      let mcpProtocolVersion=null;
+      let sessionRecord=null;
+      if (isInitialize) {
+        mcpProtocolVersion=negotiateProtocolVersion(mcpMessage?.params?.protocolVersion);
+      } else if (validEnvelope) {
+        // Every non-initialize call must name the session it belongs to. The
+        // spec allows a server to require it; without this check a request could
+        // reuse tools/list against a session the server never issued.
+        if (!inboundSession) return send(res,400,{jsonrpc:'2.0',id:mcpMessage?.id??null,error:{code:-32000,message:'mcp_session_id_required'}});
+        sessionRecord=await mcpClients.get(inboundSession);
+        if (!sessionRecord || sessionRecord.status==='closed') return send(res,404,{jsonrpc:'2.0',id:mcpMessage?.id??null,error:{code:-32000,message:'mcp_session_not_found'}});
+        // The client MUST send the version negotiated during initialize. A
+        // missing or unknown value is rejected instead of silently falling back
+        // to the newest revision, which is how the header and the body drifted
+        // apart in the first place.
+        const requestedVersion=String(req.headers['mcp-protocol-version']??'').trim();
+        if (!requestedVersion) return send(res,400,{jsonrpc:'2.0',id:mcpMessage?.id??null,error:{code:-32000,message:'mcp_protocol_version_required'}});
+        if (!isSupportedProtocolVersion(requestedVersion)) return send(res,400,{jsonrpc:'2.0',id:mcpMessage?.id??null,error:{code:-32000,message:'mcp_protocol_version_unsupported',data:{supported:MCP_PROTOCOL_VERSIONS}}});
+        if (sessionRecord.protocolVersion && requestedVersion!==sessionRecord.protocolVersion) return send(res,400,{jsonrpc:'2.0',id:mcpMessage?.id??null,error:{code:-32000,message:'mcp_protocol_version_mismatch',data:{negotiated:sessionRecord.protocolVersion,requested:requestedVersion}}});
+        mcpProtocolVersion=requestedVersion;
+      }
       const outcome=await handleMcpServerMessage(mcpMessage, {
         tools: await toolsRegistry.list(),
-        sessionId: inboundSession,
+        sessionId: isInitialize ? null : inboundSession,
         executeTool: (name,args,meta)=>executeMcpServerTool(mcpApp.id,name,args,mcpRequestId,meta)
       });
       requestState.outcome='accepted';
@@ -673,8 +748,8 @@ const requestHandler = async (req,res) => {
       if (effectiveSession) {
         await mcpClients.touch({
           sessionId: effectiveSession,
-          clientInfo: mcpMessage?.method === 'initialize' ? (mcpMessage?.params?.clientInfo ?? null) : null,
-          protocolVersion: mcpMessage?.method === 'initialize' ? negotiateProtocolVersion(mcpMessage?.params?.protocolVersion) : null,
+          clientInfo: isInitialize ? (mcpMessage?.params?.clientInfo ?? null) : null,
+          protocolVersion: mcpProtocolVersion ?? sessionRecord?.protocolVersion ?? null,
           applicationId: mcpApp.id,
           applicationName: mcpApp.name ?? null,
           userAgent: req.headers['user-agent'] ?? null,
@@ -683,7 +758,11 @@ const requestHandler = async (req,res) => {
           requestId: mcpRequestId
         }).catch(()=>{});
       }
-      const headers=outcome.sessionId?{'mcp-session-id':outcome.sessionId,'mcp-protocol-version':LATEST_MCP_PROTOCOL_VERSION}:{};
+      // Echo the version this session actually negotiated, never the newest
+      // version the build happens to support.
+      const headers={};
+      if (effectiveSession) headers['mcp-session-id']=effectiveSession;
+      if (mcpProtocolVersion) headers['mcp-protocol-version']=mcpProtocolVersion;
       if (!outcome.body) { res.writeHead(202,headers); return res.end(); }
       return send(res,200,outcome.body,headers);
     }
@@ -692,12 +771,12 @@ const requestHandler = async (req,res) => {
       const endpoints=await mcp.list();
       const serverEnabled=config.mcpServerEnabled===true;
       const serverTools=serverEnabled?mcpServerToolCatalog(await toolsRegistry.list()).map(tool=>tool.name):[];
-      return send(res,200,{name:'ZombieCoder Runtime',role:serverEnabled?'mcp-client+server':'mcp-client',server:{implemented:serverEnabled,protocol:'JSON-RPC 2.0',protocol_version:LATEST_MCP_PROTOCOL_VERSION,supported_protocol_versions:MCP_PROTOCOL_VERSIONS,note:serverEnabled?'This runtime consumes MCP servers as a client and, because MCP_SERVER_ENABLED=true, also serves MCP on POST /mcp.':'This runtime consumes MCP servers as a client; it does not expose an MCP server endpoint.',tools:serverTools},transport:{type:'http',url:serverEnabled?`${publicUrl}/mcp`:null,implemented:serverEnabled},endpoints:{http:publicUrl,connect:null},client:{supported_protocol_versions:MCP_PROTOCOL_VERSIONS,endpoints:endpoints.map(endpoint=>({id:endpoint.id,name:endpoint.name,status:endpoint.status,protocol_version:endpoint.protocolVersion??null,toolCount:Array.isArray(endpoint.tools)?endpoint.tools.length:0}))},tools:(await mcp.tools()).map(t=>t.qualifiedName),timeout:300000});
+      return send(res,200,{name:'ZombieCoder Runtime',role:serverEnabled?'mcp-client+server':'mcp-client',current_spec_version:CURRENT_MCP_SPEC_VERSION,spec_gap:MCP_SPEC_GAP,server:{implemented:serverEnabled,protocol:'JSON-RPC 2.0',protocol_version:LATEST_MCP_PROTOCOL_VERSION,supported_protocol_versions:MCP_PROTOCOL_VERSIONS,current_spec_version:CURRENT_MCP_SPEC_VERSION,spec_gap:MCP_SPEC_GAP,note:serverEnabled?'This runtime consumes MCP servers as a client and, because MCP_SERVER_ENABLED=true, also serves MCP on POST /mcp. It speaks session-based MCP through 2025-11-25; the current 2026-07-28 stateless revision is not implemented.':'This runtime consumes MCP servers as a client; it does not expose an MCP server endpoint. It speaks session-based MCP through 2025-11-25; the current 2026-07-28 stateless revision is not implemented.',tools:serverTools},transport:{type:'http',url:serverEnabled?`${publicUrl}/mcp`:null,implemented:serverEnabled},endpoints:{http:publicUrl,connect:null},client:{supported_protocol_versions:MCP_PROTOCOL_VERSIONS,current_spec_version:CURRENT_MCP_SPEC_VERSION,spec_gap:MCP_SPEC_GAP,endpoints:endpoints.map(endpoint=>({id:endpoint.id,name:endpoint.name,status:endpoint.status,protocol_version:endpoint.protocolVersion??null,toolCount:Array.isArray(endpoint.tools)?endpoint.tools.length:0}))},tools:(await mcp.tools()).map(t=>t.qualifiedName),timeout:300000});
     }
     if (req.method==='GET' && url.pathname==='/api/mcp-clients') {
       const publicUrl=`${req.headers['x-forwarded-proto']||'http'}://${req.headers.host||`localhost:${config.port}`}`;
       const serverEnabled=config.mcpServerEnabled===true;
-      return send(res,200,{domain:req.headers.host||'localhost',serverType:'runtime',version:RUNTIME_VERSION,total_requests:null,active_connections:null,connected_clients:await connections.list(),tools:(await mcp.tools()).length,server_url:serverEnabled?`${publicUrl}/mcp`:null,server_implemented:serverEnabled,protocol:'JSON-RPC 2.0',protocol_version:LATEST_MCP_PROTOCOL_VERSION,supported_protocol_versions:MCP_PROTOCOL_VERSIONS,outbound_protocol_version:LATEST_MCP_PROTOCOL_VERSION,note:serverEnabled?'This runtime also serves MCP on POST /mcp (MCP_SERVER_ENABLED=true); protocol_version is the version this runtime uses as an MCP client and server.':'No MCP server endpoint is exposed; protocol_version is the version this runtime uses when it acts as an MCP client.'});
+      return send(res,200,{domain:req.headers.host||'localhost',serverType:'runtime',version:RUNTIME_VERSION,total_requests:null,active_connections:null,connected_clients:await connections.list(),tools:(await mcp.tools()).length,server_url:serverEnabled?`${publicUrl}/mcp`:null,server_implemented:serverEnabled,protocol:'JSON-RPC 2.0',protocol_version:LATEST_MCP_PROTOCOL_VERSION,supported_protocol_versions:MCP_PROTOCOL_VERSIONS,current_spec_version:CURRENT_MCP_SPEC_VERSION,spec_gap:MCP_SPEC_GAP,outbound_protocol_version:LATEST_MCP_PROTOCOL_VERSION,note:serverEnabled?'This runtime also serves MCP on POST /mcp (MCP_SERVER_ENABLED=true); protocol_version is the legacy session-based version this runtime uses as an MCP client and server. The current 2026-07-28 stateless revision is not implemented.':'No MCP server endpoint is exposed; protocol_version is the legacy session-based version this runtime uses when it acts as an MCP client. The current 2026-07-28 stateless revision is not implemented.'});
     }
     if (req.method==='GET' && url.pathname==='/api/clients') return send(res,200,{clients:await connections.list(),count:(await connections.list()).length});
 
@@ -939,7 +1018,12 @@ const requestHandler = async (req,res) => {
     }
     if (req.method==='POST' && url.pathname==='/v1/admin/registry/external-mcp/sync') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
-      return send(res,200,{sync:await externalMcp.sync(),servers:await externalMcp.status()});
+      const input=await body(req,config.maxBodyBytes).catch(()=>({}));
+      // A sync that only writes rows leaves a newly declared endpoint with
+      // status "registered" and zero tools, which looks identical to a dead
+      // endpoint. Discovery is the default; an operator can opt out explicitly.
+      const discover=input?.discover!==false;
+      return send(res,200,{sync:await externalMcp.sync({discover,refreshDiscovered:discover}),servers:await externalMcp.status(),endpoints:await mcp.list()});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/applications/capabilities') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -1364,6 +1448,62 @@ const requestHandler = async (req,res) => {
       if(model) runs=runs.filter(r=>r.model===model);
       runs.sort((a,b)=>String(b.checkedAt).localeCompare(String(a.checkedAt)));
       return send(res,200,{runs:runs.slice(0,limit),total:runs.length});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/requests') {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const result=await trafficLog.list({
+        limit:url.searchParams.get('limit') ?? 50,
+        before:url.searchParams.get('before'),
+        applicationId:url.searchParams.get('applicationId'),
+        status:url.searchParams.get('status'),
+        ok:url.searchParams.get('ok')
+      });
+      return send(res,200,{...result,settings:trafficLog.settings()});
+    }
+    if (req.method==='GET' && url.pathname==='/v1/admin/requests/settings') {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      return send(res,200,{settings:trafficLog.settings()});
+    }
+    // Switching recording off stops new rows only. Reading, and therefore the
+    // evidence of what already happened, stays available.
+    if (req.method==='PATCH' && url.pathname==='/v1/admin/requests/settings') {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const input=await body(req,config.maxBodyBytes);
+      if (typeof input?.recording !== 'boolean') return send(res,400,{error:'recording_boolean_required'});
+      const settings=await trafficLog.setRecording(input.recording);
+      return send(res,200,{settings,message:input.recording?'Request recording is on: new POST /v1/chat/completions calls are stored.':'Request recording is off: new calls are not stored, existing rows remain readable.'});
+    }
+    // One assembled payload for the provider x model grid. The console used to
+    // join three endpoints in the browser; that let the screen disagree with the
+    // API about what counts as enabled.
+    if (req.method==='GET' && url.pathname==='/v1/admin/provider-matrix') {
+      if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
+      const list=await providers.list();
+      const runs=await store.read('model-tests',[]);
+      const latest=new Map();
+      for(const run of runs){
+        const key=`${run.providerId}::${run.model}`;
+        const previous=latest.get(key);
+        if(!previous || String(run.checkedAt)>String(previous.checkedAt)) latest.set(key,run);
+      }
+      const modelSet=new Set();
+      for(const provider of list) for(const model of provider.models??[]) modelSet.add(model);
+      const limit=Math.min(50,Math.max(1,Number(url.searchParams.get('models')||24)));
+      const models=[...modelSet].sort().slice(0,limit);
+      const cells=[];
+      for(const provider of list){
+        for(const model of models){
+          const present=(provider.models??[]).includes(model);
+          const lastTest=latest.get(`${provider.id}::${model}`) ?? null;
+          if(!present&&!lastTest) continue;
+          cells.push({providerId:provider.id,model,present,enabled:present&&provider.enabled!==false&&!(provider.disabledModels??[]).includes(model),defaultModel:provider.defaultModel===model,lastTest:lastTest?{ok:lastTest.ok===true,latencyMs:lastTest.latencyMs??null,checkedAt:lastTest.checkedAt??null}:null});
+        }
+      }
+      return send(res,200,{
+        generatedAt:new Date().toISOString(),
+        providers:list.map(p=>({id:p.id,name:p.name,enabled:p.enabled!==false,priority:p.priority??null,driver:p.driver??null,healthStatus:p.healthStatus??null,defaultModel:p.defaultModel??null,modelCount:(p.models??[]).length,capabilities:Object.keys(p.capabilities??{}).filter(k=>p.capabilities[k])})),
+        models,totalModels:modelSet.size,truncated:modelSet.size>models.length,cells
+      });
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/agent-model-mappings') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -1958,6 +2098,9 @@ const requestHandler = async (req,res) => {
         let providerId = route.providerId;
         let provider = await providers.resolve(providerId);
         let model = await providers.resolveModel(providerId, route.model || input.model);
+        requestState.stream = true;
+        requestState.providerId = provider.id;
+        requestState.model = model;
         const streamArchiveForChat=streamSession ? await sessionState.archive(streamSession.id,app.id) : [];
         const streamEvidence=streamSession ? (await store.read('evidence',[])).filter(item=>item.contextId===streamSession.id).slice(-8) : [];
         const boundedChatStream=boundedConversation(input.messages,streamArchiveForChat,streamArchiveForChat,streamGoal);
@@ -2087,6 +2230,8 @@ const requestHandler = async (req,res) => {
         }
       }
       if (result === null) throw providerLastError ?? new Error('provider_route_failed');
+      requestState.providerId = provider.id;
+      requestState.model = model;
       const canonicalInput = typeof provider.toCanonical === 'function' ? provider.toCanonical(result) : result;
       const canonical = normalizer.normalize(canonicalInput,{model,providerId:provider.id});
       const masked = maskCanonicalResponse(canonical,{agentId:agentPrepared.agent?.id ?? personaId,configuredModel:route.publicModel || '',capabilities:Object.keys(provider.capabilities ?? {}).filter(k=>provider.capabilities[k])});

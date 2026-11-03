@@ -29,6 +29,15 @@
       "purpose": "Image/document text extraction"
     },
     {
+      "id": "web-search",
+      "name": "Web Search MCP",
+      "transport": "http",
+      "urlEnv": "EXTERNAL_MCP_WEB_SEARCH_URL",
+      "allowHosts": ["127.0.0.1"],
+      "enabled": true,
+      "purpose": "SearXNG-compatible web_search backend and the same capability as an external MCP tool"
+    },
+    {
       "id": "facebook-ads",
       "name": "Facebook Ads MCP",
       "transport": "grpc",

@@ -233,6 +233,8 @@ say "    cd $ROOT && npm test"
 # ---------------------------------------------------------------------------------------
 
 step '8. next steps'
+RUNTIME_PORT="${PORT:-$(sed -n 's/^PORT=\([0-9][0-9]*\).*/\1/p' "$ROOT/.env" 2>/dev/null | head -n1)}"
+RUNTIME_PORT="${RUNTIME_PORT:-9999}"
 cat <<EOF
 
   Everything below is yours to run — this script does not start a background service.
@@ -243,9 +245,9 @@ cat <<EOF
   2) start it:
        cd $ROOT && npm start
   3) check it:
-       curl -s http://127.0.0.1:9999/health
-  4) open the console:  http://127.0.0.1:9999/admin/
-     and the normal-person chat page:  http://127.0.0.1:9999/chat
+       curl -s http://127.0.0.1:$RUNTIME_PORT/health
+  4) the runtime is API-only; point an external console at:
+       http://127.0.0.1:$RUNTIME_PORT
 
   Optional, and deliberate about being root-only:
        sudo bash scripts/setup-os-runtime.sh    # install as a systemd service

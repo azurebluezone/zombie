@@ -91,7 +91,67 @@ node --version        # must print v22.5.0 or higher
 
 ## 4. Install — pick one path
 
-### 4.1 The quick path: `scripts/bootstrap.sh`
+### 4.1 The end-to-end path: `install.sh`
+
+```bash
+bash install.sh
+```
+
+This is the path for a machine that should end with a working deployment, not just
+a checkout. It is idempotent: running it again updates and restarts rather than
+starting a second copy.
+
+What it does, in order:
+
+1. **Checkout** — uses the current directory or `$ZC_DIR` if it is already a
+   checkout; otherwise `git clone`. In an existing checkout it fetches and
+   fast-forwards only when the working tree is clean. Local changes are never
+   discarded: it warns, fetches, and skips the merge.
+2. **Node 24** — keeps an installed Node 24+; otherwise downloads the official
+   `latest-v24.x` archive for `linux-x64`/`linux-arm64`/`linux-armv7l` into
+   `~/.local/share/zombiecoder/node`, verifies it against `SHASUMS256.txt`, and
+   uses it without touching the system Node. Unsupported platforms refuse cleanly.
+3. **Model endpoints** — reads `$ZC_OLLAMA_URL/api/tags`, prefers a
+   tools-capable model, and probes the llama.cpp endpoint. If llama.cpp is down,
+   `llama-cpu` is disabled in `PROVIDER_CONFIG_JSON` and Ollama becomes active.
+4. **Environment** — writes deployment values with `scripts/install-env.mjs`:
+   Ollama base/model, local web-search transport URL, external MCP allowlist,
+   CORS origins, Caddy ports, admin/runtime secrets. **Existing provider API keys
+   are preserved byte for byte**; a missing admin/runtime secret is generated, and
+   every write leaves `.env.bak.<timestamp>`.
+5. **Caddy + TLS** — reuses `caddy` on `PATH`/`~/.local/bin` or downloads it,
+   validates `deploy/caddy/Caddyfile.runtime`, and serves the runtime and admin UI
+   over loopback TLS at `https://localhost:9443` and `https://localhost:9444`
+   using Caddy's internal CA.
+6. **Build** — stops stale processes by PID file (verifying the command line
+   first), deletes only old build logs (`logs/build-*.log`, `data/build-*.json`,
+   `dist/*.log`), keeps runtime audit logs, then runs
+   `scripts/build-runtime.mjs` into `dist/zombiecoder-runtime`.
+7. **Start and verify** — starts the web-search transport, admin UI, runtime, and
+   Caddy; then checks `/health`, external MCP discovery (`web-search`), a real
+   `/search` call, and both TLS edges with `curl --cacert`. It prints
+   `INSTALL_OK` only after those checks pass.
+
+Environment overrides:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `ZC_DIR` | `$HOME/zombie` | checkout directory |
+| `ZC_REPO` / `ZC_BRANCH` | repository / `main` | clone source |
+| `ZC_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama base URL used to build the provider seed |
+| `ZC_OLLAMA_MODEL` | first tools-capable | model to pin |
+| `ZC_LLAMA_CPP_URL` | `http://127.0.0.1:9933/v1` | llama.cpp probe |
+| `ZC_WEB_SEARCH_PORT` | `8091` | local SearXNG/MCP transport |
+| `ZC_RUNTIME_PORT` / `ZC_ADMIN_UI_PORT` | `9999` / `8088` | loopback upstreams |
+| `ZC_CADDY_HTTPS_PORT` / `ZC_ADMIN_HTTPS_PORT` | `9443` / `9444` | TLS edges |
+| `ZC_SKIP_SYSTEM=1` | off | never call `apt` |
+| `ZC_SKIP_CADDY=1` | off | skip Caddy install/start |
+| `ZC_NO_START=1` | off | configure and build, do not start |
+
+The installer is Linux-only. Windows and macOS are **not tested**; the Node
+download step exits on an unknown OS/architecture rather than guessing.
+
+### 4.2 The quick path: `scripts/bootstrap.sh`
 
 ```bash
 bash scripts/bootstrap.sh
@@ -114,7 +174,7 @@ overwrite an existing `.env`, will not run `git reset` or `git clean`, will not
 ZC_SKIP_SYSTEM=1 ZC_NO_START=1 bash scripts/bootstrap.sh
 ```
 
-### 4.2 The OS path: a systemd service
+### 4.3 The OS path: a systemd service
 
 ```bash
 sudo bash scripts/setup-os-runtime.sh
@@ -127,7 +187,7 @@ port, then installs a unit built from
 (`{{USER}}`, `{{ROOT}}`, `{{PORT}}`, `{{MODE}}`, `{{NODE}}`) are documented in
 `scripts/systemd/README.md`.
 
-### 4.3 Manual
+### 4.4 Manual
 
 Nothing beyond the four steps in §3, §5, §6 and §7. There is nothing to build.
 
@@ -280,16 +340,19 @@ curl -si -X POST http://127.0.0.1:9999/mcp \
 # 2. handshake completion — expect 202 with no body
 curl -si -X POST http://127.0.0.1:9999/mcp \
   -H 'content-type: application/json' -H 'mcp-session-id: <SESSION>' \
+  -H 'mcp-protocol-version: 2025-11-25' \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 
 # 3. the tool list
 curl -s -X POST http://127.0.0.1:9999/mcp \
   -H 'content-type: application/json' -H 'mcp-session-id: <SESSION>' \
+  -H 'mcp-protocol-version: 2025-11-25' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 
 # 4. call one
 curl -s -X POST http://127.0.0.1:9999/mcp \
   -H 'content-type: application/json' -H 'mcp-session-id: <SESSION>' \
+  -H 'mcp-protocol-version: 2025-11-25' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_directory","arguments":{"path":"."}}}'
 
 # 5. end the session — expect 204

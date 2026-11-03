@@ -12,6 +12,12 @@ import { RUNTIME_VERSION, RUNTIME_USER_AGENT } from '../runtime/version.js';
 // instead of silently talking a protocol we cannot parse.
 export const MCP_PROTOCOL_VERSIONS = Object.freeze(['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']);
 export const LATEST_MCP_PROTOCOL_VERSION = MCP_PROTOCOL_VERSIONS[0];
+// The published specification has moved to the stateless 2026-07-28 revision
+// (no initialize/session, server/discover, resultType, _meta version). This
+// build still speaks the session-based revisions above, so the gap is reported
+// explicitly instead of calling 2025-11-25 "current".
+export const CURRENT_MCP_SPEC_VERSION = '2026-07-28';
+export const MCP_SPEC_GAP = '2026-07-28_not_implemented';
 const MAX_RESPONSE_BYTES = 2_000_000;
 
 // Wire transports an endpoint may declare. `http` and `sse` are both the

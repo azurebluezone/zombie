@@ -71,6 +71,10 @@ export class ProviderRegistry {
       createdAt: input.createdAt ?? new Date().toISOString(),
       source: input.source ?? 'admin-configured',
       driver: input.driver ?? 'openai-compatible',
+      // Ollama exposes two real protocols: the OpenAI-compatible surface and its
+      // own /api/chat. Dropping `mode` here silently sent native seeds to
+      // https://ollama.com/chat/completions and produced a 404 HTML page.
+      mode: input.mode ? String(input.mode) : 'openai-compatible',
       protocol: input.protocol ?? 'openai-compatible',
       capabilities: Array.isArray(input.capabilities) ? [...new Set(input.capabilities.map(String))] : [],
       priority: Number.isFinite(Number(input.priority)) ? Math.min(10, Math.max(1, Math.trunc(Number(input.priority)))) : 10,

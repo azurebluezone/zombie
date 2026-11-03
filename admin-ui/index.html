@@ -106,7 +106,11 @@
   /* ── tables ── */
   table{width:100%;border-collapse:collapse}
   th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
-  #providersTable,#modelsList,#agentsTable,#toolsTable,#mcpTable{overflow-x:auto;margin:0 -2px}
+  #providersTable,#modelsList,#agentsTable,#toolsTable,#mcpTable,#requestsTable,#matrixTable{overflow-x:auto;margin:0 -2px}
+  /* A matrix cell is a switch plus two lines of evidence; keeping it a column
+     avoids the default marker and the latency run merging into one string. */
+  .matrix-cell{display:inline-flex;flex-direction:column;align-items:flex-end;gap:1px;line-height:1.25}
+  .matrix-cell .caption{margin-top:0}
   th{font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#6f7c76;font-weight:600;white-space:nowrap}
   tbody tr:hover{background:var(--card-hover)}
   tbody tr:last-child td{border-bottom:none}
@@ -274,6 +278,7 @@
       <div class="nav-label">Catalog</div>
       <button class="nav-item" data-view="providers">◆ <span>Providers</span><span class="count" id="cntProviders">–</span></button>
       <button class="nav-item" data-view="models">▤ <span>Models</span><span class="count" id="cntModels">–</span></button>
+      <button class="nav-item" data-view="matrix">▦ <span>Matrix</span></button>
       <button class="nav-item" data-view="masking">◐ <span>Masking &amp; Normalizer</span></button>
     </div>
 
@@ -282,6 +287,7 @@
       <button class="nav-item" data-view="agents">👤 <span>Agents &amp; Personas</span><span class="count" id="cntAgents">–</span></button>
       <button class="nav-item" data-view="tools">⌘ <span>Tools</span><span class="count" id="cntTools">–</span></button>
       <button class="nav-item" data-view="mcp">⇄ <span>MCP</span></button>
+      <button class="nav-item" data-view="requests">▥ <span>Requests</span></button>
       <button class="nav-item" data-view="system">≡ <span>System</span></button>
     </div>
 
@@ -335,7 +341,7 @@
             </label>
             <div class="inline">
               <button class="btn primary" id="btnConnect">Connect &amp; verify</button>
-              <button class="btn ghost" id="btnConnectLocal">Use 127.0.0.1:9999</button>
+              <button class="btn ghost" id="btnConnectLocal">Use this origin</button>
             </div>
             <div class="out" id="connectOut" style="display:none"></div>
             <div class="hint">
@@ -397,6 +403,20 @@
             <span class="hint" style="margin:0">Registers providers from the environment, then stores the catalog of every active one. A provider whose API is off shows no models — the list is not faked.</span>
           </div>
           <div id="modelsList"><div class="empty">Connect to load models.</div></div>
+        </div>
+      </section>
+
+      <!-- ── Provider matrix ── -->
+      <section class="view" id="view-matrix">
+        <div class="card">
+          <h2>Provider matrix <span class="tag" id="matrixTag">–</span></h2>
+          <div class="card-tools">
+            <button class="btn sm" id="btnRefreshMatrix">Refresh</button>
+          </div>
+          <div class="hint" style="margin:0 0 10px">
+            Rows are providers, columns are the models they report. A green cell is an enabled model, a dim cell is disabled or no longer reported; the number under it is the last real test latency. Click a present cell to enable or disable that model — the same stored switch routing reads.
+          </div>
+          <div id="matrixTable"><div class="empty">Connect to load the matrix.</div></div>
         </div>
       </section>
 
@@ -496,6 +516,7 @@ the router's candidate list and priority</div>
         <div class="card">
           <h2>Registered tools <span class="tag" id="toolsTag">–</span></h2>
           <div class="hint" style="margin:0 0 10px">The switch sends <span class="mono">PATCH /v1/admin/registry/tools/{id}</span> with <span class="mono">status: DISABLED</span>. Execution only accepts REGISTERED/ENABLED/VERIFIED, so a disabled tool cannot run even if a request names it. Access mode: <span class="mono" id="toolsMode">—</span> — <span class="mono">unrestricted</span> means no per-application grant is needed; <span class="mono">permissioned</span> requires one.</div>
+          <div class="banner" id="webSearchBanner" hidden></div>
           <div id="toolsTable"><div class="empty">Connect to load tools.</div></div>
         </div>
       </section>
@@ -504,7 +525,26 @@ the router's candidate list and priority</div>
       <section class="view" id="view-mcp">
         <div class="card">
           <h2>MCP endpoints <span class="tag" id="mcpTag">–</span></h2>
+          <div class="banner" id="mcpGapBanner" hidden></div>
           <div id="mcpTable"><div class="empty">Connect to load MCP endpoints.</div></div>
+        </div>
+      </section>
+
+      <!-- ── Requests ── -->
+      <section class="view" id="view-requests">
+        <div class="card">
+          <h2>API requests <span class="tag" id="requestsTag">–</span></h2>
+          <div class="card-tools">
+            <label class="inline" style="gap:8px;margin:0">
+              <span class="caption" style="margin:0">Recording</span>
+              <label class="switch"><input type="checkbox" id="recordingToggle" aria-label="Record new chat requests"><span class="slider"></span></label>
+            </label>
+            <button class="btn sm" id="btnRefreshRequests">Refresh</button>
+          </div>
+          <div class="hint" style="margin:0 0 10px">
+            Every real <span class="mono">POST /v1/chat/completions</span> is stored as metadata only — status, latency, agent, provider and model. Prompts, message bodies and credentials are never written. Turning recording off stops new rows; the rows already stored stay readable.
+          </div>
+          <div id="requestsTable"><div class="empty">Connect to load requests.</div></div>
         </div>
       </section>
 
@@ -714,7 +754,8 @@ const LS_BASE='zcadmin.base', LS_TOKEN='zcadmin.token';
 const state={
   base: localStorage.getItem(LS_BASE)||'',
   token: localStorage.getItem(LS_TOKEN)||'',
-  health:null, uiConfig:null, providers:[], models:[], tools:[], masking:[], personas:[], agents:[], routes:null, mcp:[],
+  health:null, uiConfig:null, providers:[], models:[], tools:[], masking:[], personas:[], agents:[], routes:null, mcp:[], mcpConfig:null,
+  requests:[], requestSettings:null, matrix:null,
   connected:false, view:'overview'
 };
 const $=s=>document.querySelector(s);
@@ -999,14 +1040,17 @@ async function refreshAll({silent=false}={}){
     api('/v1/admin/personas').then(d=>{state.personas=d.personas||[];}).catch(()=>{}),
     api('/v1/admin/agents').then(d=>{state.agents=d.agents||[];}).catch(()=>{}),
     api('/v1/admin/registry/tools').then(d=>{state.tools=d.components||[];}).catch(()=>{}),
-    api('/v1/admin/registry/external-mcp').then(d=>{state.mcp=d.endpoints||[];}).catch(()=>{})
+    api('/v1/admin/registry/external-mcp').then(d=>{state.mcp=d.endpoints||[];}).catch(()=>{}),
+    api('/api/config/mcp',{auth:false}).then(d=>{state.mcpConfig=d;}).catch(()=>{state.mcpConfig=null;}),
+    api('/v1/admin/requests?limit=50').then(d=>{state.requests=d.requests||[];state.requestSettings=d.settings||null;}).catch(()=>{}),
+    api('/v1/admin/provider-matrix').then(d=>{state.matrix=d;}).catch(()=>{})
   ];
   await Promise.all(jobs);
   paintAll();
 }
 function paintAll(){
   paintConnection();
-  paintOverview(); paintProviders(); paintModels(); paintMasking(); paintAgents(); paintTools(); paintMcp(); paintSystem();
+  paintOverview(); paintProviders(); paintModels(); paintMasking(); paintAgents(); paintTools(); paintMcp(); paintSystem(); paintRequests(); paintMatrix();
   $('#cntProviders').textContent=state.connected?(state.providers.filter(p=>p.enabled!==false).length+'/'+state.providers.length):'–';
   $('#cntModels').textContent=state.connected?String(state.models.length):'–';
   $('#cntTools').textContent=state.connected?String(state.tools.length):'–';
@@ -1019,10 +1063,12 @@ const VIEW_META={
   connect:['Connection','Base URL + admin token. This console stores nothing else.'],
   providers:['Providers','Enable/disable and probe each provider with a real completion.'],
   models:['Models','The catalog each enabled provider actually reports.'],
+  matrix:['Provider matrix','Providers against the models they report, with the stored enable switch and the last real test.'],
   masking:['Masking & Normalizer','Each module is testable on its own, with the same code the request path uses.'],
   agents:['Agents & Personas','Who exists, which persona they carry, and which model serves them.'],
   tools:['Tools','The runtime tool registry, read-only.'],
   mcp:['MCP','External MCP endpoints and their reconciliation state.'],
+  requests:['Requests','Metadata for real chat traffic, with a switch that stops new rows without deleting history.'],
   system:['System','Runtime identity, module flags and the admin route inventory.']
 };
 function show(view){
@@ -1079,6 +1125,80 @@ function shortTime(v){
   if(!v) return '—';
   const d=new Date(v); if(isNaN(d)) return '—';
   return d.toLocaleTimeString();
+}
+
+function shortDateTime(v){
+  if(!v) return '—';
+  const d=new Date(v); if(isNaN(d)) return '—';
+  return d.toLocaleString();
+}
+
+/* ── requests ── */
+// Read-only evidence of real traffic. Recording is a separate switch, and the
+// switch never hides the rows already stored: "stop recording" is not "delete".
+function paintRequests(){
+  const wrap=$('#requestsTable'); if(!wrap) return;
+  const settings=state.requestSettings;
+  const recording=settings?settings.recording!==false:null;
+  $('#requestsTag').textContent=state.connected?(state.requests.length+' shown'+(recording===false?' · recording off':'')):'–';
+  const toggle=$('#recordingToggle');
+  if(toggle){ toggle.checked=recording!==false; toggle.disabled=!state.connected||!settings; }
+  if(!state.connected){ wrap.innerHTML='<div class="empty">Connect to load requests.</div>'; return; }
+  if(!state.requests.length){ wrap.innerHTML='<div class="empty">No requests recorded yet. Send one to the chat endpoint and refresh.</div>'; return; }
+  const t=document.createElement('table');
+  t.innerHTML='<thead><tr><th>Time</th><th>Request</th><th>Application</th><th>Agent</th><th>Provider</th><th>Model</th><th>Status</th><th class="right">Latency</th><th>Stream</th></tr></thead>';
+  const tb=document.createElement('tbody');
+  state.requests.forEach(r=>{
+    const tr=document.createElement('tr');
+    const ok=r.ok===true;
+    tr.innerHTML=`
+      <td class="mono" data-label="Time">${esc(shortDateTime(r.at))}</td>
+      <td class="mono" data-label="Request">${esc(r.requestId||'—')}<div class="caption">${esc(r.operation||'')}</div></td>
+      <td class="mono muted" data-label="Application">${esc(r.applicationId||'—')}</td>
+      <td class="mono" data-label="Agent">${esc(r.agentId||'—')}</td>
+      <td class="mono" data-label="Provider">${esc(r.providerId||'—')}</td>
+      <td class="mono" data-label="Model">${esc(r.model||'—')}</td>
+      <td data-label="Status">${ok?'<span class="pill ok">'+esc(r.status??'ok')+'</span>':'<span class="pill err">'+esc(r.status??'error')+'</span>'}${r.outcome?'<div class="caption">'+esc(r.outcome)+'</div>':''}</td>
+      <td class="right mono" data-label="Latency">${esc(fmtMs(r.latencyMs))}</td>
+      <td data-label="Stream">${r.stream?'<span class="pill">sse</span>':'<span class="pill off">json</span>'}</td>`;
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb); wrap.innerHTML=''; wrap.appendChild(t);
+}
+
+/* ── provider matrix ── */
+// One server-assembled payload: the screen does not join three endpoints and
+// guess which cells are enabled.
+function paintMatrix(){
+  const wrap=$('#matrixTable'); if(!wrap) return;
+  const m=state.matrix;
+  $('#matrixTag').textContent=state.connected?(m?(m.providers.length+' providers · '+m.totalModels+' models'):'–'):'–';
+  if(!state.connected){ wrap.innerHTML='<div class="empty">Connect to load the matrix.</div>'; return; }
+  if(!m||!m.providers.length){ wrap.innerHTML='<div class="empty">The runtime reports no providers.</div>'; return; }
+  if(!m.models.length){ wrap.innerHTML='<div class="empty">No provider reports a model catalog yet. Run “Sync all models” on the Providers page.</div>'; return; }
+  const cellFor=(providerId,model)=>{
+    const cell=m.cells.find(c=>c.providerId===providerId&&c.model===model);
+    if(!cell) return '<td class="right mono" style="color:#4a544f" data-label="'+esc(model)+'">·</td>';
+    const last=cell.lastTest;
+    const glyph=cell.present?(cell.enabled?'✓':'—'):'·';
+    const cls=cell.present?(cell.enabled?'pill ok':'pill off'):'pill off';
+    return `<td class="right" data-label="${esc(model)}"><button class="btn sm ghost" data-matrix-toggle="${esc(providerId)}|${esc(model)}" ${cell.present?'':'disabled'} title="${esc(providerId+' / '+model)}"><span class="matrix-cell"><span><span class="${cls}">${glyph}</span>${cell.defaultModel?' <span class="caption">default</span>':''}</span>${last?'<span class="caption">'+esc(fmtMs(last.latencyMs))+' · '+(last.ok?'ok':'fail')+'</span>':''}</span></button></td>`;
+  };
+  const t=document.createElement('table');
+  t.innerHTML='<thead><tr><th>Provider</th>'+m.models.map(model=>`<th class="right mono">${esc(model)}</th>`).join('')+'</tr></thead>';
+  const tb=document.createElement('tbody');
+  m.providers.forEach(p=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td data-label="Provider"><span class="mono">${esc(p.id)}</span> ${healthPill(p)}<div class="caption">${esc(p.driver||'?')} · priority ${esc(p.priority??'—')} · ${esc(p.modelCount)} models</div></td>`
+      +m.models.map(model=>cellFor(p.id,model)).join('');
+    tb.appendChild(tr);
+  });
+  if(m.truncated){
+    const note=document.createElement('tr');
+    note.innerHTML=`<td colspan="${m.models.length+1}" class="caption">Showing ${m.models.length} of ${m.totalModels} models.</td>`;
+    tb.appendChild(note);
+  }
+  t.appendChild(tb); wrap.innerHTML=''; wrap.appendChild(t);
 }
 
 /* ── providers ── */
@@ -1527,6 +1647,17 @@ function paintTools(){
   const wrap=$('#toolsTable'); if(!wrap) return;
   $('#toolsTag').textContent=state.connected?(state.tools.length+' tools'):'–';
   const modeEl=$('#toolsMode'); if(modeEl) modeEl.textContent=state.health?.toolAccessMode||'—';
+  const wsBanner=$('#webSearchBanner');
+  if(wsBanner){
+    const ws=state.health?.webSearch;
+    if(state.connected && ws){
+      wsBanner.hidden=false;
+      wsBanner.className='banner '+(ws.configured?'info':'err');
+      wsBanner.innerHTML=ws.configured
+        ? `web_search backend: <span class="mono">${esc(ws.endpoint||'configured')}</span> · results ${esc(ws.results??'?')} · key ${ws.apiKeyConfigured?'configured':'not required'}`
+        : 'web_search is not configured: set <span class="mono">WEB_SEARCH_ENDPOINT</span> and restart. The matrix reports this tool as NOT_TESTED until a backend exists.';
+    }else wsBanner.hidden=true;
+  }
   if(!state.connected){ wrap.innerHTML='<div class="empty">Connect to load tools.</div>'; return; }
   if(!state.tools.length){ wrap.innerHTML='<div class="empty">No tools registered.</div>'; return; }
   const t=document.createElement('table');
@@ -1559,6 +1690,16 @@ async function toggleTool(toolId, enable, node){
 /* ── mcp ── */
 function paintMcp(){
   const wrap=$('#mcpTable'); if(!wrap) return;
+  const cfg=state.mcpConfig;
+  const gap=$('#mcpGapBanner');
+  if(gap){
+    if(state.connected && cfg){
+      gap.hidden=false;
+      gap.className='banner';
+      const impl=cfg.server?.implemented===true;
+      gap.innerHTML=`Spec gap: this build speaks session-based MCP <span class="mono">${esc(cfg.server?.protocol_version||'2025-11-25')}</span>; the current stateless revision <span class="mono">${esc(cfg.current_spec_version||'2026-07-28')}</span> is <span class="mono">${esc(cfg.spec_gap||'not_implemented')}</span>. Server endpoint: ${impl?'<span class="mono">POST /mcp</span>':'not exposed'}; tools ${impl?esc((cfg.server?.tools||[]).length):'0'}.`;
+    }else gap.hidden=true;
+  }
   $('#mcpTag').textContent=state.connected?(state.mcp.length+' endpoints'):'–';
   if(!state.connected){ wrap.innerHTML='<div class="empty">Connect to load MCP endpoints.</div>'; return; }
   if(!state.mcp.length){ wrap.innerHTML='<div class="empty">No external MCP endpoints declared.</div>'; return; }
@@ -1567,10 +1708,11 @@ function paintMcp(){
   const tb=document.createElement('tbody');
   state.mcp.forEach(x=>{
     const tr=document.createElement('tr');
-    const ok=x.status==='ready'||x.status==='connected';
-    tr.innerHTML=`<td class="mono">${esc(x.qualifiedName||x.id||x.url||'?')}</td>
+    const ok=x.status==='discovered'||x.status==='ready'||x.status==='connected';
+    const detail=x.lastErrorCode?` <span class="mono muted">${esc(x.lastErrorCode)}</span>`:'';
+    tr.innerHTML=`<td class="mono">${esc(x.name||x.qualifiedName||x.id||x.url||'?')}</td>
       <td class="mono muted">${esc(x.transport||'?')}</td>
-      <td>${ok?'<span class="pill ok">'+esc(x.status)+'</span>':'<span class="pill warn">'+esc(x.status||'unknown')+'</span>'}</td>
+      <td>${ok?'<span class="pill ok">'+esc(x.status)+'</span>':'<span class="pill warn">'+esc(x.status||'unknown')+'</span>'}${detail}</td>
       <td class="mono">${(x.tools||[]).length}</td>`;
     tb.appendChild(tr);
   });
@@ -1589,6 +1731,9 @@ function paintSystem(){
       ['runtimeId',h.runtime?.runtimeId],['host',h.runtime?.host+':'+h.runtime?.port],
       ['node',h.runtime?.nodeVersion],['platform',h.runtime?.platform+' '+h.runtime?.hostname],
       ['ui.bundled',state.uiConfig?.ui?.bundled===false?'false (external UI)':'unknown'],
+      ['externalMcp',h.externalMcp?`${h.externalMcp.registered??0} registered / ${h.externalMcp.discovered??0} discovered / ${h.externalMcp.tools??0} tools`:'—'],
+      ['webSearch',h.webSearch?`${h.webSearch.configured?'configured':'not configured'} · ${h.webSearch.endpoint||'—'} · results ${h.webSearch.results??'?'}`:'—'],
+      ['mcp spec',state.mcpConfig?`${state.mcpConfig.server?.protocol_version||'?'} (current ${state.mcpConfig.current_spec_version||'?'}, gap ${state.mcpConfig.spec_gap||'?'})`:'—'],
       ['endpoints',state.uiConfig?JSON.stringify(state.uiConfig.endpoints):'—']
     ];
     b.innerHTML='<table><tbody>'+rows.map(([k,v])=>`<tr><td class="mono muted" style="width:180px">${esc(k)}</td><td class="mono">${esc(v??'—')}</td></tr>`).join('')+'</tbody></table>'+
@@ -1678,10 +1823,46 @@ $('#btnConnect').addEventListener('click',async()=>{
     out.className='out err'; out.textContent='failed: '+e.message;
   }
 });
-$('#btnConnectLocal').addEventListener('click',()=>{ $('#baseUrl').value='http://127.0.0.1:9999'; $('#adminToken').focus(); });
+$('#btnConnectLocal').addEventListener('click',async()=>{
+  // No baked-in port: the console is a static client. When it is hosted by the
+  // runtime (or a proxy in front of it), its own origin is the right base URL.
+  const candidate=/^https?:$/.test(location.protocol)?location.origin:'';
+  if(!candidate){ toast('file:// has no runtime origin — enter the base URL.',true); return; }
+  try{
+    const r=await fetch(candidate+'/health',{cache:'no-store'});
+    const j=await r.json();
+    if(j?.service==='zombiecoder-runtime'){ $('#baseUrl').value=candidate; $('#adminToken').focus(); return; }
+  }catch(_){}
+  toast('This origin is not a ZombieCoder runtime — enter its base URL.',true);
+});
 $('#btnDisconnect').addEventListener('click',()=>{ disconnect(); toast('disconnected'); show('connect'); });
 $('#btnRefreshProviders').addEventListener('click',()=>refreshAll());
 $('#btnRefreshModels').addEventListener('click',()=>refreshAll());
+$('#btnRefreshMatrix').addEventListener('click',()=>refreshAll());
+$('#btnRefreshRequests').addEventListener('click',()=>refreshAll());
+$('#recordingToggle').addEventListener('change',async(ev)=>{
+  const recording=ev.target.checked;
+  ev.target.disabled=true;
+  try{
+    const d=await api('/v1/admin/requests/settings',{method:'PATCH',body:{recording}});
+    state.requestSettings=d.settings||state.requestSettings;
+    toast(recording?'request recording on':'request recording off — stored rows kept');
+    await refreshAll({silent:true});
+  }catch(e){ toast('recording switch failed: '+e.message,true); ev.target.checked=!recording; }
+  finally{ ev.target.disabled=false; }
+});
+$('#matrixTable').addEventListener('click',async(ev)=>{
+  const btn=ev.target.closest('[data-matrix-toggle]'); if(!btn) return;
+  const [providerId,model]=btn.dataset.matrixToggle.split('|');
+  const cell=state.matrix?.cells?.find(c=>c.providerId===providerId&&c.model===model);
+  if(!cell||!cell.present) return;
+  btn.disabled=true;
+  try{
+    await api('/v1/admin/providers/'+encodeURIComponent(providerId)+'/models/'+encodeURIComponent(model),{method:'PATCH',body:{enabled:!cell.enabled}});
+    toast(providerId+' / '+model+' → '+(cell.enabled?'disabled':'enabled'));
+    await refreshAll({silent:true});
+  }catch(e){ toast('matrix switch failed: '+e.message,true); btn.disabled=false; }
+});
 $('#btnAddProvider').addEventListener('click',()=>openProviderModal(null));
 $('#pfSelectAll').addEventListener('click',()=>pickerSelectAll(true));
 $('#pfSelectClear').addEventListener('click',()=>pickerSelectAll(false));

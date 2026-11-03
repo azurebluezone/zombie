@@ -7,10 +7,29 @@ function parseToolArgs(value) {
   try { return JSON.parse(String(value)); } catch { return {}; }
 }
 
+// FunctionResponse.response is a protobuf Struct, so a plain string or array is
+// rejected with HTTP 400. Tool results are often plain text ("22°C"), so wrap
+// non-object values in the documented `result` key instead of silently turning
+// them into {}.
+function functionResponseValue(value) {
+  if (value == null || value === '') return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+      return { result: parsed };
+    } catch {}
+    return { result: value };
+  }
+  return { result: value };
+}
+
 function geminiContents(messages=[]) {
   return messages.filter(m => m.role !== 'system' && m.role !== 'developer').map(m => {
     if (m.role === 'tool') {
-      return { role: 'user', parts: [{ functionResponse: { name: String(m.name ?? 'tool'), response: parseToolArgs(m.content) } }] };
+      const name = String(m.name ?? m.tool_name ?? 'tool');
+      return { role: 'user', parts: [{ functionResponse: { name, response: functionResponseValue(m.content), ...(m.tool_call_id ? { id: String(m.tool_call_id) } : {}) } }] };
     }
     if (m.role === 'assistant') {
       const parts = [];

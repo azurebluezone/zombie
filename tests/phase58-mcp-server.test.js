@@ -149,41 +149,80 @@ test('phase58 the runtime serves MCP on /mcp when explicitly enabled', async t =
   const auth = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}`, accept: 'application/json, text/event-stream' };
   const call = (body, headers = auth) => fetch(`${base}/mcp`, { method: 'POST', headers, body: JSON.stringify(body) });
 
-  // initialize -> a protocol response plus an Mcp-Session-Id.
+  // initialize -> a protocol response plus an Mcp-Session-Id. The response
+  // header must echo the version that was negotiated, not the newest one.
   const init = await call({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', clientInfo: { name: 'phase58', version: '1' } } });
   assert.equal(init.status, 200);
   assert.ok(init.headers.get('mcp-session-id'), 'initialize must return an Mcp-Session-Id');
+  assert.equal(init.headers.get('mcp-protocol-version'), '2025-11-25');
   const initBody = await init.json();
   assert.equal(initBody.result.protocolVersion, '2025-11-25');
   assert.equal(initBody.result.serverInfo.name, 'zombiecoder-runtime');
   const sessionId = init.headers.get('mcp-session-id');
+  const sessionHeaders = { ...auth, 'mcp-session-id': sessionId, 'mcp-protocol-version': '2025-11-25' };
+  const callSession = (body, headers = sessionHeaders) => call(body, headers);
 
-  // notifications/initialized -> 202 with no body.
-  const notified = await call({ jsonrpc: '2.0', method: 'notifications/initialized' });
+  // notifications/initialized -> 202 with no body. Subsequent requests carry
+  // both the session id and the negotiated protocol version.
+  const notified = await callSession({ jsonrpc: '2.0', method: 'notifications/initialized' });
   assert.equal(notified.status, 202);
 
+  // A session and a protocol version are mandatory after initialize.
+  const noSession = await call({ jsonrpc: '2.0', id: 20, method: 'tools/list' });
+  assert.equal(noSession.status, 400);
+  assert.equal((await noSession.json()).error.message, 'mcp_session_id_required');
+
+  const noVersion = await call({ jsonrpc: '2.0', id: 21, method: 'tools/list' }, { ...auth, 'mcp-session-id': sessionId });
+  assert.equal(noVersion.status, 400);
+  assert.equal((await noVersion.json()).error.message, 'mcp_protocol_version_required');
+
+  const badVersion = await call({ jsonrpc: '2.0', id: 22, method: 'tools/list' }, { ...auth, 'mcp-session-id': sessionId, 'mcp-protocol-version': '1999-01-01' });
+  assert.equal(badVersion.status, 400);
+  assert.equal((await badVersion.json()).error.message, 'mcp_protocol_version_unsupported');
+
+  const mismatched = await call({ jsonrpc: '2.0', id: 23, method: 'tools/list' }, { ...auth, 'mcp-session-id': sessionId, 'mcp-protocol-version': '2025-06-18' });
+  assert.equal(mismatched.status, 400);
+  assert.equal((await mismatched.json()).error.message, 'mcp_protocol_version_mismatch');
+
+  const unknownSession = await call({ jsonrpc: '2.0', id: 24, method: 'tools/list' }, { ...auth, 'mcp-session-id': 'mcp-does-not-exist', 'mcp-protocol-version': '2025-11-25' });
+  assert.equal(unknownSession.status, 404);
+
+  const badOrigin = await call({ jsonrpc: '2.0', id: 25, method: 'tools/list' }, { ...sessionHeaders, origin: 'https://attacker.example' });
+  assert.equal(badOrigin.status, 403);
+  assert.equal((await badOrigin.json()).error.message, 'origin_not_allowed');
+
   // tools/list -> the runnable catalog.
-  const listed = await (await call({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).json();
+  const listed = await (await callSession({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).json();
   const toolNames = listed.result.tools.map(tool => tool.name);
   assert.ok(toolNames.includes('read_file'));
   assert.ok(toolNames.includes('web_search'), 'a runnable web tool is part of the catalog now');
 
   // A tool without a grant is refused, matching the chat tool loop.
-  const denied = await (await call({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'read_file', arguments: { path: 'probe.txt' } } })).json();
+  const denied = await (await callSession({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'read_file', arguments: { path: 'probe.txt' } } })).json();
   assert.equal(denied.result.isError, true);
   assert.match(denied.result.content[0].text, /tool_not_permitted/);
 
   // Grant then re-run: the same call now returns file content.
   const granted = await fetch(`${base}/v1/admin/tools/permissions`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminToken}` }, body: JSON.stringify({ applicationId: application.id, toolId: 'read_file' }) });
   assert.equal(granted.status, 201);
-  const read = await (await call({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'read_file', arguments: { path: 'probe.txt' } } })).json();
+  const read = await (await callSession({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'read_file', arguments: { path: 'probe.txt' } } })).json();
   assert.equal(read.result.isError, false);
   assert.match(JSON.stringify(read.result.content), /mcp-server-ok/);
 
   // The session header round-trips on a later request.
-  const ping = await fetch(`${base}/mcp`, { method: 'POST', headers: { ...auth, 'mcp-session-id': sessionId }, body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'ping' }) });
+  const ping = await callSession({ jsonrpc: '2.0', id: 5, method: 'ping' });
   assert.equal(ping.status, 200);
+  assert.equal(ping.headers.get('mcp-session-id'), sessionId);
   assert.deepEqual((await ping.json()).result, {});
+
+  // DELETE without a session is refused; an unknown session is 404; a known
+  // session terminates with 204.
+  const deleteNoSession = await fetch(`${base}/mcp`, { method: 'DELETE', headers: auth });
+  assert.equal(deleteNoSession.status, 400);
+  const deleteUnknown = await fetch(`${base}/mcp`, { method: 'DELETE', headers: { ...auth, 'mcp-session-id': 'mcp-does-not-exist' } });
+  assert.equal(deleteUnknown.status, 404);
+  const deleted = await fetch(`${base}/mcp`, { method: 'DELETE', headers: { ...auth, 'mcp-session-id': sessionId } });
+  assert.equal(deleted.status, 204);
 });
 
 test('phase58 when the flag is off the endpoint stays honest (501)', async t => {

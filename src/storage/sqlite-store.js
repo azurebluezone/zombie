@@ -23,6 +23,8 @@ const TABLES = {
   'mcp-clients': 'mcp_clients',
   'mcp-settings': 'mcp_settings',
   'model-tests': 'model_tests',
+  settings: 'settings',
+  requests: 'requests',
 };
 
 // Every table starts with the same four bookkeeping columns. `data` is the source
@@ -44,6 +46,9 @@ const TABLE_COLUMNS = Object.freeze({
   // runs without parsing every JSON payload. Types are declared here on purpose:
   // adding `ok` as TEXT to an older database would make SUM/ORDER BY wrong.
   'model-tests': Object.freeze({ ...BASE_COLUMNS, provider: 'TEXT', model: 'TEXT', ok: 'INTEGER', latency_ms: 'INTEGER' }),
+  // Request log is append-only metadata. The mirror columns let an operator read
+  // recent traffic with a plain SELECT; `data` still holds the full record.
+  requests: Object.freeze({ ...BASE_COLUMNS, request_id: 'TEXT', application_id: 'TEXT', status: 'INTEGER', ok: 'INTEGER', provider: 'TEXT', model: 'TEXT', latency_ms: 'INTEGER', stream: 'INTEGER' }),
 });
 
 function columnsFor(name) {
@@ -55,6 +60,7 @@ function columnsFor(name) {
 const EXTRA_COLUMNS = {
   agents: { tool_boundary: 'TEXT', working_directory: 'TEXT' },
   'model-tests': { provider: 'TEXT', model: 'TEXT', ok: 'INTEGER', latency_ms: 'INTEGER' },
+  requests: { request_id: 'TEXT', application_id: 'TEXT', status: 'INTEGER', ok: 'INTEGER', provider: 'TEXT', model: 'TEXT', latency_ms: 'INTEGER', stream: 'INTEGER' },
 };
 
 // Exported so a test can assert the live schema, not a copy of it.
@@ -67,6 +73,8 @@ const INDEXES = [
   `CREATE INDEX IF NOT EXISTS idx_mcp_connections_lease ON mcp_connections(json_extract(data,'$.leaseExpiresAt'))`,
   `CREATE INDEX IF NOT EXISTS idx_model_tests_provider_model ON model_tests(provider, model, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_model_tests_created_at ON model_tests(created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_requests_created_at ON requests(created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_requests_application ON requests(application_id, created_at)`,
 ];
 
 const EXTRA_VALUES = {
@@ -76,6 +84,10 @@ const EXTRA_VALUES = {
   model: item => String(item.model ?? ''),
   ok: item => (item.ok === true ? 1 : 0),
   latency_ms: item => (Number.isFinite(Number(item.latencyMs)) ? Math.trunc(Number(item.latencyMs)) : null),
+  request_id: item => (item.requestId == null ? null : String(item.requestId)),
+  application_id: item => (item.applicationId == null ? null : String(item.applicationId)),
+  status: item => (Number.isFinite(Number(item.status)) ? Math.trunc(Number(item.status)) : null),
+  stream: item => (item.stream === true ? 1 : 0),
 };
 
 export class SqliteStore {

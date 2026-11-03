@@ -99,7 +99,7 @@ tools/common/            # the runnable tool implementations (26 tools in 5 modu
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 409 tests, run with node --test
+tests/                   # 450 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -386,10 +386,17 @@ can expose the same tool name safely. Calls are recorded in an MCP audit trail w
 `runtimeId` and `clientId` that produced them.
 
 **As a server**, when `MCP_SERVER_ENABLED=true` the runtime exposes `POST /mcp` with the
-same 25 runnable tools, negotiates the protocol version, and supports optional
+same 28 runnable tools, negotiates the protocol version, and supports optional
 authentication. For loopback-only work an admin switch can relax inbound auth while
 still auto-provisioning an application, so sessions, permissions and audit rows keep
 a real owner.
+
+**Protocol revision:** the runtime speaks the session-based MCP revisions through
+`2025-11-25`. The published `2026-07-28` revision (stateless requests,
+`server/discover`, required `resultType`, `_meta` version/capabilities) is **not
+implemented**; `/api/config/mcp` and `/api/mcp-clients` expose
+`current_spec_version: "2026-07-28"` and `spec_gap: "2026-07-28_not_implemented"` so a
+client is never told that the old session model is current.
 
 External MCP tool calls are reachable through `POST /v1/mcp/tools/call` (application
 authenticated) and through the execution boundary (`POST /v1/execution/run` with a
@@ -591,6 +598,29 @@ bash scripts/bootstrap.sh
 curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombie/main/scripts/bootstrap.sh | bash
 ```
 
+### End-to-end install with TLS and web search
+
+`install.sh` goes one step further: clone or fast-forward, Node 24 (downloaded and
+checksum-verified when missing or too old), `.env` from the Ollama URL with existing
+provider keys untouched, Caddy TLS edges on `https://localhost:9443` (runtime) and
+`https://localhost:9444` (admin UI), a fresh build, then start + health + external MCP
+discovery + a real `web_search` call. It prints `INSTALL_OK` only after those checks.
+
+```bash
+bash install.sh
+ZC_OLLAMA_URL=http://127.0.0.1:11434 ZC_NO_START=1 bash install.sh
+```
+
+It also starts the bundled web-search transport (`scripts/web-search-mcp-server.mjs`),
+which serves a SearXNG-compatible `/search` for the runtime's `web_search` tool and MCP
+Streamable HTTP on `/mcp` for `external-mcp/servers.json`. Linux only; Windows/macOS are
+`NOT_TESTED`. Full flags and the verification steps are in
+`docs/FRESH_INSTALL.md` §4.1.
+
+The round-4 release gate is `node scripts/verify-round4.mjs`: it re-runs the
+installer checks, Caddy TLS, external MCP discovery, a real `web_search` call,
+the recorded 12×28 matrix and the full test suite, then prints `ROUND4_OK`.
+
 It checks the distribution and whether `sudo` is available, installs `git`/`curl` only if
 they are missing, brings in Node >= 22.5 through `nvm` (user-level, no system change) when
 the installed Node is too old, reuses an existing checkout or clones one, creates `data/`,
@@ -785,10 +815,10 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **409 tests, 408 passing, 0 failing, 1 skipped.** The skip is honest
-rather than hidden: `php -l` needs a `php` binary, and this machine has none, so the
-syntax check is reported as `NOT_TESTED` with the reason. Set `ZC_REQUIRE_PHP=1` where
-PHP is expected and its absence becomes a failure instead of a skip.
+Current baseline: **450 tests, 450 passing, 0 failing, 0 skipped.** The old `php -l`
+skip is gone from this environment; where PHP is absent the check still reports
+`NOT_TESTED` with the reason. Set `ZC_REQUIRE_PHP=1` where PHP is expected and its
+absence becomes a failure instead of a skip.
 
 Two failures that used to sit here are fixed rather than tolerated:
 

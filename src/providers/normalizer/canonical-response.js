@@ -48,6 +48,25 @@ function safeMessage(message = {}) {
   return result;
 }
 
+// Upstreams describe the same terminal state with different words. An
+// OpenAI-compatible client validates finish_reason against a fixed enum, so the
+// canonical layer translates instead of forwarding provider jargon. The
+// tool-call correction is the important one: Gemini and Ollama native both
+// return STOP next to a functionCall, and a client that trusts finish_reason
+// would discard a valid tool call.
+export function normalizeFinishReason(reason, hasToolCalls = false) {
+  const raw = reason == null ? '' : String(reason).trim().toLowerCase();
+  if (raw === 'length' || raw === 'max_tokens' || raw === 'max_output_tokens' || raw === 'max_completion_tokens') return 'length';
+  if (raw === 'content_filter' || raw === 'safety' || raw === 'recitation' || raw === 'blocklist' || raw === 'prohibited_content' || raw === 'spii' || raw === 'blocked') return 'content_filter';
+  if (raw === 'tool_calls' || raw === 'tool_call' || raw === 'function_call' || raw === 'tool_use') return 'tool_calls';
+  if (raw === '') return hasToolCalls ? 'tool_calls' : null;
+  if (hasToolCalls && ['stop', 'end_turn', 'stop_sequence', 'complete', 'completed', 'eos', 'done'].includes(raw)) return 'tool_calls';
+  if (['stop', 'end_turn', 'stop_sequence', 'complete', 'completed', 'eos', 'done'].includes(raw)) return 'stop';
+  // Unknown non-empty reason: keep the response usable and never claim a tool
+  // call when the message has none.
+  return hasToolCalls ? 'tool_calls' : 'stop';
+}
+
 export class CanonicalResponseNormalizer {
   normalize(raw, { model = '', providerId = '' } = {}) {
     if (!raw || typeof raw !== 'object') throw new Error('provider_response_invalid');
@@ -61,11 +80,15 @@ export class CanonicalResponseNormalizer {
   base(model, providerId) { return { id:`normalized_${randomUUID()}`, object:'chat.completion', created:Math.floor(Date.now()/1000), model, provider:providerId }; }
   openai(raw, model, providerId) {
     const streaming = raw.choices.some(choice => choice && Object.hasOwn(choice, 'delta') && !Object.hasOwn(choice, 'message'));
-    const choices = raw.choices.map((choice, index) => ({
-      index: Number.isInteger(choice?.index) ? choice.index : index,
-      ...(streaming ? {delta: safeDelta(choice?.delta ?? {})} : {message: safeMessage(choice?.message ?? {})}),
-      finish_reason: choice?.finish_reason ?? null
-    }));
+    const choices = raw.choices.map((choice, index) => {
+      const payload = streaming ? safeDelta(choice?.delta ?? {}) : safeMessage(choice?.message ?? {});
+      const hasToolCalls = Array.isArray(payload.tool_calls) && payload.tool_calls.length > 0;
+      return {
+        index: Number.isInteger(choice?.index) ? choice.index : index,
+        ...(streaming ? {delta: payload} : {message: payload}),
+        finish_reason: normalizeFinishReason(choice?.finish_reason, hasToolCalls)
+      };
+    });
     if (!choices.length) throw new Error('provider_response_empty_choices');
     const base = this.base(model || raw.model, providerId);
     return {
@@ -78,14 +101,18 @@ export class CanonicalResponseNormalizer {
     };
   }
   gemini(raw, model, providerId) {
-    const text=raw.candidates.flatMap(c=>c?.content?.parts??[]).map(p=>p?.text).filter(Boolean).join('');
-    const toolCalls=raw.candidates.flatMap(c=>c?.content?.parts??[]).filter(p=>p?.functionCall).map((p,i)=>({id:String(p.functionCall.id??`call_${i+1}`),type:'function',function:{name:String(p.functionCall.name??'').slice(0,200),arguments:JSON.stringify(p.functionCall.args??{})},...(p.thoughtSignature?{thoughtSignature:String(p.thoughtSignature)}:{})})).filter(x=>x.function.name);
+    const parts=raw.candidates.flatMap(c=>c?.content?.parts??[]);
+    const text=parts.map(p=>p?.text).filter(Boolean).join('');
+    const toolCalls=parts.filter(p=>p?.functionCall).map((p,i)=>({id:String(p.functionCall.id??`call_${i+1}`),type:'function',function:{name:String(p.functionCall.name??'').slice(0,200),arguments:JSON.stringify(p.functionCall.args??{})},...(p.thoughtSignature?{thoughtSignature:String(p.thoughtSignature)}:{})})).filter(x=>x.function.name);
     const message={role:'assistant',content:text||null}; if(toolCalls.length) message.tool_calls=toolCalls;
-    return {...this.base(model, providerId), choices:[{index:0,message,finish_reason:raw.candidates[0]?.finishReason?.toLowerCase()??null}]};
+    return {...this.base(model, providerId), choices:[{index:0,message,finish_reason:normalizeFinishReason(raw.candidates[0]?.finishReason, toolCalls.length>0)}]};
   }
   anthropic(raw, model, providerId) {
-    const text=raw.content.map(x=>x?.text).filter(Boolean).join('');
-    return {...this.base(model || raw.model, providerId), choices:[{index:0,message:{role:'assistant',content:text},finish_reason:raw.stop_reason??null}], usage:safeUsage(raw.usage)};
+    const blocks=Array.isArray(raw.content)?raw.content:[];
+    const text=blocks.map(x=>x?.text).filter(Boolean).join('');
+    const toolCalls=blocks.filter(x=>x?.type==='tool_use'&&x?.name).map((x,i)=>({id:String(x.id??`call_${i+1}`),type:'function',function:{name:String(x.name).slice(0,200),arguments:JSON.stringify(x.input??{})}}));
+    const message={role:'assistant',content:text||null}; if(toolCalls.length) message.tool_calls=toolCalls;
+    return {...this.base(model || raw.model, providerId), choices:[{index:0,message,finish_reason:normalizeFinishReason(raw.stop_reason, toolCalls.length>0)}], usage:safeUsage(raw.usage)};
   }
   text(text, model, providerId) { return {...this.base(model, providerId), choices:[{index:0,message:{role:'assistant',content:String(text)},finish_reason:null}]}; }
 }

@@ -82,6 +82,8 @@ test('phase55 the mcp compatibility surface never advertises a server endpoint',
   assert.equal(config.server.implemented, false);
   assert.equal(config.transport.url, null);
   assert.equal(config.transport.implemented, false);
+  assert.equal(config.current_spec_version, '2026-07-28');
+  assert.equal(config.spec_gap, '2026-07-28_not_implemented');
   assert.equal(JSON.stringify(config).includes('/mcp'), false, 'no mcp server url may be advertised');
   assert.deepEqual(config.server.supported_protocol_versions, ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']);
 

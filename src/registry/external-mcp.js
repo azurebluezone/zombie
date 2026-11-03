@@ -71,13 +71,18 @@ export class ExternalMcpRegistry {
     for(const [key,value] of Object.entries(this.env)) {
       if(key === 'EXTERNAL_MCP_URLS' || !key.startsWith('EXTERNAL_MCP_') || !key.endsWith('_URL') || !value) continue;
       const id=normalizeId(key.slice('EXTERNAL_MCP_'.length,-'_URL'.length));
-      if(id) result.push({id,name:id,url:String(value).trim(),transport:'http',enabled:true,source:'environment',allowHosts:[]});
+      if(id) result.push({id,name:id,url:String(value).trim(),transport:'http',enabled:true,source:'environment',allowHosts:[],urlEnv:key});
     }
     return result;
   }
   async definitions() {
     const folder = (await this.folderDefinitions()).map(item => ({...item, url:this._resolveEnvUrl(item), configurationSource:item.url ? 'folder' : (item.urlEnv && this.env[item.urlEnv] ? 'environment' : 'unconfigured')}));
-    const env = this.envDefinitions();
+    // A folder declaration that names `urlEnv` owns that variable. Scanning the
+    // environment separately would register the same endpoint twice under two
+    // ids (`web-search` and `web_search`), which doubles discovery and makes
+    // the registry look like it has a server nobody declared.
+    const folderEnvKeys = new Set(folder.map(item => item.urlEnv).filter(Boolean));
+    const env = this.envDefinitions().filter(item => !item.urlEnv || !folderEnvKeys.has(item.urlEnv));
     const seen = new Map();
     const combined=[];
     for (const item of [...folder,...env]) {
@@ -147,7 +152,7 @@ export class ExternalMcpRegistry {
       if (discovery.length) await this.logger?.info?.('external_mcp.tools_discovered',{endpoints:discovery});
       if (discoveryFailures.length) await this.logger?.warn?.('external_mcp.tools_discovery_failed',{endpoints:discoveryFailures});
     }
-    return {folderCount:(await this.folderDefinitions()).length,environmentCount:this.envDefinitions().length,definitions:results,discovery,discoveryFailures};
+    return {folderCount:definitions.filter(x=>x.source==='folder').length,environmentCount:definitions.filter(x=>x.source==='environment').length,definitions:results,discovery,discoveryFailures};
   }
   async status() {
     const definitions=await this.definitions();

@@ -21,19 +21,30 @@ export class McpClientSessions {
     return Array.isArray(rows) ? rows : [];
   }
 
+  _decorate(row, now = Date.now()) {
+    const lastSeen = Date.parse(row.lastSeenAt ?? '');
+    return {
+      ...row,
+      idleMs: Number.isFinite(lastSeen) ? now - lastSeen : null,
+      active: Number.isFinite(lastSeen) ? now - lastSeen <= this.idleMs : false
+    };
+  }
+
   async list() {
     const rows = await this._read();
     const now = Date.now();
     return rows
-      .map(row => {
-        const lastSeen = Date.parse(row.lastSeenAt ?? '');
-        return {
-          ...row,
-          idleMs: Number.isFinite(lastSeen) ? now - lastSeen : null,
-          active: Number.isFinite(lastSeen) ? now - lastSeen <= this.idleMs : false
-        };
-      })
+      .map(row => this._decorate(row, now))
       .sort((a, b) => String(b.lastSeenAt ?? '').localeCompare(String(a.lastSeenAt ?? '')));
+  }
+
+  /** One session by id, or null. The MCP route uses this to reject an unknown
+   *  or terminated session before it runs a tool. */
+  async get(sessionId) {
+    const sid = String(sessionId ?? '').trim();
+    if (!sid) return null;
+    const row = (await this._read()).find(item => item.id === sid);
+    return row ? this._decorate(row) : null;
   }
 
   /**

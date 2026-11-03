@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — round 4: end-to-end installer, Caddy TLS, web-search MCP, live matrix (2026-11-03)
+- Added `install.sh`: detects an existing checkout or clones one, fetch + ff-only merge with local changes preserved, Node 24 (checksum-verified user-level download when missing), `.env` from the Ollama URL through `scripts/install-env.mjs` with `PROVIDER_KEY_*` preserved, Caddy internal TLS, build-log purge, fresh build, start, `/health`, external MCP discovery, real `/search`, then `INSTALL_OK`.
+- Added `deploy/caddy/Caddyfile.runtime`: internal TLS on `https://localhost:9443` (runtime) and `https://localhost:9444` (admin UI); verified with Caddy's local CA, not `-k`.
+- Added `scripts/web-search-mcp-server.mjs`: SearXNG-compatible `/search` (Wikipedia Search + DuckDuckGo Instant Answer, no API key) and MCP Streamable HTTP `/mcp` on `127.0.0.1:8091`.
+- Registered `web-search` in `external-mcp/servers.json` via `EXTERNAL_MCP_WEB_SEARCH_URL`; `/health` now reports the live registry (`registered=1`, `discovered=1`, `tools=1`), and the folder/env duplicate no longer registers twice.
+- Fixed the matrix `web_search` path: the tool now returns real results; live run `matrix-20261103T075727Z-783da2` passed 12/12 agents and 28/28 tools (0 fail, 0 NOT_TESTED) on `llama-cpu` / `qwen2.5-0.5b`.
+- Admin UI: `/api/config/mcp`, web-search/MCP-gap banners and endpoint/System rows; docs (`README.md`, `docs/FRESH_INSTALL.md` §4.1, `admin-ui/README.md`) cover the installer, Caddy ports and MCP registration.
+- Added `scripts/verify-round4.mjs` and `tests/phase86-installer.test.js`; regression: **450 tests, 450 pass, 0 fail, 0 skipped, exit 0**.
+- Boundaries: Linux/Ubuntu only; Windows/macOS `NOT_TESTED`; the full Ollama matrix was not produced (per-agent probes passed, the full run timed out); MCP `2026-07-28` stateless revision remains `spec_gap`.
+
 ## Unreleased — admin console, context pipeline, and tool-access default (2026-10-22)
 - Shipped the standalone admin console as an API client: provider add/edit/probe with a 6h cache, multi-select provider model picker, per-model switches, agent chat/tool tests, tool enable/disable, and a View/JSON response viewer. The runtime never reads the UI.
 - Made provider credentials env-only (`400 provider_keys_are_env_only`), with `PROVIDER_KEY_<ID_UPPER_SNAKE>` naming and an env-driven base URL for `custom-openai`.

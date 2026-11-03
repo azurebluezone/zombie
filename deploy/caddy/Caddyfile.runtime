@@ -1,0 +1,18 @@
+# Local TLS edge for the runtime and the standalone admin console.
+# The runtime itself stays on 127.0.0.1; only this loopback TLS listener is exposed.
+{
+	admin off
+	auto_https disable_redirects
+}
+
+https://localhost:{$ZC_CADDY_HTTPS_PORT:9443} {
+	tls internal
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:{$ZC_RUNTIME_PORT:9999}
+}
+
+https://localhost:{$ZC_ADMIN_HTTPS_PORT:9444} {
+	tls internal
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:{$ZC_ADMIN_UI_PORT:8088}
+}

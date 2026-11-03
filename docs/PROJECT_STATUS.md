@@ -1,12 +1,16 @@
-# Project status — 2026-10-22
+# Project status — 2026-11-03 (round 4 refresh)
 
 > **এই ডকুমেন্টই resume point.** নতুন কাজ শুরু করার আগে এই ফাইলটা পড়ো, তারপর
 > কোড আর টেস্ট চালিয়ে সংখ্যাগুলো মিলিয়ে নাও। কোড আর এই ডকুমেন্টের মধ্যে
 > অমিল থাকলে **কোড জেতে** — এই ফাইল তখন ভুল, ঠিক করে নিতে হবে।
 >
-> Baseline: tool access `4fa1946`; agent scope `e935981`।
-> Runtime: `/home/xubuntu/zombie`, v0.49.0, API `127.0.0.1:9999`.
-> Admin UI (dev): `http://127.0.0.1:8088`; nginx edge: `https://192.168.1.144:8443`.
+> Baseline: round-4 gate `ROUND4_OK`; tool access `4fa1946`; agent scope `e935981`।
+> Runtime: `/home/sahon/zombie`, v0.49.0, API `127.0.0.1:9999`, started by
+> `install.sh` (pid `.zombiecoder-runtime.pid`; the systemd unit is not used here)।
+> Admin UI: `http://127.0.0.1:8088`; Caddy TLS edges `https://localhost:9443`
+> (runtime) and `https://localhost:9444` (admin UI)।
+> **Historical sections below:** the 2026-10-22 snapshot is kept for context; the
+> current test count, installer and matrix state are in §0 and §5.
 
 ---
 
@@ -14,15 +18,18 @@
 
 | বিষয় | এখনকার অবস্থা | প্রমাণ |
 | --- | --- | --- |
-| Tests | **428/428 pass, 0 fail, 0 skip, exit 0** | `npm test`, 2026-10-22 |
-| Runtime | active, `/health` 200 | `systemctl is-active`, `curl /health` |
+| Tests | **450/450 pass, 0 fail, 0 skip, exit 0** | `node --test`, 2026-11-03; `data/round4-verification.json` |
+| Runtime | active, `/health` 200 | pid `.zombiecoder-runtime.pid`, `curl /health` |
 | Execution mode | `tools-enabled` | `/health.executionMode` |
-| Tool access mode | **`unrestricted` (new default)** | `/health.toolAccessMode`, `/v1/admin/tools/permissions` |
+| Tool access mode | **`unrestricted` (default)** | `/health.toolAccessMode`, `/v1/admin/tools/permissions` |
 | Runnable tools | 28 | `/v1/admin/registry/tools` |
 | Agents | **12, সবগুলো `working-directory` (global 0)** | SQLite `agents.tool_boundary`, `/v1/admin/agents` |
-| Providers | 4 registered; Gemini live probe এখন quota-blocked | `/v1/admin/providers`, journal |
-| Admin UI | external client, base URL + token only | `admin-ui/index.html` |
-| Remote | HEAD == origin/main, dirty 0 | `git rev-parse` |
+| Providers | 9 registered; 4 remote providers live-probed PASS on 2026-11-03 (Ollama Cloud OpenAI/native, Gemini 3.5 Flash Lite, Groq) | `/v1/admin/providers`, `data/round2-provider-probe.json` |
+| Installer | `bash install.sh` → `INSTALL_OK`; Node `v24.22.2`; Caddy `v2.11.7` internal TLS | `install.sh`, `data/round4-verification.json` |
+| Admin UI | external client, base URL + token only; Caddy TLS edge on `9444` | `admin-ui/index.html`, `admin-ui/README.md` |
+| MCP | 28 tools on `POST /mcp`; session-based through `2025-11-25`; published `2026-07-28` stateless revision **not implemented** (`spec_gap`); external `web-search` registered=1, tools=1 | `/api/config/mcp`, `/health.externalMcp` |
+| Live matrix | **12 agents × 28 tools PASS, 0 fail, 0 NOT_TESTED**; `llama-cpu` / `qwen2.5-0.5b`; `web_search` real URL | `data/agent-mcp-matrix.json` |
+| Remote | `main` == `origin/main` after the round-4 push; clean worktree | `git status --porcelain`, `git ls-remote` |
 
 **সবচেয়ে বড় বাকি ঝুঁকি:** inbound MCP server-এ `TOOL_ACCESS_MODE=unrestricted`
 path boundary-ও খুলে দেয় (`/mcp` handler), যদিও agent chat/execution এখন pinned।
@@ -117,6 +124,10 @@ path boundary-ও খুলে দেয় (`/mcp` handler), যদিও agent
 
 ### 2.6 Agent scope (P0.1 — resolved)
 
+> Historical note: the `/home/xubuntu/Documents` paths below are from the
+> 2026-10-22 snapshot machine. The current live value is `/home/sahon/zombie/data`
+> for all 12 pinned agents (`/health.runtime`, `runtime.agent_scopes`).
+
 - Default boundary এখন **`working-directory`** (`src/agents/access.js`); `global`
   শুধু explicit operator choice। নতুন/unconfigured agent host পায় না।
 - Stored directory না থাকলে fallback: `AGENT_DEFAULT_WORKING_DIRECTORY` → `DATA_DIR`;
@@ -198,44 +209,46 @@ path boundary-ও খুলে দেয় (`/mcp` handler), যদিও agent
 
 ---
 
-## 5. Verification (fresh, 2026-10-22)
+## 5. Verification (round 4, 2026-11-03)
 
 ```
-npm test
+node scripts/verify-round4.mjs
 exit=0
-tests 428 / pass 428 / fail 0 / skipped 0
+ROUND4_OK installer=ok node24=ok env=ok caddy_tls=ok build=ok start=ok health=ok
+admin=ok docs=ok external_mcp=web-search web_search=PASS matrix_live=real_run
+tests=450 matrix_provider=llama-cpu matrix_model=qwen2.5-0.5b
+report=data/round4-verification.json
 ```
 
-- `tests/phase81-tool-access-mode.test.js` — 3/3: permissioned grant লাগে;
-  unrestricted grant ছাড়া allow; config disable তখনো block; MCP একই নিয়ম।
-- `tests/phase58-mcp-server.test.js` — 8/8; grant-gate test এখন স্পষ্টভাবে
-  `TOOL_ACCESS_MODE=permissioned` pin করে।
-- `tests/phase48-admin-control-plane.test.js` — 2/2; agent test context +
-  plain chat `context.compiled` + `meta.context` assertion; pinned default root
-  (`DATA_DIR`) asserted.
-- `tests/phase82-agent-scope.test.js` — 5/5: default pinned; caller root ignored;
-  unset directory falls back to workspace; global explicit; live boundary PATCH,
-  relative-path 400, inside read 200, `/etc/passwd` refused; a symlinked scope is
-  stored canonically (realpath), so repointing the link cannot move the boundary।
+- `node --test` — 450 tests, 450 pass, 0 fail, 0 skipped; includes the new
+  `tests/phase86-installer.test.js` (installer syntax/order, env key preservation,
+  web-search transport, Caddy manifest, matrix fallback).
+- `install.sh` — live and idempotent: existing checkout detected, local changes
+  preserved (fetch ran, ff-only merge skipped), Node 24 check, env write with
+  `PROVIDER_KEY_*` preserved, Caddy internal TLS, build-log purge, fresh build
+  (`verified files=191 syntax=153`), start + `/health`, external MCP discovery,
+  real `/search`, then `INSTALL_OK`.
+- Caddy TLS — verified with the internal CA, not `-k`:
+  `curl --cacert ~/.local/share/caddy/pki/authorities/local/root.crt
+  https://localhost:9443/health` and `https://localhost:9444/` both HTTP 200.
+- External MCP — `/health.externalMcp` reports `registered=1`, `discovered=1`,
+  `tools=1`; the folder declaration and env-derived duplicate no longer register
+  twice.
+- `web_search` — real MCP call returned `https://en.wikipedia.org/wiki/Node.js`
+  (1074 bytes, sha256 `6499151b...`); the matrix tool entry is `PASS`.
+- Live matrix — `data/agent-mcp-matrix.json`, run
+  `matrix-20261103T075727Z-783da2`, 12/12 agents sentinel+provider match,
+  28/28 tools PASS (0 fail, 0 NOT_TESTED), MCP tools 28, UDS 200.
+- Admin UI — inline script parses clean (67,479 bytes); page loads with 0 console
+  errors; `/api/config/mcp`, web-search and MCP gap banners present.
 
-Live:
+**Label discipline:** gate output `real_run`; Caddy/`/health`/`/search` probes
+`live`; matrix artifact `real_run`; full Ollama matrix `NOT_TESTED` (the live run
+used `llama-cpu` because llama.cpp was reachable); admin UI connected-state with
+the real token `NOT_TESTED`.
 
-| Probe | ফল |
-| --- | --- |
-| `/health` | 200, `executionMode=tools-enabled`, `toolAccessMode=unrestricted` |
-| `/v1/admin/tools/permissions` | `accessMode=unrestricted`, `grantsRequired=false`, grants 0 |
-| Grant ছাড়া `/v1/execution/run` (`runtime_echo`) | HTTP 200, nested `result.result.echo=no-grant-ok`, `result.status=awaiting_verification` (evidence observed, independently verified নয়) |
-| Admin agent test context | `context.available=true`; chat 618B / SSOT 1 / prompt 10580B; tool-all 911B / 28/28 / prompt 11279B |
-| Admin agent test provider call | **provider_http_error** (Gemini quota 429) — fresh model completion **NOT_TESTED** |
-| UI | `toolsMode` marker served; mode `unrestricted` দেখায়; Scope editor markers served |
-| Scope PATCH (live) | 12/12 → `working-directory`, `/home/xubuntu/Documents`; global 0 |
-| Boot audit | `runtime.agent_scopes` → total 12, pinned 12, global 0; কোনো unsafe warning নেই |
-| Boundary tool probe | throwaway app (0 grants), `read_file` `Default Project/.zombiecoder/SSOT.md` → 200; `/etc/passwd` → 400 `execution_path_outside_project_root` |
-| Relative scope PATCH | 400 `working_directory_not_absolute` |
-
-**Label discipline:** উপরের context/policy অংশ `LIVE_PROBE_PASSED`; model
-completion `NOT_TESTED` (upstream quota); 28/28 surface `LIVE_PROBE_PASSED`;
-`verified:false` মানে success নয়।
+Older phase-81/82 evidence (tool-access gate, agent scope) remains in the suite;
+the historical 2026-10-22 live table is intentionally not repeated here.
 
 ---
 
@@ -244,7 +257,7 @@ completion `NOT_TESTED` (upstream quota); 28/28 surface `LIVE_PROBE_PASSED`;
 ### P0 — security / trust boundary
 
 1. **✅ RESOLVED — 12/12 agent `tool_boundary=global`।**
-   - এখন 12/12 `working-directory`, `/home/xubuntu/Documents`; global 0।
+   - এখন 12/12 `working-directory`, `/home/sahon/zombie/data`; global 0।
    - নতুন agent default pinned; unset directory workspace fallback; UI Scope editor;
      boot `runtime.agent_scope_unsafe` warning।
    - Live proof: boundary-র বাইরে `read_file /etc/passwd` → 400
@@ -259,32 +272,41 @@ completion `NOT_TESTED` (upstream quota); 28/28 surface `LIVE_PROBE_PASSED`;
 
 ### P1 — functionality / operations
 
-3. **Provider quota**: Gemini 429; fresh chat/tool completion এখন
-   `NOT_TESTED`। কোড ঠিক আছে, কিন্তু live model proof quota reset-এ আবার চালাতে হবে।
+3. **Provider quota** — round-2 live probe passed Gemini 3.5 Flash Lite, Ollama
+   Cloud OpenAI/native and Groq; re-run `scripts/round2-provider-probe.mjs` after
+   a quota/credential change instead of trusting the old artifact.
 4. **Admin test tool execute করে না** — শুধু provider call + tool schema।
    "tool actually ran" প্রমাণ করতে `/v1/execution/run` probe ব্যবহার করো।
 5. **Consent/task policy** — write/command-এ `consent:true` লাগে; admin UI-তে
    execution test-এর consent toggle নেই (test execute করে না বলে এখন blocker নয়)।
-6. **nginx TLS self-signed** — browser 직접 খুললে cert exception লাগে;
-   dev-এ `http://127.0.0.1:8088` ব্যবহার করছি।
+6. **TLS edges** — Caddy internal TLS (`9443`/`9444`) is verified with its local
+   CA; the older nginx self-signed edge still needs a browser exception. Treat
+   the Caddy path as the supported one.
 7. **Tool mode visibility** — admin UI-তে per-app grant list নেই; API
    `/v1/admin/tools/permissions` আছে, unrestricted-এ প্রায় অপ্রয়োজনীয়।
-8. **Single-root tradeoff** — সব agent `/home/xubuntu/Documents`-এ pinned। অন্য
-   root (যেমন runtime repo `/home/xubuntu/zombie`) দরকার হলে operator-কে Scope
+8. **Single-root tradeoff** — সব agent `/home/sahon/zombie/data`-এ pinned। অন্য
+   root (যেমন runtime repo `/home/sahon/zombie`) দরকার হলে operator-কে Scope
    editor/PATCH দিয়ে বদলাতে হবে; এক agent-এর জন্য একাধিক root allowlist এখনো নেই।
    Multi-root scope ভবিষ্যতের কাজ, কিন্তু এখন least privilege বজায় রাখে।
 
 ### P2 — polish / docs
 
 9. Agent test result table-এ দেখা যায় না, শুধু popup।
-10. `docs/JOURNEY.md` §2-এর measured numbers 2026-10-17-এর; এই ডক এখন resume
-   point, JOURNEY history।
+10. `docs/JOURNEY.md` §2 is a historical 2026-10-17 snapshot; its 2026-11-03
+    note carries the current suite count. Keep it history, not the resume point.
 11. `/tmp` invisible (PrivateTmp); sandbox path `data/`-এর ভিতরে রাখতে হবে।
 12. Secret incident: একটা throwaway app key একবার tool output-এ এসেছিল;
     app সাথে সাথে revoke; key file remove। ভবিষ্যতে app create-এর response
     কখনো print না করে সরাসরি file-এ লেখো।
 13. 28 tools offered, কিন্তু narrowed selection default 12-cap; দরকারে
     `toolSurface:"full"`।
+14. Full Ollama matrix `NOT_TESTED` — the live 12×28 run used `llama-cpu`
+    (`qwen2.5-0.5b`); Ollama `qwen2.5:1.5b` per-agent probes passed but the full
+    matrix timed out, so no Ollama artifact exists.
+15. Admin UI connected-state with the real token `NOT_TESTED`; page load and
+    inline-script parse are verified.
+16. MCP `2026-07-28` stateless revision remains `spec_gap`; the runtime speaks
+    session-based `2025-11-25`.
 
 ---
 
@@ -292,39 +314,47 @@ completion `NOT_TESTED` (upstream quota); 28/28 surface `LIVE_PROBE_PASSED`;
 
 1. **P0.2 MCP path decoupling** — inbound MCP-কে agent scope বা explicit root-এ
    সীমিত করা; unrestricted-এ `allowAny*` না করা। মাপকাঠি: root-এর বাইরে deny।
-2. **Provider live proof** — quota reset হলে code-guru chat + tool call;
-   মাপকাঠি: `content` non-null, `toolCallCount>=1`, `context.available=true`।
-3. **Consent/tool execution UX** — admin test-এ optional "execute with consent"
-   (আলাদা explicit checkbox), অথবা execution probe shortcut।
-4. **Grant visibility** — Tools page-এ per-app grants table + "grant all"
-   (permissioned mode-এর জন্য)।
+2. **Full Ollama matrix** — run
+   `MATRIX_PROVIDER_ID=ollama-selfhosted MATRIX_MODEL=qwen2.5:1.5b node scripts/agent-mcp-matrix.mjs`
+   when Ollama is up; the current artifact is `llama-cpu` only.
+3. **Windows/macOS installer** — `NOT_TESTED`; the supported target is
+   Debian/Ubuntu, and unsupported platforms must refuse cleanly.
+4. **Admin UI connected-state** — exercise the real token path (banners,
+   endpoint status, System rows) instead of only the disconnected page.
 5. **Multi-root scope (design)** — এক agent एकাধিক root (allowlist) নাকি single
    root; decision + test। এখন single-root intentionally।
-6. **TLS** — trusted cert বা browser exception; nginx-এ admin UI verify।
-7. **Docs** — প্রতি বড় step-এ এই ফাইলের snapshot + commit hash update।
+6. **TLS cleanup** — trusted cert or a documented browser exception; retire the
+   nginx self-signed edge in favour of Caddy.
+7. **Docs** — update this file at every release gate and keep the commit trail
+   honest.
 
 ---
 
 ## 8. Resume checklist
 
 ```bash
-cd /home/xubuntu/zombie
+cd /home/sahon/zombie
 
 # state
 git rev-parse HEAD && git status --porcelain=v1
-systemctl is-active zombiecoder-runtime
+cat .zombiecoder-runtime.pid
 curl -s http://127.0.0.1:9999/health | python3 -m json.tool | head -20
 
-# tests (expect 428/428, exit 0)
+# start/restart everything (installer is idempotent)
+bash install.sh
+
+# release gate (installer, TLS, MCP, web_search, matrix, tests)
+node scripts/verify-round4.mjs
+
+# tests (expect 450/450, exit 0 on 2026-11-03)
 npm test
 
 # logs
-journalctl -u zombiecoder-runtime -n 50 --no-pager
-
-# admin UI (dev)
-# http://127.0.0.1:8088  → base URL http://127.0.0.1:9999 + ADMIN_TOKEN
+tail -n 50 logs/runtime.out
 ```
 
+- The systemd unit is not used in this checkout; `install.sh` starts services
+  with `setsid` and writes pid files (`data/*.pid`, `.zombiecoder-runtime.pid`)।
 - `.env` gitignored; deploy-এ `TOOL_ACCESS_MODE` ও
   `AGENT_DEFAULT_WORKING_DIRECTORY` আলাদা করে set করতে হবে।
 - Agent scope বদলাতে admin UI → Agents → Scope, অথবা
@@ -333,8 +363,11 @@ journalctl -u zombiecoder-runtime -n 50 --no-pager
   Absolute + existing directory না হলে 400।
 - Provider key কোথাও print করবে না; app create-এর response file-এ লিখে
   সাথে সাথে revoke/remove।
-- `npm run build` → `systemctl restart zombiecoder-runtime` (src বদলালে)।
-- `dist/` build artifact; service সেখান থেকেই চলে।
+- Rebuild with `node scripts/build-runtime.mjs`; restart with `bash install.sh`
+  (or `node start.js`) when `src/` changes.
+- Caddy TLS probe:
+  `curl --cacert ~/.local/share/caddy/pki/authorities/local/root.crt https://localhost:9443/health`।
+- `dist/` build artifact; the runtime serves from it.
 
 ---
 
@@ -342,6 +375,7 @@ journalctl -u zombiecoder-runtime -n 50 --no-pager
 
 | Commit | কী |
 | --- | --- |
+| `HEAD` (round-4 push) | end-to-end installer, Caddy internal TLS, web-search MCP transport, live 12×28 matrix, docs refresh |
 | `596b1ff` | test: meta.context compiled assertion |
 | `86856f9` | agent test real context pipeline + compiled context responses |
 | `4bcd255` | multi-select provider model picker |
@@ -352,7 +386,8 @@ journalctl -u zombiecoder-runtime -n 50 --no-pager
 | `1a5fce8` | storage durability + consistent backups |
 | `8f42425` | nginx edge TLS + control-plane rate limit |
 
-এই ডকুমেন্টের সর্বশেষ update agent-scope commit `e935981`-এ।
+এই ডকুমেন্টের সর্বশেষ update round-4 release-এ (installer + Caddy TLS +
+web-search MCP + live 12×28 matrix)।
 
 ---
 
