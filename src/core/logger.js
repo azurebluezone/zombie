@@ -50,6 +50,45 @@ export function redactSecrets(value) {
 // msgCount, recentCount, sessionCount, contextInjected instead.
 const PAYLOAD_KEY = /(messages?|content|arguments|prompt|body|payload|data)/i;
 
+const LEVEL_MARK = {error:'✗', warn:'!', info:'✓', debug:'·', trace:'·'};
+const CONSOLE_SKIP = new Set(['ts', 'level', 'event', 'schemaVersion']);
+
+function compactConsoleValue(value, limit = 160) {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'string') {
+    const text = value.length > limit ? `${value.slice(0, limit)}…` : value;
+    return /\s/.test(text) ? JSON.stringify(text) : text;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    const text = JSON.stringify(value);
+    return text.length > limit ? `${text.slice(0, limit)}…` : text;
+  } catch { return '[unserializable]'; }
+}
+
+/**
+ * One human-readable console line for an already-sanitized log entry.
+ * The JSONL file keeps the full record; this line exists so an operator can
+ * read a live terminal without piping every line through jq.
+ */
+export function formatConsoleLine(entry = {}) {
+  const time = String(entry.ts ?? '').slice(11, 19);
+  const level = String(entry.level ?? 'info').toLowerCase();
+  const mark = LEVEL_MARK[level] ?? '·';
+  const event = String(entry.event ?? 'event');
+  const parts = [];
+  for (const [key, value] of Object.entries(entry)) {
+    if (CONSOLE_SKIP.has(key) || value === undefined) continue;
+    parts.push(`${key}=${compactConsoleValue(value)}`);
+  }
+  // Fixed columns make a live terminal scannable: time, mark, level, event,
+  // then key=value fields. The JSONL file remains the authoritative record.
+  const levelColumn = level.toUpperCase().padEnd(5);
+  const eventColumn = event.length >= 30 ? event : event.padEnd(30);
+  return `${time} ${mark} ${levelColumn} ${eventColumn}${parts.length ? ' ' + parts.join(' ') : ''}\n`;
+}
+
 function sanitize(value, {allowPayloads = false} = {}, depth = 0) {
   if (depth > 5) return '[max-depth]';
   if (!allowPayloads && typeof value === 'string' && value.length > 2000) return `[redacted-long-string:${value.length}]`;
@@ -72,11 +111,12 @@ function sanitize(value, {allowPayloads = false} = {}, depth = 0) {
 }
 
 export class SystemLogger {
-  constructor({dir='./logs', file='runtime.jsonl', level='info', stdout=true, maxBytes=10*1024*1024, maxFiles=7, allowPayloads=false} = {}) {
+  constructor({dir='./logs', file='runtime.jsonl', level='info', stdout=true, pretty=true, maxBytes=10*1024*1024, maxFiles=7, allowPayloads=false} = {}) {
     this.dir = path.resolve(dir);
     this.file = file;
     this.level = LEVELS[level] === undefined ? LEVELS.info : LEVELS[level];
     this.stdout = stdout;
+    this.pretty = Boolean(pretty);
     this.maxBytes = Math.max(1024, Number(maxBytes) || 10 * 1024 * 1024);
     this.maxFiles = Math.max(1, Number(maxFiles) || 7);
     this.allowPayloads = Boolean(allowPayloads);
@@ -88,16 +128,20 @@ export class SystemLogger {
 
   log(level, event, fields = {}) {
     if (!this.enabled(level)) return Promise.resolve();
+    const sanitized = sanitize(fields, {allowPayloads: this.allowPayloads});
+    // Reserved fields always come first and always win: a caller cannot spoof
+    // the timestamp/level/event, and a reader sees the header before the detail.
+    const {ts: _ts, level: _level, event: _event, schemaVersion: _schemaVersion, ...detail} = sanitized;
     const entry = {
-      ...sanitize(fields, {allowPayloads: this.allowPayloads}),
-      schemaVersion: LOG_SCHEMA_VERSION,
       ts: new Date().toISOString(),
       level,
-      event: String(event)
+      event: String(event),
+      schemaVersion: LOG_SCHEMA_VERSION,
+      ...detail
     };
     const line = JSON.stringify(entry) + '\n';
     if (this.stdout) {
-      try { process.stdout.write(line); }
+      try { process.stdout.write(this.pretty ? formatConsoleLine(entry) : line); }
       catch (error) { this.reportWriteFailure(error, 'stdout', String(event)); }
     }
     this.chain = this.chain.then(async () => {

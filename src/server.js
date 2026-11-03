@@ -91,7 +91,7 @@ import { AgentMetrics } from './agents/metrics.js';
 import { legacyModelList, legacyProviderModelList, legacyNormalizeList, legacyDomain, legacyPusherConfig } from './compatibility/legacy/frontend-contract.js';
 import { toolParityReport } from './compatibility/legacy/tool-parity.js';
 
-const logger = new SystemLogger({dir:config.logDir,file:config.logFile,level:config.logLevel,stdout:config.logToStdout,maxBytes:config.logMaxBytes,maxFiles:config.logMaxFiles,allowPayloads:config.logPayloads});
+const logger = new SystemLogger({dir:config.logDir,file:config.logFile,level:config.logLevel,stdout:config.logToStdout,pretty:config.logPretty,maxBytes:config.logMaxBytes,maxFiles:config.logMaxFiles,allowPayloads:config.logPayloads});
 configureOutboundCircuitLogger(logger);
 configureOutboundCircuitBreaker(config.circuitBreaker);
 await mkdir(config.dataDir, {recursive:true});
@@ -2350,6 +2350,35 @@ if (config.toolAccessMode === 'unrestricted' && globalScopeAgents.length > 0) {
     advice: 'Pin these agents to working-directory (or set TOOL_ACCESS_MODE=permissioned) before exposing this runtime.'
   });
 }
+// One startup line per provider plus a single summary line. The JSONL keeps the
+// same data for post-mortems; the console line is what an operator reads live.
+const startupProviders = (await providers.list()).map(provider => ({
+  id: provider.id,
+  enabled: provider.enabled !== false,
+  modelCount: Array.isArray(provider.models) ? provider.models.length : 0,
+  defaultModel: provider.defaultModel ?? null
+}));
+for (const provider of startupProviders) await logger.info('runtime.startup_provider', provider);
+const startupTools = await toolsRegistry.list();
+const startupSkills = await skillsRegistry.list();
+const startupTransports = await transportsRegistry.list();
+const startupApplications = await store.read('applications', []);
+await logger.info('runtime.startup_summary', {
+  url: `http://${config.host}:${config.port}`,
+  providers: startupProviders.length,
+  providersEnabled: startupProviders.filter(provider => provider.enabled).length,
+  models: startupProviders.reduce((total, provider) => total + provider.modelCount, 0),
+  publicModels: ZOMBIECODER_MODELS.length,
+  publicModelIds: ZOMBIECODER_MODELS.map(model => model.id),
+  agents: agentScopeRows.length,
+  agentsPinned: agentScopeRows.length - globalScopeAgents.length,
+  agentsGlobal: globalScopeAgents.length,
+  tools: startupTools.length,
+  toolsEnabled: startupTools.filter(tool => tool.status !== 'DISABLED').length,
+  skills: startupSkills.length,
+  transports: startupTransports.length,
+  applications: startupApplications.length
+});
 await logger.info('runtime.started', {version:RUNTIME_VERSION,phase:RUNTIME_PHASE,runtimeId:runtimeIdentity.runtimeId,instanceId:runtimeIdentity.instanceId,transports:Object.fromEntries(Object.entries(transportServers).map(([key,server])=>[key,Boolean(server)])),sse:SSE_DELIVERY_MODE});
 // Memory is written at startup and then on an interval, so a leak has a history rather than
 // only a post-mortem. `MEMORY_LOG_INTERVAL_MS=0` keeps the startup line and stops the rest.

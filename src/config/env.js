@@ -188,6 +188,7 @@ export const config = {
   logDir: resolveRuntimePath(env('LOG_DIR', './logs')),
   logFile: env('LOG_FILE', 'runtime.jsonl'),
   logToStdout: env('LOG_TO_STDOUT', 'true') !== 'false',
+  logPretty: env('LOG_PRETTY', 'true') !== 'false',
   logMaxBytes: numberEnv('LOG_MAX_BYTES', 10 * 1024 * 1024, {min:1024}),
   logMaxFiles: numberEnv('LOG_MAX_FILES', 7, {min:1,max:100}),
   logPayloads: env('LOG_PAYLOADS', 'false') === 'true',

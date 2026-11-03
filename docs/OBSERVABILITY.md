@@ -32,6 +32,22 @@ jq -c 'select(.level == "warn" or .level == "error")' logs/runtime.jsonl
 These commands require `jq` only for filtering; the runtime itself does not
 require it.
 
+When `LOG_TO_STDOUT=true` (the default), the same records are also printed to the
+terminal as short human-readable lines. The file stays JSONL; only the console
+format changes:
+
+```text
+11:33:16 ✓ INFO  runtime.startup_provider       id=gemini enabled=true modelCount=50 defaultModel=gemini-3.5-flash-lite
+11:33:16 ✓ INFO  runtime.startup_summary        url=http://127.0.0.1:9999 providers=6 providersEnabled=6 models=114 publicModels=3 agents=12 tools=28 skills=0 transports=5 applications=0
+11:33:16 ✓ INFO  runtime.started               version=0.49.0 phase=49 runtimeId=runtime-9999
+```
+
+Startup is logged step by step: environment, project roots, each transport, agent
+scopes, one `runtime.startup_provider` line per provider, then
+`runtime.startup_summary` with the totals and `runtime.started`. Request, agent,
+provider, model, tool-call, success and failure events continue to appear in the
+same console stream while the server is running.
+
 ## Configuration
 
 The following settings are read from the environment (or `.env`) at startup:
@@ -42,6 +58,7 @@ The following settings are read from the environment (or `.env`) at startup:
 | `LOG_DIR` | Directory for the log file | `./logs` |
 | `LOG_FILE` | Active JSONL filename | `runtime.jsonl` |
 | `LOG_TO_STDOUT` | Also write each normal log record to stdout | `true` |
+| `LOG_PRETTY` | Print the stdout copy as a short human line instead of raw JSON | `true` |
 | `LOG_MAX_BYTES` | Rotate the active file before it grows past this size | `10485760` |
 | `LOG_MAX_FILES` | Number of rotated archive files to keep, in addition to the active file | `7` |
 | `LOG_PAYLOADS` | Include fields normally omitted as conversation/request payloads | `false` |
@@ -102,6 +119,8 @@ answering exactly that question.
 | `mcp.server.auth_failed` | an inbound MCP client presented an unacceptable credential |
 | `outbound.circuit.opened` | the runtime stopped calling an upstream after repeated failures |
 | `logger.write_failed` | logs are not reaching the file (written to stderr) |
+| `runtime.startup_provider` | one provider row at boot: id, enabled, model count, default model |
+| `runtime.startup_summary` | boot totals: providers, models, public models, agents, tools, skills, transports, applications |
 
 ## Which errors reach the caller
 
