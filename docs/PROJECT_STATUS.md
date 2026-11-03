@@ -18,18 +18,18 @@
 
 | বিষয় | এখনকার অবস্থা | প্রমাণ |
 | --- | --- | --- |
-| Tests | **450/450 pass, 0 fail, 0 skip, exit 0** | `node --test`, 2026-11-03; `data/round4-verification.json` |
+| Tests | **452/452 pass, 0 fail, 0 skip, exit 0** | `node --test`, 2026-11-03; `data/round4-verification.json` |
 | Runtime | active, `/health` 200 | pid `.zombiecoder-runtime.pid`, `curl /health` |
 | Execution mode | `tools-enabled` | `/health.executionMode` |
 | Tool access mode | **`unrestricted` (default)** | `/health.toolAccessMode`, `/v1/admin/tools/permissions` |
 | Runnable tools | 28 | `/v1/admin/registry/tools` |
 | Agents | **12, সবগুলো `working-directory` (global 0)** | SQLite `agents.tool_boundary`, `/v1/admin/agents` |
-| Providers | 9 registered; 4 remote providers live-probed PASS on 2026-11-03 (Ollama Cloud OpenAI/native, Gemini 3.5 Flash Lite, Groq) | `/v1/admin/providers`, `data/round2-provider-probe.json` |
+| Providers | 9 registered, 5 enabled; live remote proof: Gemini/Groq/Ollama Cloud OpenAI catalogs loaded (50/11/25), **12/12 agents emitted tool calls through Gemini**, one full tool loop completed | `/v1/admin/providers`, `data/remote-agents-verification.json` |
 | Installer | `bash install.sh` → `INSTALL_OK`; Node `v24.22.2`; Caddy `v2.11.7` internal TLS | `install.sh`, `data/round4-verification.json` |
 | Admin UI | external client, base URL + token only; Caddy TLS edge on `9444` | `admin-ui/index.html`, `admin-ui/README.md` |
 | MCP | 28 tools on `POST /mcp`; session-based through `2025-11-25`; published `2026-07-28` stateless revision **not implemented** (`spec_gap`); external `web-search` registered=1, tools=1 | `/api/config/mcp`, `/health.externalMcp` |
 | Live matrix | **12 agents × 28 tools PASS, 0 fail, 0 NOT_TESTED**; `llama-cpu` / `qwen2.5-0.5b`; `web_search` real URL | `data/agent-mcp-matrix.json` |
-| Remote | `main` == `origin/main` after the round-4 push; clean worktree | `git status --porcelain`, `git ls-remote` |
+| Remote | `main` == `origin/main` after the provider-fix push; clean worktree | `git status --porcelain`, `git ls-remote` |
 
 **সবচেয়ে বড় বাকি ঝুঁকি:** inbound MCP server-এ `TOOL_ACCESS_MODE=unrestricted`
 path boundary-ও খুলে দেয় (`/mcp` handler), যদিও agent chat/execution এখন pinned।
@@ -81,6 +81,23 @@ path boundary-ও খুলে দেয় (`/mcp` handler), যদিও agent
 - Live priorities: gemini 1, groq 2, ollama-cloud-openai 3, custom-openai 4,
   ollama-selfhosted 10 (disabled)।
 - Provider key naming: `PROVIDER_KEY_<ID_UPPER_SNAKE>`; কোনো key chat-এ print নয়।
+- **Placeholder default auto-discovery** — `ProviderRegistry.resolveModelOrDiscover()`
+  (`src/providers/registry.js`) resolves the model; on
+  `provider_model_not_configured` it refreshes the vendor catalog once and retries.
+  The admin provider Test route (`src/server.js`) uses it, so an enabled provider
+  with `REPLACE_WITH_...` and `models: []` no longer dead-ends before the upstream
+  call. The discovered default is persisted.
+- **Sync from env reads the file** — `reloadEnvKeys()`
+  (`src/config/env-loader.js`) re-reads only `PROVIDER_CONFIG_JSON` and
+  `PROVIDER_KEY_*`; `reloadProviderEnv()` (`src/config/env.js`) rebuilds
+  `config.providerApiKeys`. `POST /v1/admin/providers/sync-env` now re-runs the
+  bootstrap with the fresh seed instead of the boot-time `process.env`.
+- **Remote seed** — Gemini `gemini-3.5-flash-lite`, Groq `openai/gpt-oss-20b`,
+  Ollama Cloud OpenAI/native `gpt-oss:20b`, all `enabled: true`, `models: []`
+  (startup discovery keeps the full catalog). Ollama Cloud's discovered default
+  `glm-5.2` is paid-plan only (upstream HTTP 402); `gpt-oss:20b` is pinned.
+- Agent Test accepts `toolChoice` (`auto` | `required` | `none`) so a tool-call
+  capability check does not depend on the model choosing to cooperate.
 
 ### 2.3 Agent/persona/system prompt
 
@@ -220,7 +237,7 @@ tests=450 matrix_provider=llama-cpu matrix_model=qwen2.5-0.5b
 report=data/round4-verification.json
 ```
 
-- `node --test` — 450 tests, 450 pass, 0 fail, 0 skipped; includes the new
+- `node --test` — 452 tests, 452 pass, 0 fail, 0 skipped; includes the new
   `tests/phase86-installer.test.js` (installer syntax/order, env key preservation,
   web-search transport, Caddy manifest, matrix fallback).
 - `install.sh` — live and idempotent: existing checkout detected, local changes
@@ -241,6 +258,29 @@ report=data/round4-verification.json
   28/28 tools PASS (0 fail, 0 NOT_TESTED), MCP tools 28, UDS 200.
 - Admin UI — inline script parses clean (67,479 bytes); page loads with 0 console
   errors; `/api/config/mcp`, web-search and MCP gap banners present.
+
+### 5.1 Remote provider + agent tool-call verification (2026-11-03)
+
+```
+node scripts/verify-remote-agents.mjs
+exit=0
+REMOTE_AGENTS_OK providers=3 agents=12 tool_calls=12 tool_loop=ok models=loaded placeholder_recovery=ok
+report=data/remote-agents-verification.json
+provider gemini model=gemini-3.5-flash-lite catalog=50 chat=ok tool_call=runtime_echo latency_ms=1221
+provider groq model=openai/gpt-oss-20b catalog=11 chat=ok tool_call=runtime_echo latency_ms=398
+provider ollama-cloud-openai model=gpt-oss:20b catalog=25 chat=ok tool_call=runtime_echo latency_ms=942
+agents provider=gemini model=gemini-3.5-flash-lite tool_calls=code-guru,bug-hunter,security-hero,perf-wizard,doc-king,qa-tyrant,planner,researcher,integrator,customer-experience-specialist,ecommerce-operations-analyst,team-heart
+tool_loop provider=gemini rounds=2 evidence=1 latency_ms=2316
+placeholder_recovery model=gemini-2.5-flash latency_ms=1584
+```
+
+- Every provider call above went to the real upstream with the key from `.env`;
+  no fixture stood in for a provider. Agent mappings were restored by the script.
+- Placeholder recovery wiped Gemini's stored default/catalog, then let the
+  unmodified Test path discover `gemini-2.5-flash`; the seed was restored after.
+- `tests/phase42-provider-config-reliability.test.js` — 11/11 pass, including
+  auto-discovery (catalog fetched once) and env reload (only provider-owned keys
+  change; `PORT` keeps its boot value).
 
 **Label discipline:** gate output `real_run`; Caddy/`/health`/`/search` probes
 `live`; matrix artifact `real_run`; full Ollama matrix `NOT_TESTED` (the live run
@@ -375,6 +415,7 @@ tail -n 50 logs/runtime.out
 
 | Commit | কী |
 | --- | --- |
+| `HEAD` (provider fix push) | remote provider catalog auto-discovery, `Sync from env` live reload, `toolChoice`, live 12-agent remote tool-call proof |
 | `HEAD` (round-4 push) | end-to-end installer, Caddy internal TLS, web-search MCP transport, live 12×28 matrix, docs refresh |
 | `596b1ff` | test: meta.context compiled assertion |
 | `86856f9` | agent test real context pipeline + compiled context responses |
@@ -386,8 +427,9 @@ tail -n 50 logs/runtime.out
 | `1a5fce8` | storage durability + consistent backups |
 | `8f42425` | nginx edge TLS + control-plane rate limit |
 
-এই ডকুমেন্টের সর্বশেষ update round-4 release-এ (installer + Caddy TLS +
-web-search MCP + live 12×28 matrix)।
+এই ডকুমেন্টের সর্বশেষ update provider-fix release-এ (remote catalog
+auto-discovery + `Sync from env` live reload + live 12-agent remote tool-call
+proof)। Round-4 installer/Caddy/matrix evidence আগের section-এ আছে।
 
 ---
 

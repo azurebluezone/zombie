@@ -6,7 +6,7 @@ import { assertSafeOutboundUrl } from '../src/network/outbound-policy.js';
 import { ProviderRegistry } from '../src/providers/registry.js';
 import { GeminiProvider } from '../src/providers/adapters/gemini.js';
 import { SqliteStore } from '../src/storage/sqlite-store.js';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -79,6 +79,57 @@ test('phase42 Ollama model refresh works against an actual local HTTP endpoint w
   } finally {
     store?.close();
     await new Promise(resolve=>server.close(resolve));
+    await rm(dir,{recursive:true,force:true});
+  }
+});
+
+test('phase42 a placeholder default discovers the real catalog before the probe', async () => {
+  let hits = 0;
+  const server=http.createServer((req,res)=>{
+    hits += 1;
+    if (req.url === '/v1/models') {
+      res.writeHead(200,{'content-type':'application/json'});
+      res.end(JSON.stringify({object:'list',data:[{id:'discovered-chat'},{id:'discovered-chat-2'}]}));
+      return;
+    }
+    res.writeHead(404); res.end('{}');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const dir=await mkdtemp(path.join(os.tmpdir(),'zc42-discover-'));
+  let store;
+  try {
+    store=new SqliteStore(path.join(dir,'runtime.sqlite')); await store.init();
+    const port=server.address().port;
+    const config={providerApiKeys:{},providerNetworkPolicy:{allowPlaintextHttp:true,allowPrivateNetwork:true,allowPrivateHosts:['127.0.0.1'],allowHosts:[]}};
+    const registry=new ProviderRegistry(store,config);
+    await registry.register({id:'placeholder',driver:'openai-compatible',protocol:'openai-compatible',baseUrl:`http://127.0.0.1:${port}/v1`,enabled:true,defaultModel:'REPLACE_WITH_SUPPORTED_MODEL',models:[],capabilities:['chat-completions','streaming','model-catalog'],priority:2});
+    await assert.rejects(() => registry.resolveModel('placeholder'), /provider_model_not_configured/);
+    assert.equal(await registry.resolveModelOrDiscover('placeholder'), 'discovered-chat');
+    const stored=(await registry.list()).find(p=>p.id==='placeholder');
+    assert.deepEqual(stored.models,['discovered-chat','discovered-chat-2']);
+    assert.equal(stored.defaultModel,'discovered-chat');
+    assert.equal(hits,1,'the catalog is fetched once, not on every resolve');
+  } finally {
+    store?.close();
+    await new Promise(resolve=>server.close(resolve));
+    await rm(dir,{recursive:true,force:true});
+  }
+});
+
+test('phase42 provider env reload reads the file instead of the boot-time process env', async () => {
+  const { reloadEnvKeys } = await import('../src/config/env-loader.js');
+  const dir=await mkdtemp(path.join(os.tmpdir(),'zc42-env-'));
+  const previous={config:process.env.PROVIDER_CONFIG_JSON,key:process.env.PROVIDER_KEY_RELOAD_TEST,port:process.env.PORT};
+  try {
+    await writeFile(path.join(dir,'.env'),'PROVIDER_CONFIG_JSON=[{"id":"fresh"}]\nPROVIDER_KEY_RELOAD_TEST=fresh-key\nPORT=1234\n','utf8');
+    const result=reloadEnvKeys({keys:['PROVIDER_CONFIG_JSON'],prefixes:['PROVIDER_KEY_'],cwd:dir});
+    assert.deepEqual(result.updated.sort(),['PROVIDER_CONFIG_JSON','PROVIDER_KEY_RELOAD_TEST']);
+    assert.equal(process.env.PROVIDER_KEY_RELOAD_TEST,'fresh-key');
+    assert.equal(process.env.PORT,previous.port,'non-provider keys keep the boot value');
+  } finally {
+    for (const [name,value] of [['PROVIDER_CONFIG_JSON',previous.config],['PROVIDER_KEY_RELOAD_TEST',previous.key],['PORT',previous.port]]) {
+      if (value === undefined) delete process.env[name]; else process.env[name]=value;
+    }
     await rm(dir,{recursive:true,force:true});
   }
 });

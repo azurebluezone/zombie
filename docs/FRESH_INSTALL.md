@@ -224,6 +224,13 @@ Provider keys are looked up as `PROVIDER_KEY_<PROVIDER_ID>` with `_` normalised 
 `driver` is `ollama` may fall back to `OLLAMA_API_KEY`; an explicit
 `PROVIDER_KEY_*` always wins.
 
+An enabled provider may keep `REPLACE_WITH_...` as its seeded default; the first
+**Test** discovers the vendor catalog and stores a real default. **Sync from env**
+re-reads `PROVIDER_CONFIG_JSON` and `PROVIDER_KEY_*` from disk, so editing `.env`
+does not require a restart. A provider whose free plan excludes the discovered
+default (for example Ollama Cloud `glm-5.2`) still fails the probe with
+`provider_http_error` — pin a model the plan includes, such as `gpt-oss:20b`.
+
 ---
 
 ## 6. Start, stop, restart

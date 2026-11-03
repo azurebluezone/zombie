@@ -35,7 +35,8 @@ try {
   fail(1, 'round4_gate_failed', `${error.stdout ?? ''}\n${error.stderr ?? ''}\n${error.message}`);
 }
 if (!gate.includes('ROUND4_OK')) fail(1, 'round4_gate_not_ok', gate);
-if (!/\btests=450\b/.test(gate)) fail(1, 'round4_gate_tests_not_450', gate);
+const gateTests = Number(gate.match(/\btests=(\d+)\b/)?.[1] ?? 0);
+if (!Number.isFinite(gateTests) || gateTests < 452) fail(1, 'round4_gate_tests_below_baseline', gate);
 
 const docs = {
   status: readFileSync(path.join(ROOT, 'docs/PROJECT_STATUS.md'), 'utf8'),
@@ -44,9 +45,10 @@ const docs = {
 };
 const missing = [];
 if (!/round 4/i.test(docs.status)) missing.push('PROJECT_STATUS round-4 marker');
-if (!docs.status.includes('450')) missing.push('PROJECT_STATUS 450');
-if (!docs.readme.includes('450 tests')) missing.push('README 450 tests');
+if (!docs.status.includes('452')) missing.push('PROJECT_STATUS 452');
+if (!docs.readme.includes('452 tests')) missing.push('README 452 tests');
 if (!/round 4/i.test(docs.changelog)) missing.push('CHANGELOG round-4 marker');
+if (!docs.changelog.includes('452')) missing.push('CHANGELOG 452');
 if (missing.length) fail(2, 'docs_stale', missing.join('\n'));
 
 try {
@@ -61,4 +63,4 @@ if (head !== remote) fail(4, 'remote_not_at_local_head', `local=${head}\nremote=
 const dirty = run('git', ['status', '--porcelain']);
 if (dirty) fail(5, 'worktree_dirty', dirty);
 
-console.log(`RELEASE_OK head=${head.slice(0, 7)} remote=origin/main clean=1 gate=ROUND4_OK tests=450 docs=round4`);
+console.log(`RELEASE_OK head=${head.slice(0, 7)} remote=origin/main clean=1 gate=ROUND4_OK tests=${gateTests} docs=provider-fix`);

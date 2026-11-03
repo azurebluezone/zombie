@@ -27,6 +27,23 @@ function parseEnv(text) {
   return values;
 }
 
+// Re-read only the keys an admin action owns. A full reload would also replace
+// PORT/HOST and other process-level overrides in a running server; the provider
+// console, by contrast, promises to pick up a provider edit without a restart.
+export function reloadEnvKeys({keys = [], prefixes = [], cwd = PROJECT_ROOT, file = process.env.ENV_FILE || '.env'} = {}) {
+  const filePath = path.resolve(cwd, file);
+  if (!existsSync(filePath)) return {loaded:false, path:filePath, updated:[]};
+  const values = parseEnv(readFileSync(filePath, 'utf8'));
+  const wanted = new Set(keys);
+  const updated = [];
+  for (const [key, value] of Object.entries(values)) {
+    if (!wanted.has(key) && !prefixes.some(prefix => key.startsWith(prefix))) continue;
+    process.env[key] = value;
+    updated.push(key);
+  }
+  return {loaded:true, path:filePath, updated};
+}
+
 export function loadEnvFile({cwd = PROJECT_ROOT, file = process.env.ENV_FILE || '.env', override = false} = {}) {
   if (process.env.ENV_LOADER_ENABLED === 'false') return {loaded:false, path:null, keys:[], skipped:'disabled'};
   const filePath = path.resolve(cwd, file);

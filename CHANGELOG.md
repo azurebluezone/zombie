@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — remote provider catalogs and agent tool calls (2026-11-03)
+- Fixed the console's first **Test** dead-ending with `provider_model_not_configured`: `ProviderRegistry.resolveModelOrDiscover()` now refreshes the vendor catalog once when the stored default is still `REPLACE_WITH_...`, then resolves the discovered model. The admin provider Test route uses it, so enabling a provider no longer requires a separate refresh click.
+- Fixed **Sync from env** re-running the boot-time seed: `reloadEnvKeys()` re-reads only `PROVIDER_CONFIG_JSON` and `PROVIDER_KEY_*` from the `.env` file, and `reloadProviderEnv()` rebuilds `config.providerApiKeys`; process-level values such as `PORT` keep their boot value. `POST /v1/admin/providers/sync-env` now uses the fresh seed.
+- Added `toolChoice` (`auto` | `required` | `none`) to `POST /v1/admin/agents/:id/test`, so a tool-call capability check is deterministic instead of depending on the model's willingness.
+- Seeded the remote providers in `.env` with real models: Gemini `gemini-3.5-flash-lite`, Groq `openai/gpt-oss-20b`, Ollama Cloud OpenAI/native `gpt-oss:20b` (Ollama Cloud's discovered default `glm-5.2` is paid-plan only, upstream HTTP 402).
+- Added `scripts/verify-remote-agents.mjs`: live catalog + chat probes on Gemini/Groq/Ollama Cloud OpenAI, a tool-call probe per provider, all 12 agents through a remote provider, one full `/v1/chat/completions` tool loop, and a placeholder-recovery check. It restores agent mappings and writes `data/remote-agents-verification.json`.
+- Live result: `REMOTE_AGENTS_OK providers=3 agents=12 tool_calls=12 tool_loop=ok models=loaded placeholder_recovery=ok`; catalogs 50/11/25, tool loop completed in 2 rounds with 1 evidence item, placeholder recovery used `gemini-2.5-flash`.
+- Added `tests/phase42-provider-config-reliability.test.js` cases for auto-discovery and env reload; the file now has 11 passing cases.
+- Regression: **452 tests, 452 pass, 0 fail, 0 skipped, exit 0**.
+- Boundaries: Linux/Ubuntu only; Windows/macOS `NOT_TESTED`; the full Ollama matrix and admin UI connected-state remain `NOT_TESTED`; MCP `2026-07-28` stateless revision remains `spec_gap`.
+
 ## Unreleased — round 4: end-to-end installer, Caddy TLS, web-search MCP, live matrix (2026-11-03)
 - Added `install.sh`: detects an existing checkout or clones one, fetch + ff-only merge with local changes preserved, Node 24 (checksum-verified user-level download when missing), `.env` from the Ollama URL through `scripts/install-env.mjs` with `PROVIDER_KEY_*` preserved, Caddy internal TLS, build-log purge, fresh build, start, `/health`, external MCP discovery, real `/search`, then `INSTALL_OK`.
 - Added `deploy/caddy/Caddyfile.runtime`: internal TLS on `https://localhost:9443` (runtime) and `https://localhost:9444` (admin UI); verified with Caddy's local CA, not `-k`.

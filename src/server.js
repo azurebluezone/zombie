@@ -1,7 +1,7 @@
 import { mkdir, readFile, open, realpath, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { config } from './config/env.js';
+import { config, reloadProviderEnv } from './config/env.js';
 import { PROJECT_ROOT, fromRoot } from './runtime/paths.js';
 import { createStore } from './storage/storage.js';
 import { createApiKey, hashSecret, authenticateApiKey, isAdminApplication, roleOf } from './auth/application-auth.js';
@@ -74,7 +74,7 @@ import { createExecutionContext } from './execution/context.js';
 import { ToolPolicy } from './tools/policy.js';
 import { sanitizeSessionMetadata } from './session/metadata.js';
 import { ExecutionLifecycle } from './execution/lifecycle.js';
-import { bootstrapProviders } from './startup/provider-bootstrap.js';
+import { bootstrapProviders, parseProviderBootConfig } from './startup/provider-bootstrap.js';
 import { warnAboutAllowlistExclusions } from './startup/allowlist-guard.js';
 import { buildBoundedContext } from './context/context-budget.js';
 import { compileContext } from './context/compiler.js';
@@ -1205,8 +1205,13 @@ const requestHandler = async (req,res) => {
     // env change.
     if (req.method==='POST' && url.pathname==='/v1/admin/providers/sync-env') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
-      const result=await bootstrapProviders({registry:providers,config,logger});
-      return send(res,200,{ok:true,...result});
+      // The button is documented as "re-read PROVIDER_CONFIG_JSON / PROVIDER_KEY_*".
+      // process.env was frozen at boot, so the old code re-ran bootstrap with the
+      // seed the operator had already replaced. Reload the provider-owned keys first.
+      const envReload=reloadProviderEnv();
+      const bootConfig=parseProviderBootConfig(process.env.PROVIDER_CONFIG_JSON ?? '');
+      const result=await bootstrapProviders({registry:providers,config,logger,bootConfig});
+      return send(res,200,{ok:true,envReload:{loaded:envReload.loaded,updated:envReload.updated},...result});
     }
     if (req.method==='GET' && url.pathname==='/v1/admin/masking-models') {
       if (!await adminOk(req)) return send(res,401,{error:'admin_unauthorized'});
@@ -1311,6 +1316,9 @@ const requestHandler = async (req,res) => {
       const agentId=decodeURIComponent(url.pathname.split('/')[4]);
       const input=await body(req,config.maxBodyBytes);
       const mode=input?.mode==='tool'?'tool':'chat';
+      // A capability check should not depend on a model choosing to cooperate.
+      // `required` makes the console's tool test deterministic; `auto` stays the default.
+      const toolChoice=['auto','required','none'].includes(input?.toolChoice)?input.toolChoice:'auto';
       const prompt=String(input?.prompt ?? (mode==='tool'?'Call a tool that can echo a value, then report the result.':'Reply with the single word: ok')).slice(0,4000);
       const mapping=(await store.read('agentModelMappings',[])).find(m=>m.agentId===agentId);
       if (!mapping?.model) return send(res,400,{error:'agent_model_not_mapped',agentId,message:'Assign an upstream model to this agent first (PUT /v1/admin/agent-model-mappings/{agentId}).'});
@@ -1394,13 +1402,13 @@ const requestHandler = async (req,res) => {
       try {
         const provider=await providers.resolve(providerId);
         const model=await providers.resolveModel(providerId,candidates[0].model);
-        const raw=await provider.chatCompletions({model,messages,stream:false,...(tools.length?{tools,tool_choice:'auto'}:{})});
+        const raw=await provider.chatCompletions({model,messages,stream:false,...(tools.length?{tools,tool_choice:toolChoice}:{})});
         const canonicalInput=typeof provider.toCanonical==='function'?provider.toCanonical(raw):raw;
         const canonical=normalizer.normalize(canonicalInput,{model,providerId:provider.id});
         const message=canonical?.choices?.[0]?.message??{};
         const toolCalls=message.tool_calls??raw?.choices?.[0]?.message?.tool_calls??null;
         return send(res,200,{
-          ok:true,agentId,mode,providerId,model,publicModel:`zombiecoder/${agentId}`,
+          ok:true,agentId,mode,toolChoice,providerId,model,publicModel:`zombiecoder/${agentId}`,
           latencyMs:Date.now()-startedAt,content:message.content??null,
           toolCalls:Array.isArray(toolCalls)&&toolCalls.length?toolCalls:null,
           toolCallCount:Array.isArray(toolCalls)?toolCalls.length:0,
@@ -1567,7 +1575,7 @@ const requestHandler = async (req,res) => {
       const checkedAt=new Date().toISOString();
       try {
         const provider=await providers.resolve(providerId);
-        const model=await providers.resolveModel(providerId, requestedModel);
+        const model=await providers.resolveModelOrDiscover(providerId, requestedModel);
         const raw=await provider.chatCompletions({model,messages,stream:false});
         const canonicalInput=typeof provider.toCanonical==='function' ? provider.toCanonical(raw) : raw;
         const canonical=normalizer.normalize(canonicalInput,{model,providerId:provider.id});

@@ -99,7 +99,7 @@ tools/common/            # the runnable tool implementations (26 tools in 5 modu
 public/
   admin/index.html       # the admin SPA (self-contained)
   chat.html              # the browser chat client (self-contained)
-tests/                   # 450 tests, run with node --test
+tests/                   # 452 tests, run with node --test
 docs/OBSERVABILITY.md    # logging, diagnostics, privacy
 scripts/build-runtime.mjs# build a self-contained runtime directory
 ```
@@ -367,7 +367,12 @@ when no provider-specific key is set — an explicit `PROVIDER_KEY_*` always win
 - **Circuit breaker** — repeated upstream failures open a circuit with a reset timeout and
   a half-open probe, so one dead provider cannot stall every request.
 - **Model catalog sync** — model lists are fetched from the upstream and stored, so the
-  catalog reflects what the provider actually serves.
+  catalog reflects what the provider actually serves. An enabled provider whose seed still
+  carries a `REPLACE_WITH_...` default discovers its catalog on the first **Test** instead
+  of failing with `provider_model_not_configured`; the discovered default is persisted.
+- **Sync from env** — re-reads `PROVIDER_CONFIG_JSON` and `PROVIDER_KEY_*` from the
+  `.env` file on disk and re-runs the provider bootstrap, so a provider edit does not
+  need a runtime restart. Other process-level values keep their boot value.
 - **Masking** — a client only ever sees a public ZombieCoder model identity. The real
   provider and model are resolved inside the runtime, kept in the log, and masked in every
   public projection. Per-provider `modelAliases` let you map a public model name onto a
@@ -815,7 +820,7 @@ cp .env.example instances/zc-10001/.env
 npm test           # node --test
 ```
 
-Current baseline: **450 tests, 450 passing, 0 failing, 0 skipped.** The old `php -l`
+Current baseline: **452 tests, 452 passing, 0 failing, 0 skipped.** The old `php -l`
 skip is gone from this environment; where PHP is absent the check still reports
 `NOT_TESTED` with the reason. Set `ZC_REQUIRE_PHP=1` where PHP is expected and its
 absence becomes a failure instead of a skip.

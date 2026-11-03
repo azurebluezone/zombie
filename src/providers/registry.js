@@ -188,4 +188,18 @@ export class ProviderRegistry {
     if (!refreshed.defaultModel) throw new Error('provider_model_required');
     return requireConfiguredModel(refreshed.defaultModel);
   }
+
+  // The console's first action after enabling a provider is "Test". A seed that
+  // still carries REPLACE_WITH_... has a model catalog nobody has discovered yet,
+  // and resolveModel() can only name that gap. Discover it here so the probe works
+  // without a second, easy-to-miss refresh click.
+  async resolveModelOrDiscover(id, requestedModel = '') {
+    try {
+      return await this.resolveModel(id, requestedModel);
+    } catch (error) {
+      if (String(error?.message ?? '') !== 'provider_model_not_configured') throw error;
+      await this.refreshModels(id);
+      return this.resolveModel(id, requestedModel);
+    }
+  }
 }

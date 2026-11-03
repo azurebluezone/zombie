@@ -1,4 +1,4 @@
-import { loadEnvFile } from './env-loader.js';
+import { loadEnvFile, reloadEnvKeys } from './env-loader.js';
 import { resolveRuntimePath } from '../runtime/paths.js';
 
 export const envLoadResult = loadEnvFile();
@@ -90,6 +90,15 @@ export function resolveProviderApiKeys(source = process.env) {
     if (!keys[provider.id]) keys[provider.id] = ollamaKey;
   }
   return keys;
+}
+
+// The admin console's "Sync from env" promises to pick up an edited provider
+// seed without restarting. Re-read only the provider-owned keys, then rebuild the
+// key map the adapters read; everything else in `config` stays as it booted.
+export function reloadProviderEnv() {
+  const reloaded = reloadEnvKeys({ keys: ['PROVIDER_CONFIG_JSON'], prefixes: ['PROVIDER_KEY_'] });
+  if (reloaded.loaded) config.providerApiKeys = resolveProviderApiKeys();
+  return reloaded;
 }
 
 export const config = {
