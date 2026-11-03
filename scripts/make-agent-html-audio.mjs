@@ -54,6 +54,8 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function run(command, args, timeoutMs = 120000, { allowFailure = false } = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
   if (result.error) throw new Error(`${command}_spawn_failed ${result.error.message}`);
@@ -195,24 +197,40 @@ function mergeSrt(chunks, totalDurationS) {
   return { srt, cues };
 }
 
-function generateChunk(text, index, tempDir) {
+async function generateChunk(text, index, tempDir) {
   const stem = `chunk-${String(index + 1).padStart(2, '0')}`;
   const textPath = path.join(tempDir, `${stem}.txt`);
   const mp3Path = path.join(tempDir, `${stem}.mp3`);
   const srtPath = path.join(tempDir, `${stem}.srt`);
   writeFileSync(textPath, `${text}\n`, 'utf8');
-  run(EDGE_TTS, [
-    '-f', textPath,
-    '-v', VOICE,
-    '--rate', RATE,
-    '--volume', '+0%',
-    '--pitch', '+0Hz',
-    '--write-media', mp3Path,
-    '--write-subtitles', srtPath,
-    '--no-progress'
-  ], 180000);
-  if (!existsSync(mp3Path) || statSync(mp3Path).size === 0) throw new Error(`tts_media_missing ${stem}`);
-  if (!existsSync(srtPath) || statSync(srtPath).size === 0) throw new Error(`tts_subtitles_missing ${stem}`);
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      run(EDGE_TTS, [
+        '-f', textPath,
+        '-v', VOICE,
+        '--rate', RATE,
+        '--volume', '+0%',
+        '--pitch', '+0Hz',
+        '--write-media', mp3Path,
+        '--write-subtitles', srtPath,
+        '--no-progress'
+      ], 180000);
+      if (!existsSync(mp3Path) || statSync(mp3Path).size === 0) throw new Error(`tts_media_missing ${stem}`);
+      if (!existsSync(srtPath) || statSync(srtPath).size === 0) throw new Error(`tts_subtitles_missing ${stem}`);
+      lastError = null;
+      break;
+    } catch (error) {
+      lastError = error;
+      rmSync(mp3Path, { force: true });
+      rmSync(srtPath, { force: true });
+      if (attempt < 3) {
+        console.log(`tts_retry chunk=${index + 1} attempt=${attempt} error=${String(error?.message ?? error).slice(0, 120)}`);
+        await sleep(2000 * attempt);
+      }
+    }
+  }
+  if (lastError) throw lastError;
   const audio = probeAudio(mp3Path);
   return {
     index,
@@ -308,13 +326,18 @@ async function main() {
   const sections = buildSections(log, meta);
   const chunks = sections.flatMap((section) => splitLongSection(section, 700));
   console.log(`audio_plan sections=${sections.length} chunks=${chunks.length} chars=${chunks.reduce((sum, chunk) => sum + chunk.length, 0)}`);
+  if (process.env.AGENT_HTML_AUDIO_DRY_RUN === '1') {
+    chunks.forEach((chunk, index) => console.log(`--- chunk ${index + 1} (${chunk.length}) ---\n${chunk}`));
+    return;
+  }
 
   const tempDir = mkdtempSync(path.join('/tmp/opencode', 'zc-agent-audio-'));
   const chunkResults = [];
   try {
     for (let index = 0; index < chunks.length; index += 1) {
       console.log(`tts chunk=${index + 1}/${chunks.length} chars=${chunks[index].length}`);
-      chunkResults.push(generateChunk(chunks[index], index, tempDir));
+      chunkResults.push(await generateChunk(chunks[index], index, tempDir));
+      if (index < chunks.length - 1) await sleep(400);
     }
 
     concatChunks(chunkResults, tempDir, OUT_MP3);
